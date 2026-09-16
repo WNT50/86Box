@@ -56,6 +56,7 @@
 #define CONFIG_SPINNER      (4 | CONFIG_TYPE_INT)      /* config_get_int() */
 #define CONFIG_MIDI_IN      (5 | CONFIG_TYPE_INT)      /* config_get_int() */
 #define CONFIG_MEMORY       (6 | CONFIG_TYPE_INT)      /* config_get_int() */
+#define CONFIG_HEXSPIN      (7 | CONFIG_TYPE_INT)      /* config_get_int() */
 
 #define CONFIG_STRING       (0 | CONFIG_TYPE_STRING)     /* config_get_string() */
 #define CONFIG_FNAME        (1 | CONFIG_TYPE_STRING)     /* config_get_string() */
@@ -138,9 +139,9 @@ typedef struct device_config_selection_t {
 } device_config_selection_t;
 
 typedef struct device_config_spinner_t {
-    int16_t min;
-    int16_t max;
-    int16_t step;
+    int32_t min;
+    int32_t max;
+    int32_t step;
 } device_config_spinner_t;
 
 typedef struct device_config_bios_t {
