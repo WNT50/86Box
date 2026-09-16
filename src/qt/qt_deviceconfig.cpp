@@ -123,6 +123,17 @@ enumerateSerialDevices()
     return serialDevices;
 }
 
+class HexSpinBox : public QSpinBox {
+protected:
+    QString textFromValue(int value) const override
+    {
+        const int digits = QString::number(maximum(), 16).length();
+        // Qt neither pads the value nor upper-cases it, so do both here; the width
+        // follows the configured maximum so every CONFIG_HEXSPIN entry gets its digits.
+        return QString("%1").arg(value, digits, 16, QLatin1Char('0')).toUpper();
+    }
+};
+
 QComboBox *cbox_memory         = nullptr;
 QComboBox *cbox_memory_2       = nullptr;
 
@@ -330,6 +341,19 @@ DeviceConfig::ProcessConfig(void *dc, const void *c, const bool is_dep)
             case CONFIG_SPINNER:
                 {
                     auto *spinBox = new QSpinBox();
+                    spinBox->setObjectName(config->name);
+                    spinBox->setMaximum(config->spinner.max);
+                    spinBox->setMinimum(config->spinner.min);
+                    if (config->spinner.step > 0)
+                        spinBox->setSingleStep(config->spinner.step);
+                    spinBox->setValue(value);
+                    this->ui->formLayout->addRow(tr(config->description).append(colon), spinBox);
+                    break;
+                }
+            case CONFIG_HEXSPIN:
+                {
+                    auto *spinBox = new HexSpinBox();
+                    spinBox->setDisplayIntegerBase(16);
                     spinBox->setObjectName(config->name);
                     spinBox->setMaximum(config->spinner.max);
                     spinBox->setMinimum(config->spinner.min);
@@ -617,6 +641,7 @@ DeviceConfig::ConfigureDevice(const _device_ *device, int instance, Settings *se
                         break;
                     }
                 case CONFIG_SPINNER:
+                case CONFIG_HEXSPIN:
                     {
                         auto *spinBox = dc.findChild<QSpinBox *>(config->name);
                         if (value != spinBox->value()) {
