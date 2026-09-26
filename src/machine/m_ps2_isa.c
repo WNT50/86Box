@@ -6,12 +6,17 @@
  *
  *          This file is part of the 86Box distribution.
  *
- *          Implementation of PS/2 series Mouse devices.
+ *          Implementation of the IBM PS/2 ISA-bus machines: Model 25
+ *          and Model 30 (8086), the Model 30-286 and the Model 25 SX
+ *          (8525), including their planar setup ports and the memory
+ *          module reporting.
  *
  * Authors: Josh Rodd, <josh@rodd.us>
+ *          WNT50
  *
  *          Copyright (C) 2026 Simplebooks Foundation
  *          Copyright (C) 2026 Josh Rodd
+ *          Copyright (C) 2026 WNT50
  */
 
 #include <stdio.h>
@@ -68,17 +73,22 @@ typedef struct {
 } ps2_m25_t;
 
 typedef struct {
-    int model;
-    int cpu_type;
-
     uint8_t ps2_91,
         ps2_92,
         ps2_94,
+        ps2_100,
+        ps2_101,
         ps2_102,
         ps2_103,
         ps2_104,
-        ps2_105,
-        ps2_190;
+        ps2_105;
+
+    /* 0E0h/0E1h index-data pair: 0E0h holds the index, 0E1h the data for it. */
+    /* 0E8h/0E9h are read-only and report the memory module slot size codes. */
+    uint8_t ps2_e0_regs[0x20];
+    uint8_t ps2_e0;
+    uint8_t ps2_e8;
+    uint8_t ps2_e9;
 
     serial_t *uart;
     lpt_t    *lpt;
@@ -306,8 +316,110 @@ ps2_m30_a1_read(uint16_t port, void *priv)
 
 #define PS2_SETUP_IO 0x80
 
+static uint8_t
+ps2_286_read(uint16_t port, void *priv)
+{
+    ps2_isa_t *ps2  = (ps2_isa_t *) priv;
+    uint8_t    temp = 0xff;
+
+    switch (port) {
+        case 0x0091:
+            temp        = ps2->ps2_91;
+            ps2->ps2_91 = 0;
+            break;
+
+        case 0x0094:
+            temp = ps2->ps2_94;
+            break;
+
+        case 0x0102:
+            temp = ps2->ps2_102 | 0x08;
+            break;
+
+        case 0x0103:
+            temp = ps2->ps2_103;
+            break;
+
+        case 0x0104:
+            temp = ps2->ps2_104;
+            break;
+
+        case 0x0105:
+            temp = ps2->ps2_105;
+            break;
+
+        default:
+            break;
+    }
+
+    return temp;
+}
+
+static uint8_t
+ps2_386_read(uint16_t port, void *priv)
+{
+    ps2_isa_t *ps2  = (ps2_isa_t *) priv;
+    uint8_t    temp = 0xff;
+
+    switch (port) {
+        case 0x0091:
+            temp        = ps2->ps2_91;
+            ps2->ps2_91 = 0;
+            break;
+
+        case 0x0094:
+            temp = ps2->ps2_94;
+            break;
+
+        case 0x00e0:
+            temp = ps2->ps2_e0;
+            break;
+
+        case 0x00e1:
+            temp = ps2->ps2_e0_regs[ps2->ps2_e0 & 0x1f];
+            break;
+
+        case 0x00e8:
+            temp = ps2->ps2_e8;
+            break;
+
+        case 0x00e9:
+            temp = ps2->ps2_e9;
+            break;
+
+        case 0x0100:
+            temp = ps2->ps2_100;
+            break;
+
+        case 0x0101:
+            temp = ps2->ps2_101;
+            break;
+
+        case 0x0102:
+            temp = ps2->ps2_102;
+            break;
+
+        case 0x0103:
+            temp = ps2->ps2_103;
+            break;
+
+        case 0x0104:
+            temp = ps2->ps2_104;
+            break;
+
+        case 0x0105:
+            temp = ps2->ps2_105;
+            break;
+
+        default:
+            break;
+    }
+
+    return temp;
+}
+
 static void
-ps2_write(uint16_t port, uint8_t val, void *priv)
+ps2_286_write(uint16_t port, uint8_t val, void *priv)
 {
     ps2_isa_t *ps2 = (ps2_isa_t *) priv;
 
@@ -361,8 +473,72 @@ ps2_write(uint16_t port, uint8_t val, void *priv)
                 ps2->ps2_105 = val;
             break;
 
-        case 0x0190:
-            ps2->ps2_190 = val;
+        default:
+            break;
+    }
+}
+
+static void
+ps2_386_write(uint16_t port, uint8_t val, void *priv)
+{
+    ps2_isa_t *ps2 = (ps2_isa_t *) priv;
+
+    switch (port) {
+        case 0x0094:
+            ps2->ps2_94 = val;
+            break;
+
+        case 0x00e0:
+            ps2->ps2_e0 = val;
+            break;
+
+        case 0x00e1:
+            ps2->ps2_e0_regs[ps2->ps2_e0 & 0x1f] = val;
+            break;
+
+        case 0x0102:
+            if (!(ps2->ps2_94 & PS2_SETUP_IO)) {
+                lpt_port_remove(ps2->lpt);
+                serial_remove(ps2->uart);
+                if (val & 0x04) {
+                    if (val & 0x08)
+                        serial_setup(ps2->uart, COM1_ADDR, COM1_IRQ);
+                    else
+                        serial_setup(ps2->uart, COM2_ADDR, COM2_IRQ);
+                }
+                if (val & 0x10) {
+                    switch ((val >> 5) & 3) {
+                        case 0:
+                            lpt_port_setup(ps2->lpt, LPT_MDA_ADDR);
+                            break;
+                        case 1:
+                            lpt_port_setup(ps2->lpt, LPT1_ADDR);
+                            break;
+                        case 2:
+                            lpt_port_setup(ps2->lpt, LPT2_ADDR);
+                            break;
+
+                        default:
+                            break;
+                    }
+                }
+                ps2->ps2_102 = val;
+            }
+            break;
+
+        case 0x0103:
+            if (!(ps2->ps2_94 & PS2_SETUP_IO))
+                ps2->ps2_103 = val;
+            break;
+
+        case 0x0104:
+            if (!(ps2->ps2_94 & PS2_SETUP_IO))
+                ps2->ps2_104 = val;
+            break;
+
+        case 0x0105:
+            if (!(ps2->ps2_94 & PS2_SETUP_IO))
+                ps2->ps2_105 = val;
             break;
 
         default:
@@ -370,47 +546,157 @@ ps2_write(uint16_t port, uint8_t val, void *priv)
     }
 }
 
-static uint8_t
-ps2_read(uint16_t port, void *priv)
+uint8_t
+machine_ps2_isa_p1_handler(void)
 {
-    ps2_isa_t *ps2  = (ps2_isa_t *) priv;
-    uint8_t    temp = 0xff;
+    uint8_t mem_p1;
 
-    switch (port) {
-        case 0x0091:
-            temp        = ps2->ps2_91;
-            ps2->ps2_91 = 0;
+    switch (mem_size / 1024) {
+        case 0: /*256Kx2*/
+            mem_p1 = 0xb0;
             break;
-
-        case 0x0094:
-            temp = ps2->ps2_94;
+        case 1: /*256Kx4*/
+            mem_p1 = 0xa0;
             break;
-
-        case 0x0102:
-            temp = ps2->ps2_102 | 0x08;
+        case 2: /*1Mx2*/
+        case 3:
+            mem_p1 = 0x90;
             break;
-
-        case 0x0103:
-            temp = ps2->ps2_103;
-            break;
-
-        case 0x0104:
-            temp = ps2->ps2_104;
-            break;
-
-        case 0x0105:
-            temp = ps2->ps2_105;
-            break;
-
-        case 0x0190:
-            temp = ps2->ps2_190;
-            break;
-
+        case 4: /*1Mx4*/
         default:
+            mem_p1 = 0x80;
             break;
     }
 
-    return temp;
+    return mem_p1;
+}
+
+static void
+ps2_286_setup(void)
+{
+    ps2_isa_t *ps2;
+    void      *priv;
+
+    ps2 = (ps2_isa_t *) calloc(1, sizeof(ps2_isa_t));
+
+    io_sethandler(0x0091, 1,
+                  ps2_286_read, NULL, NULL, ps2_286_write, NULL, NULL, ps2);
+    io_sethandler(0x0094, 1,
+                  ps2_286_read, NULL, NULL, ps2_286_write, NULL, NULL, ps2);
+    io_sethandler(0x0102, 4,
+                  ps2_286_read, NULL, NULL, ps2_286_write, NULL, NULL, ps2);
+
+    ps2->uart = device_add_inst(&ns16450_device, 1);
+
+    ps2->lpt = device_add_inst(&lpt_port_device, 1);
+    lpt_set_ext(ps2->lpt, 1);
+
+    lpt_port_remove(ps2->lpt);
+    lpt_port_setup(ps2->lpt, LPT_MDA_ADDR);
+
+    device_add(&port_92_device);
+
+    mem_remap_top(384);
+
+    device_add(&fdc_ps2_device);
+
+    /* Enable the builtin HDC. */
+    if (hdc_current[0] == HDC_INTERNAL) {
+        priv = device_add(&ps1_hdc_device);
+        ps1_hdc_inform(priv, &ps2->ps2_91);
+    }
+
+    if (gfxcard[0] == VID_INTERNAL)
+        device_add(&ps1vga_device);
+}
+
+/* The 8525 reports its three memory module slots through read-only ports so that
+ * the ROM can size the memory: 0E8h holds slots 1 and 2 in its low and high
+ * nibble, 0E9h holds slot 3 in its low nibble and the planar ID in its high one. */
+static void
+ps2_386sx_mem_modules(uint32_t kb, uint8_t *e8, uint8_t *e9)
+{
+    uint8_t code[3] = { 0x0f, 0x0f, 0x0f };
+
+    /* Modules only come in 4MB/2MB/1MB, so fill the slots largest first and
+       report the empty-slot code for whatever is left over. */
+    for (unsigned slot = 0; slot < 3; slot++) {
+        if (kb >= 4096) {
+            code[slot] = 0x04;
+            kb        -= 4096;
+        } else if (kb >= 2048) {
+            code[slot] = 0x05;
+            kb        -= 2048;
+        } else if (kb >= 1024) {
+            code[slot] = 0x06;
+            kb        -= 1024;
+        } else
+            break;
+    }
+
+    *e8 = (uint8_t) ((code[1] << 4) | code[0]);
+    *e9 = (uint8_t) (0xe0 | code[2]);
+}
+
+static void
+ps2_386_setup(void)
+{
+    ps2_isa_t *ps2;
+
+    ps2 = (ps2_isa_t *) calloc(1, sizeof(ps2_isa_t));
+
+    ps2_386sx_mem_modules((uint32_t) mem_size, &ps2->ps2_e8, &ps2->ps2_e9);
+
+    /* Read-only planar ID: the ROM compares it against 0FEh/0E8h. */
+    ps2->ps2_100 = 0xfe;
+    ps2->ps2_101 = 0xe8;
+
+    io_sethandler(0x0091, 1,
+                  ps2_386_read, NULL, NULL, ps2_386_write, NULL, NULL, ps2);
+    io_sethandler(0x0094, 1,
+                  ps2_386_read, NULL, NULL, ps2_386_write, NULL, NULL, ps2);
+    io_sethandler(0x00e0, 2,
+                  ps2_386_read, NULL, NULL, ps2_386_write, NULL, NULL, ps2);
+    io_sethandler(0x00e8, 2,
+                  ps2_386_read, NULL, NULL, ps2_386_write, NULL, NULL, ps2);
+    io_sethandler(0x0100, 6,
+                  ps2_386_read, NULL, NULL, ps2_386_write, NULL, NULL, ps2);
+
+    ps2->uart = device_add_inst(&ns16450_device, 1);
+
+    ps2->lpt = device_add_inst(&lpt_port_device, 1);
+    lpt_set_ext(ps2->lpt, 1);
+
+    lpt_port_remove(ps2->lpt);
+    lpt_port_setup(ps2->lpt, LPT_MDA_ADDR);
+
+    device_add(&port_92_device);
+
+    mem_remap_top(384);
+
+    device_add(&fdc_ps2_device);
+
+    /* Enable the builtin HDC. */
+    if (hdc_current[0] == HDC_INTERNAL)
+        device_add(&ide_isa_device);
+
+    if (gfxcard[0] == VID_INTERNAL)
+        device_add(&ibm_ps1_2121_device);
+}
+
+static void
+ps2_isa_common_init(const machine_t *model)
+{
+    machine_common_init(model);
+
+    refresh_at_enable = 1;
+    pit_devs[0].set_out_func(pit_devs[0].data, 1, pit_refresh_timer_at);
+
+    dma16_init();
+    pic2_init();
+
+    device_add_params(machine_get_kbc_device(machine), (void *) model->kbc_params);
+    device_add(&port_6x_ps2_device);
 }
 
 static const device_config_t ps2_m25_config[] = {
@@ -582,141 +868,6 @@ const device_t ibm7690_device = {
     .config        = ibm7690_config
 };
 
-static const device_config_t ps2_m30_286_config[] = {
-    // clang-format off
-    {
-        .name           = "bios",
-        .description    = "BIOS Version",
-        .type           = CONFIG_BIOS,
-        .default_string = "ibmps2_m30_286",
-        .default_int    = 0,
-        .file_filter    = NULL,
-        .spinner        = { 0 },
-        .selection      = { { 0 } },
-        .bios           = {
-            {
-                .name          = "IBM PS/2 BIOS - Revision 0 (08/25/88)",
-                .internal_name = "ibmps2_m30_286_rev0",
-                .bios_type     = BIOS_NORMAL,
-                .files_no      = 1,
-                .local         = 0,
-                .size          = 131072,
-                .files         = { "roms/machines/ibmps2_m30_286/27F4092.BIN", "" }
-            },
-            {
-                .name          = "IBM PS/2 BIOS - Revision 2 (06/28/89)",
-                .internal_name = "ibmps2_m30_286",
-                .bios_type     = BIOS_NORMAL,
-                .files_no      = 1,
-                .local         = 0,
-                .size          = 131072,
-                .files         = { "roms/machines/ibmps2_m30_286/33f5381a.bin", "" }
-            },
-            { .files_no = 0 }
-        }
-    },
-    { .name = "", .description = "", .type = CONFIG_END }
-    // clang-format on
-};
-
-const device_t ps2_m30_286_device = {
-    .name          = "IBM PS/2 model 30-286",
-    .internal_name = "ibmps2_m30_286",
-    .flags         = 0,
-    .local         = 0,
-    .init          = NULL,
-    .close         = NULL,
-    .reset         = NULL,
-    .available     = NULL,
-    .speed_changed = NULL,
-    .force_redraw  = NULL,
-    .config        = ps2_m30_286_config
-};
-
-
-static void
-ps2_isa_setup(int model, int cpu_type)
-{
-    ps2_isa_t *ps2;
-    void      *priv;
-
-    ps2           = (ps2_isa_t *) calloc(1, sizeof(ps2_isa_t));
-    ps2->model    = model;
-    ps2->cpu_type = cpu_type;
-
-    io_sethandler(0x0091, 1,
-                  ps2_read, NULL, NULL, ps2_write, NULL, NULL, ps2);
-    io_sethandler(0x0094, 1,
-                  ps2_read, NULL, NULL, ps2_write, NULL, NULL, ps2);
-    io_sethandler(0x0102, 4,
-                  ps2_read, NULL, NULL, ps2_write, NULL, NULL, ps2);
-    io_sethandler(0x0190, 1,
-                  ps2_read, NULL, NULL, ps2_write, NULL, NULL, ps2);
-
-    ps2->uart = device_add_inst(&ns16450_device, 1);
-
-    ps2->lpt = device_add_inst(&lpt_port_device, 1);
-    lpt_set_ext(ps2->lpt, 1);
-
-    lpt_port_remove(ps2->lpt);
-    lpt_port_setup(ps2->lpt, LPT_MDA_ADDR);
-
-    device_add(&port_92_device);
-
-    mem_remap_top(384);
-
-    device_add(&fdc_ps2_device);
-
-    /* Enable the builtin HDC. */
-    if (hdc_current[0] == HDC_INTERNAL) {
-        priv = device_add(&ps1_hdc_device);
-        ps1_hdc_inform(priv, &ps2->ps2_91);
-    }
-
-    if (gfxcard[0] == VID_INTERNAL)
-        device_add(&ps1vga_device);
-}
-
-static void
-ps2_isa_common_init(const machine_t *model)
-{
-    machine_common_init(model);
-
-    refresh_at_enable = 1;
-    pit_devs[0].set_out_func(pit_devs[0].data, 1, pit_refresh_timer_at);
-
-    dma16_init();
-    pic2_init();
-
-    device_add_params(machine_get_kbc_device(machine), (void *) model->kbc_params);
-    device_add(&port_6x_ps2_device);
-}
-
-uint8_t
-machine_ps2_isa_p1_handler(void)
-{
-    uint8_t mem_p1;
-
-    switch (mem_size / 1024) {
-        case 0: /*256Kx2*/
-            mem_p1 = 0xb0;
-            break;       
-        case 1: /*256Kx4*/
-            mem_p1 = 0xa0;
-            break;
-        case 2: /*1Mx2*/
-        case 3: 
-            mem_p1 = 0x90;
-            break;
-        case 4: /*1Mx4*/
-        default:
-            mem_p1 = 0x80;
-            break;
-    }
-
-    return mem_p1;
-}
-
 int
 machine_ps2_8086_init(const machine_t *model)
 {
@@ -840,6 +991,57 @@ machine_ps2_8086_init(const machine_t *model)
     return ret;
 }
 
+static const device_config_t ps2_m30_286_config[] = {
+    // clang-format off
+    {
+        .name           = "bios",
+        .description    = "BIOS Version",
+        .type           = CONFIG_BIOS,
+        .default_string = "ibmps2_m30_286",
+        .default_int    = 0,
+        .file_filter    = NULL,
+        .spinner        = { 0 },
+        .selection      = { { 0 } },
+        .bios           = {
+            {
+                .name          = "IBM PS/2 BIOS - Revision 0 (08/25/88)",
+                .internal_name = "ibmps2_m30_286_rev0",
+                .bios_type     = BIOS_NORMAL,
+                .files_no      = 1,
+                .local         = 0,
+                .size          = 131072,
+                .files         = { "roms/machines/ibmps2_m30_286/27F4092.BIN", "" }
+            },
+            {
+                .name          = "IBM PS/2 BIOS - Revision 2 (06/28/89)",
+                .internal_name = "ibmps2_m30_286",
+                .bios_type     = BIOS_NORMAL,
+                .files_no      = 1,
+                .local         = 0,
+                .size          = 131072,
+                .files         = { "roms/machines/ibmps2_m30_286/33f5381a.bin", "" }
+            },
+            { .files_no = 0 }
+        }
+    },
+    { .name = "", .description = "", .type = CONFIG_END }
+    // clang-format on
+};
+
+const device_t ps2_m30_286_device = {
+    .name          = "IBM PS/2 model 30-286",
+    .internal_name = "ibmps2_m30_286",
+    .flags         = 0,
+    .local         = 0,
+    .init          = NULL,
+    .close         = NULL,
+    .reset         = NULL,
+    .available     = NULL,
+    .speed_changed = NULL,
+    .force_redraw  = NULL,
+    .config        = ps2_m30_286_config
+};
+
 int
 machine_ps2_m30_286_init(const machine_t *model)
 {
@@ -857,7 +1059,25 @@ machine_ps2_m30_286_init(const machine_t *model)
 
     ps2_isa_common_init(model);
 
-    ps2_isa_setup(30, 286);
+    ps2_286_setup();
+
+    return ret;
+}
+
+int
+machine_ps2_m25_386sx_init(const machine_t *model)
+{
+    int ret;
+
+    ret = bios_load_linear("roms/machines/ibmps2_m25sx/87F4794.BIN",
+                           0x000e0000, 131072, 0);
+
+    if (bios_only || !ret)
+        return ret;
+
+    ps2_isa_common_init(model);
+
+    ps2_386_setup();
 
     return ret;
 }
