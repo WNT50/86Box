@@ -14,6 +14,9 @@
  *          Copyright 2023-2025 Miran Grca.
  *          Copyright 2023-2025 EngiNerd.
  */
+/* [AB] temporary: log the KBC exchange so the 3477-S ROS's
+   self-test handshake (0xAA -> 0x55) can be traced. */
+#define ENABLE_KBC_AT_LOG 1
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>

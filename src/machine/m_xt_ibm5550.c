@@ -1797,6 +1797,26 @@ x1xx xxxx: Sense DREQ? (only used in diag test)
                     ret |= 0x40;
             if (epoch->testsw)
                 ret |= 0x02;
+            /* [AB] Test-harness switch: the 3477-S test suite contains a step
+               that waits for the operator to flip the rear-panel test switch
+               (A0h bit1 transition: F8DE:02F5 waits for 0, F8DE:02FB waits for
+               1).  With TESTSW_AUTO=1 the bit toggles every 20000 reads of A0h
+               so that wait loop gets its transition while ordinary branch
+               logic (a handful of reads) still sees a stable value.  Off by
+               default - it simulates an operator action, it is not a hardware
+               behaviour. */
+            {
+                static int auto_sw = -1;
+                static uint64_t n_sw = 0;
+                static int sw_state = 0;
+                if (auto_sw < 0)
+                    auto_sw = (getenv("TESTSW_AUTO") != NULL);
+                if (auto_sw) {
+                    if (++n_sw >= 20000) { n_sw = 0; sw_state ^= 1; }
+                    if (sw_state)
+                        ret |= 0x02;
+                }
+            }
             /* Bit 5 is an undocumented status that reads set. The 5535-M's
                IPL requires it after the timer-2 test and retries that test
                while it is set, so a clear bit turns the test into a hard
