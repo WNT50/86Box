@@ -5773,6 +5773,17 @@ keyboard_at_write(void *priv)
                 break;
 
             case 0xf3: /* set typematic rate/delay */
+                if ((val & 0x80) && (keyboard_mode == 0x8a)) {
+                    /* PS/55 keyboard (IBM-J 5576): in the PS/55 scan code set
+                       (keyboard_mode 0x8A) bit 7 of the typematic parameter is
+                       part of the command, not an invalid marker.  The 3477-S
+                       ROM sends 0xF3 8A and expects the ACK; NAKing it with a
+                       resend makes the ROM restart its whole keyboard init
+                       sequence forever (observed: ~26 cycles, no boot). */
+                    kbc_at_dev_queue_add(dev, 0xfa, 0); /* ACK */
+                    keyboard_at_log("%s: Set typematic rate/delay [%02X] PS/55: accepted\n", dev->name, val);
+                    break;
+                }
                 if (val & 0x80) {
                     keyboard_at_log("%s: Set typematic rate/delay [%02X] has bit 7 set - invalid\n", dev->name, val);
                     dev->flags |= FLAG_CTRLDAT;      /* Resend = keep waiting for parameter. */
