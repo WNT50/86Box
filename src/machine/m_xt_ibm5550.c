@@ -35,6 +35,9 @@
 #include <stdarg.h>
 #include <wchar.h>
 #define HAVE_STDARG_H
+extern uint8_t *rom; /* [FIX] the ROM buffer bios_load_linear filled */
+#include <86box/config.h>
+#include <86box/ini.h>
 #include <86box/86box.h>
 #include "cpu.h"
 #include <86box/timer.h>
@@ -349,7 +352,12 @@ typedef struct epoch_t {
     pc_timer_t swtimer_timer;
     uint8_t swtimer;
 
-    int testmode;
+    int testmode;   /* [FIX] cfg [Machine] testmode: which 32 KB ROM bank is
+                       mapped at F8000-FFFFF (1 = burn-in/upper). */
+    int testsw;     /* [FIX] Read the machine's own section: a machine_t-style init has no
+       "current device", so device_get_config_int() only ever returned the
+       option default and both the bank choice and 0xA0h bit 1 were stuck.
+       testmode = which 32 KB bank, testsw = the 0xA0h bit 1 switch input. */
 
     /* 5535-M status/diagnostic register file: index port 0x368, data port
        0x36A. It latches the POST error code (indices 0x10-0x14) and is read
@@ -1779,7 +1787,7 @@ x1xx xxxx: Sense DREQ? (only used in diag test)
             for (int i = 0; i < 2; i++)
                 if (dma_get_drq(i))
                     ret |= 0x40;
-            if (epoch->testmode)
+            if (epoch->testsw)
                 ret |= 0x02;
             /* Bit 5 is an undocumented status that reads set. The 5535-M's
                IPL requires it after the timer-2 test and retries that test
@@ -1912,7 +1920,9 @@ x1xx xxxx: Enable parity update (Disable this -> Write data -> Enable this -> Re
                    clear (parity stays stale), sets the bit, reads the byte back
                    and requires A0h bit 0 to latch.  Same disable/write/enable/
                    read recipe the 5535-M's 0x47 test uses with bit 6. */
-                epoch->parityenabled = (val & 0x08) ? 1 : 0;
+                epoch->parityenabled = (val & 0x08) ? 1 : 0; /* [FIX] bit 0 as well: the System ROS
+                   uses the disable/write/enable/read recipe with bit 0 (writes 00h/01h),
+                   while the burn-in uses bit 3 (writes 28h/88h/A8h, bit 0 clear). */
                 epoch->parityforce   = 0;
             } else {
                 epoch->parityenabled = val & 0x40; /* 1 = Enable read/write with parity */
@@ -3450,21 +3460,7 @@ machine_xt_ibm5550_init(const machine_t *model)
    the bank: 1 = in-situ burn-in (upper), 0 = System ROS (lower).  F0000-F7FFF
    belongs to the kanji font card window, never to the ROM.
    [Cloud server only, DO NOT USE!!!] */
-static uint8_t       rombank[0x8000];
-static mem_mapping_t rombank_map;
-
-static uint8_t
-rombank_readb(uint32_t addr, void *priv)
-{
-    return rombank[addr & 0x7fff];
-}
-
-static uint16_t
-rombank_readw(uint32_t addr, void *priv)
-{
-    addr &= 0x7fff;
-    return (uint16_t) (rombank[addr] | (rombank[(addr + 1) & 0x7fff] << 8));
-}
+static uint8_t rombank[0x8000]; /* the 32 KB bank patched into rom[] */
 
 /* IBM 3477-S: an 80186-12 based, cut-down colour Multistation with no hard disk
    and a 1.44 MB floppy, reusing the 5550 epoch display/keyboard/font stack.
@@ -3539,6 +3535,20 @@ machine_xt_ibm3477_init(const machine_t *model)
        *interrupt*: the adapter has to answer the strobe.  [Cloud server only,
        DO NOT USE!!!] */
     epoch_t *epoch = device_add(&ibm5550_device);
+    /* [FIX] The cfg's [Machine] testmode binds to the *machine's* config
+       table, not the epoch device's own table, so epoch_init() always read
+       the device default (0) and both the bank choice and 0xA0h bit 1 were
+       stuck.  Read it in the machine's context and hand it to the device. */
+    /* [FIX] Read straight from the machine section: neither the machine's nor
+       the epoch device's device_get_config_int() context resolves "testmode"
+       to the [Machine] key (probe showed testmode/mem_size/font all 0), while
+       the core reads [Machine] mem_size the same way. */
+    /* [FIX] A machine_t-style init has no "current device", so
+       device_get_config_int() here always returns the option default.
+       Read the machine section directly, like the core reads mem_size. */
+    epoch->testmode = config_get_int("Machine", "testmode", 0);
+    epoch->testsw   = config_get_int("Machine", "testsw", 0);
+    pclog("3477: cfg testmode = %d, testsw = %d\n", epoch->testmode, epoch->testsw);
     /* The 3477-S powers up running the burn-in (test) program, which the ROM's
        early 0xA0h bit 1 check selects, on a 24-dot display (0xA2h reports 0xA8,
        so the ROM polls the C000:0148 mailbox).  [Cloud server only, DO NOT USE!!!] */
@@ -3548,14 +3558,17 @@ machine_xt_ibm3477_init(const machine_t *model)
     {
         FILE *fp = rom_fopen("roms/machines/ibm3477/3477ipl.bin", "rb");
 
-        if (fp != NULL) {
+        /* [FIX] Swap the bank inside the ROM buffer the machine already loaded,
+           instead of adding a second mapping over F8000: a mapping with its own
+           read handlers is not the same service path as the BIOS mapping's
+           bios_read(), and it changed the burn-in's recorded code sequence
+           (14/10 appeared, exactly as when the font card is absent).  Patching
+           rom[] keeps F0000-FFFFF served by bios_read() exactly as before. */
+        if ((fp != NULL) && (rom != NULL)) {
             fseek(fp, epoch->testmode ? 0x8000 : 0x0000, SEEK_SET);
             if (fread(rombank, 1, 0x8000, fp) == 0x8000) {
-                mem_mapping_add(&rombank_map, 0x000f8000, 0x8000,
-                                rombank_readb, rombank_readw, NULL,
-                                NULL, NULL, NULL,
-                                NULL, MEM_MAPPING_EXTERNAL, NULL);
-                pclog("3477: ROM bank = %s (testmode=%d)\n",
+                memcpy(&rom[0x8000], rombank, 0x8000);
+                pclog("3477: ROM bank = %s (testmode=%d), patched into rom[]\n",
                       epoch->testmode ? "burn-in (upper 32K)" : "System ROS (lower 32K)",
                       epoch->testmode);
             }
