@@ -1006,6 +1006,7 @@ fdc_write(uint16_t addr, uint8_t val, void *priv)
                     return;
                 }
                 if (fdc->flags & FDC_FLAG_5550) {   /* Reset */
+                    pclog("3477: fdc wr 3F2 <- %02X (reset; pc=%04X:%04X)\n", val, CS, cpu_state.pc);
                     fdd_stop(fdc->fdd[fdc->drive]);
                     for (int i = 0; i < 4; i++) {
                         /* Need to restart fdd timer */
@@ -1828,6 +1829,9 @@ fdc_read(uint16_t addr, void *priv)
                 if (fdc->flags & FDC_FLAG_5550)
                     picintc(1 << fdc->irq);
                 ret = fdc->stat;
+                if (fdc->flags & FDC_FLAG_5550)
+                    pclog("3477: fdc MSR 3F4 -> %02X (stat %02X, power_down %d, pc=%04X:%04X)\n",
+                          ret, fdc->stat, fdc->power_down, CS, cpu_state.pc);
                 break;
             case 5: /*Data*/
                 if (fdc->flags & FDC_FLAG_5550)
@@ -2897,6 +2901,14 @@ fdc_reset(void *priv)
     fdc->lock          = 0;
 
     fdc_ctrl_reset(fdc, !(fdc->flags & FDC_FLAG_PNP));
+
+    /* The 5550's FDC reset port (0x3F2) powers up asserted, so the MSR reads
+       0x00 rather than the uPD765's idle 0x80 until the guest pulses 0x3F2.
+       The 3477-S burn-in requires exactly that order: it reads 0x3F4 and fails
+       unless the value is NOT 0x80, then writes 0x3F2 (releasing the reset)
+       and requires 0x80. */
+    if (fdc->flags & FDC_FLAG_5550)
+        fdc->stat = 0x00;
 
     if (!(fdc->flags & FDC_FLAG_AT))
         fdc->rate = 2;
