@@ -53,7 +53,6 @@
 #define I80186_UMCS_RESET       0xFFFBu /* UMCS reads 0xFFFB after RESET */
 
 /* PCB register offsets (word). */
-#define I80186_ICU_BASE         0x20u /* 0x20-0x3E interrupt controller */
 #define I80186_ICU_END          0x3Fu
 #define I80186_TMR_COUNT(i)     (0x50u + ((i) * 8u)) /* T0 0x50 / T1 0x58 / T2 0x60 */
 #define I80186_TMR_MAXA(i)      (0x52u + ((i) * 8u))
@@ -68,60 +67,95 @@
 #define I80186_DMA1_END         0xDBu
 
 /* Interrupt controller request/status registers (270788-001 section 9.6.2). */
-#define I80186_ICU_EOI          0x22u /* End Of Interrupt (write-only) */
-#define I80186_ICU_INSERVICE    0x2Cu /* In-Service Register */
 #define I80186_ICU_REQ          0x2Eu /* Interrupt Request Register */
 #define I80186_ICU_STATUS       0x30u /* Interrupt Controller Status Register */
-#define I80186_ICU_TMR_BITS     0x0031u /* the three timer bits (codes 0, 4 and 5) */
-
-/* Slave-mode interrupt source codes, 270788-001 Table 20: timer 0 = 0,
-   timer 1 = 4, timer 2 = 5.  The request, in-service and EOI registers all use
-   these codes as bit positions. */
-static const uint8_t i80186_tmr_type[3] = { 0, 4, 5 };
 
 typedef struct i80186_t {
     uint16_t base;        /* current PCB I/O base */
     uint16_t reloc;       /* Relocation Register value */
     uint8_t  handler_set; /* whether our I/O handler is currently registered */
     uint16_t regs[I80186_PCB_SIZE / 2];
-    uint64_t tmr_start[3];  /* tsc captured when the timer was enabled/loaded */
-    uint64_t tmr_period[3]; /* non-zero while the timer is enabled */
-    uint64_t tmr_ack[3];    /* overflow count when the request was last acknowledged */
+    uint64_t tmr_base[3];   /* tsc when the timer last (re)started its count cycle */
+    uint64_t tmr_src[3];    /* clock-source events already counted at that moment */
+    uint64_t tmr_done[3];   /* maximum-count cycles completed so far */
+    uint16_t tmr_req;       /* sticky timer request latches: bit i = timer i */
+    uint8_t  tmr_alt[3];    /* MAX COUNT register in use: 0 = A, 1 = B (ALT) */
 } i80186_t;
 
 static uint16_t i80186_inw(uint16_t port, void *priv);
 static void     i80186_outw(uint16_t port, uint16_t val, void *priv);
 
-/* Overflows counted since the timer was enabled; a disabled timer keeps the
-   value it had, so acknowledging one is a no-op. */
-static uint64_t
-i80186_tmr_overflows(i80186_t *dev, int i)
-{
-    if (!dev->tmr_period[i])
-        return dev->tmr_ack[i];
+/* The three timers count at one fourth of the CPU clock (270788-001 section
+   6.2). 86Box drives tsc at three times the nominal CPU clock on XT-class
+   machines (pit.c: cpuclock = rspeed * 3), so one CPU/4 event is 12 tsc. */
+#define I80186_TMR_TSC_PER_EVENT   12u
 
-    uint64_t period = (uint64_t) dev->regs[I80186_TMR_MAXA(i) / 2] + 1u;
-    return ((tsc - dev->tmr_start[i]) / 4u) / period;
+/* Maximum count of the register currently selected; ALT alternates between
+   MAX COUNT register A and B on timers 0 and 1. */
+static uint64_t
+i80186_tmr_max(i80186_t *dev, int i)
+{
+    uint16_t reg = (dev->tmr_alt[i] && (i != 2)) ? I80186_TMR_MAXB(i) : I80186_TMR_MAXA(i);
+
+    return (uint64_t) dev->regs[reg / 2] + 1u; /* a maximum count of 0 means 65536 */
 }
 
-/* Timers that have overflowed since their request was acknowledged
-   (bit 0/1/2 = timer 0/1/2).  The 3477-S ROM enables a timer and then
-   requires the request and status bits to latch, so the hardware side has
-   to drive them rather than just store what was written. */
-static uint16_t
-i80186_tmr_pending(i80186_t *dev)
+/* Clock events counted by a timer since it was last started. Timer 2 always
+   runs from the internal clock; timers 0 and 1 run from timer 2's
+   maximum-count output when the Prescaler bit (bit 3) is set. */
+static uint64_t
+i80186_tmr_events(i80186_t *dev, int i)
 {
-    uint16_t mask = 0;
+    uint64_t src;
 
+    if ((i != 2) && (dev->regs[I80186_TMR_CON(i) / 2] & 0x0008u))
+        src = i80186_tmr_events(dev, 2) / i80186_tmr_max(dev, 2);
+    else
+        src = (tsc - dev->tmr_base[i]) / I80186_TMR_TSC_PER_EVENT;
+
+    return src - dev->tmr_src[i];
+}
+
+/* (Re)start a timer's count cycle from the value in its count register. */
+static void
+i80186_tmr_restart(i80186_t *dev, int i)
+{
+    dev->tmr_base[i] = tsc;
+    dev->tmr_src[i]  = ((i != 2) && (dev->regs[I80186_TMR_CON(i) / 2] & 0x0008u))
+                           ? (i80186_tmr_events(dev, 2) / i80186_tmr_max(dev, 2))
+                           : 0u;
+    dev->tmr_done[i] = 0;
+    dev->tmr_alt[i]  = 0;
+}
+
+/* Advance the timers to the current tsc. A timer that reaches its maximum
+   count latches a request (when its interrupt is enabled) and, unless CONT is
+   set, stops counting until the program enables it again. */
+static void
+i80186_tmr_update(i80186_t *dev)
+{
     for (int i = 0; i < 3; i++) {
         uint16_t con = dev->regs[I80186_TMR_CON(i) / 2];
-        if (!(con & 0x8000u) || !(con & 0x2000u))
-            continue;
-        if (i80186_tmr_overflows(dev, i) > dev->tmr_ack[i])
-            mask |= (uint16_t) (1u << i80186_tmr_type[i]);
-    }
 
-    return mask;
+        if (!(con & 0x8000u))
+            continue;
+
+        dev->tmr_alt[i] = (uint8_t) (((con & 0x0002u) && (i != 2)) ? (dev->tmr_done[i] & 1u) : 0u);
+
+        uint64_t max = i80186_tmr_max(dev, i);
+        uint64_t cyc = i80186_tmr_events(dev, i) / max;
+
+        if (cyc <= dev->tmr_done[i])
+            continue;
+
+        dev->tmr_done[i] = cyc;
+
+        if (con & 0x2000u) /* INT: the timer drives its interrupt request */
+            dev->tmr_req |= (uint16_t) (1u << i);
+
+        if (!(con & 0x0001u)) /* CONT = 0: the timer halts on maximum count */
+            dev->regs[I80186_TMR_CON(i) / 2] &= (uint16_t) ~0x8000u;
+    }
 }
 
 static uint16_t
@@ -130,26 +164,24 @@ i80186_read_word(i80186_t *dev, uint16_t off)
     if (off == I80186_RELOC_OFF)
         return dev->reloc;
 
-    /* The count registers free-run while the timer is enabled. 86Box has no
-       hook for the 80186 timers, so derive one from tsc, counting up at the
-       CPU clock / 4 (270788-001 section 6: "every fourth CPU Clock"). */
+    /* The count registers free-run while their timer is enabled (270788-001
+       section 6.1: the count resets to zero when it equals the maximum). */
+    i80186_tmr_update(dev);
+
     for (int i = 0; i < 3; i++) {
         if (off == I80186_TMR_COUNT(i)) {
-            uint16_t max = dev->regs[I80186_TMR_MAXA(i) / 2];
-            if (dev->tmr_period[i]) {
-                uint64_t ticks  = (tsc - dev->tmr_start[i]) / 4u;
-                uint64_t period = (uint64_t) max + 1u; /* max 0 => full range */
-                return (uint16_t) (ticks % period);
-            }
+            if (dev->regs[I80186_TMR_CON(i) / 2] & 0x8000u)
+                return (uint16_t) (i80186_tmr_events(dev, i) % i80186_tmr_max(dev, i));
             return dev->regs[off / 2];
         }
     }
 
-    /* The request and status registers also reflect the pending timers. */
+    /* The request register's timer bit is the OR of the timer requests; the
+       status register holds them individually in bits 0-2. */
     if (off == I80186_ICU_REQ)
-        return (uint16_t) (dev->regs[off / 2] | (i80186_tmr_pending(dev) ? 0x0001u : 0x0000u));
+        return (uint16_t) (dev->regs[off / 2] | (dev->tmr_req ? 0x0001u : 0x0000u));
     if (off == I80186_ICU_STATUS)
-        return (uint16_t) (dev->regs[off / 2] | i80186_tmr_pending(dev));
+        return (uint16_t) (dev->regs[off / 2] | (dev->tmr_req & 0x0007u));
 
     return dev->regs[off / 2];
 }
@@ -180,42 +212,34 @@ i80186_write_word(i80186_t *dev, uint16_t off, uint16_t val)
 
     dev->regs[off / 2] = val;
 
-    /* Latch timer enable on control-register writes; a count-register write
-       reloads the free-running value from that instant. */
+    /* A control or count-register write (re)starts the count cycle; the request
+       latch itself is only touched through the interrupt controller registers. */
     for (int i = 0; i < 3; i++) {
-        if (off == I80186_TMR_CON(i)) {
-            dev->tmr_start[i]  = tsc;
-            dev->tmr_period[i] = (val & 0x8000u) ? 1u : 0u; /* bit15 = enable */
-            dev->tmr_ack[i]    = 0;
-        } else if (off == I80186_TMR_COUNT(i))
-            dev->tmr_start[i] = tsc;
+        if ((off == I80186_TMR_CON(i)) || (off == I80186_TMR_COUNT(i)))
+            i80186_tmr_restart(dev, i);
     }
 
-    /* A specific EOI names the source by its Table 20 type code and acknowledges
-       that request until the timer overflows again (the ROM writes 0x8000 for
-       timer 0 and 0x800C for timer 1). */
-    if (off == I80186_ICU_EOI) {
-        uint16_t src = val & 0x0007u;
-
-        for (int i = 0; i < 3; i++) {
-            if (src == i80186_tmr_type[i])
-                dev->tmr_ack[i] = i80186_tmr_overflows(dev, i);
-        }
-    }
-
-    /* The ROM also acknowledges a timer by writing the status register, which has
-       to make the interrupt request go away until the next overflow. */
+    /* Writing the status register sets or clears the individual timer request
+       bits (270788-001 Figure 26) -- the ROM forces a request with 0x8001 and
+       clears them again with 0x8000. */
     if (off == I80186_ICU_STATUS) {
-        dev->regs[off / 2] = val & I80186_ICU_TMR_BITS;
-        for (int i = 0; i < 3; i++)
-            dev->tmr_ack[i] = i80186_tmr_overflows(dev, i);
+        dev->regs[off / 2] = (uint16_t) (val & ~0x0007u);
+        dev->tmr_req       = (uint16_t) ((dev->tmr_req & ~0x0007u) | (val & 0x0007u));
     }
+
+    /* Writing a zero to the request register's timer bit clears it; the ROM
+       does `in 0x2E / and 0xFFFE / out 0x2E` before its timer test. */
+    if ((off == I80186_ICU_REQ) && !(val & 0x0001u))
+        dev->tmr_req = 0;
 }
 
 static uint16_t
 i80186_inw(uint16_t port, void *priv)
 {
-    return i80186_read_word((i80186_t *) priv, (uint16_t) ((port - ((i80186_t *) priv)->base) & 0xFEu));
+    i80186_t *dev = (i80186_t *) priv;
+    uint16_t  off = (uint16_t) ((port - dev->base) & 0xFEu);
+
+    return i80186_read_word(dev, off);
 }
 
 static void
@@ -233,10 +257,12 @@ i80186_reset(void *priv)
         io_removehandler(dev->base, I80186_PCB_SIZE, NULL, i80186_inw, NULL, NULL, i80186_outw, NULL, dev);
 
     memset(dev->regs, 0x00, sizeof(dev->regs));
+    dev->tmr_req = 0;
     for (int i = 0; i < 3; i++) {
-        dev->tmr_start[i]  = 0;
-        dev->tmr_period[i] = 0;
-        dev->tmr_ack[i]    = 0;
+        dev->tmr_base[i] = 0;
+        dev->tmr_src[i]  = 0;
+        dev->tmr_done[i] = 0;
+        dev->tmr_alt[i]  = 0;
     }
 
     /* Reset values from 270788-001 section 5.3. */
