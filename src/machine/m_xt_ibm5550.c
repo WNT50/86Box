@@ -93,6 +93,7 @@
 #define EPOCH_FONTCARD_ROM_PATH_K24 "roms/machines/ibm5550/FONTK24.BIN"
 #define EPOCH_FONTCARD_ROM_PATH_K52 "roms/machines/ibm5550/FONTK52.BIN"
 #define EPOCH_FONTCARD_ROM_PATH_P24 "roms/machines/ibm5550/FONTP24.BIN"
+#define EPOCH_FONTCARD_ROM_PATH_3477 "roms/machines/ibm3477/card0.bin" /* 3477-S built-in ROS FONT ROM */
 
 /* Korean (Hangul) and Traditional Chinese version of Multistation DOS are not dumped yet,
    so font image cannot be generated. They would have ID 4 and 8 for codepages 934 and 938. */
@@ -420,6 +421,8 @@ The IBM 5550 has different IRQ assignments like the 6580 Displaywriter System.
 | FC000h        | ROM                                                   | 
 */
 
+static void epoch_fontcard_set_page(epoch_t *epoch, uint32_t page);
+
 static void
 epoch_out(uint16_t addr, uint16_t val, void *priv)
 {
@@ -481,6 +484,12 @@ epoch_out(uint16_t addr, uint16_t val, void *priv)
             epoch->crtmode = val;
             epoch_recalctimings(epoch);
             // epoch->attrff ^= 1;
+            break;
+        case 0x3e3:
+            /* 3477-S: its built-in ROS FONT ROM sits in the F000 window and this port
+               selects the 32 KB page (the burn-in always writes 0, i.e. page 0). */
+            if (epoch_is_3477)
+                epoch_fontcard_set_page(epoch, val);
             break;
         // case LV_PORT:
         //     // epoch_iolog("epoch Out addr %03X val %02X ff %d %04X:%04X\n", addr, val, epoch->attrff,cs >> 4, cpu_state.pc);
@@ -2614,7 +2623,10 @@ epoch_fontcard_set_page(epoch_t *epoch, uint32_t page)
                EPOCH_FONTCARD_WIN_SIZE);
     else
         memset(epoch->fontcard_win, 0, EPOCH_FONTCARD_WIN_SIZE);
-    epoch_fontcard_fix_page(epoch->fontcard_win, page);
+    /* Only the 5535's IBMBIO wants page 0's word sum repaired; on the 3477 the
+       page is a real ROM image and patching it would corrupt the last word. */
+    if (!epoch_is_3477)
+        epoch_fontcard_fix_page(epoch->fontcard_win, page);
 }
 
 static uint8_t
@@ -2717,7 +2729,9 @@ epoch_fontcard_init(epoch_t *epoch)
     size_t      fsize;
     const char *path;
 
-    if (epoch_is_5535) {
+    if (epoch_is_3477) {
+        path = EPOCH_FONTCARD_ROM_PATH_3477;
+    } else if (epoch_is_5535) {
         path = epoch->fontcard_isnew ? EPOCH_FONTCARD_ROM_PATH_NEW
                                      : EPOCH_FONTCARD_ROM_PATH_OLD;
     } else {
@@ -2755,11 +2769,15 @@ epoch_fontcard_init(epoch_t *epoch)
 
     mem_mapping_add(&epoch->fontcard_map, EPOCH_FONTCARD_WIN_ADDR,
                     EPOCH_FONTCARD_WIN_SIZE, epoch_fontcard_readb,
-                    epoch_fontcard_readw, NULL, epoch_fontcard_writeb,
-                    epoch_fontcard_writew, NULL, NULL, MEM_MAPPING_EXTERNAL,
-                    epoch);
-    io_sethandler(0x160, 0x000b, epoch_fontcard_in, NULL, NULL,
-                  epoch_fontcard_out, NULL, NULL, epoch);
+                    epoch_fontcard_readw, NULL,
+                    epoch_is_3477 ? NULL : epoch_fontcard_writeb,
+                    epoch_is_3477 ? NULL : epoch_fontcard_writew, NULL, NULL,
+                    MEM_MAPPING_EXTERNAL, epoch);
+    /* The 3477's ROM is on the system board behind port 0x3E3, not on the
+       optional card, so it has no 0x160 command interface. */
+    if (!epoch_is_3477)
+        io_sethandler(0x160, 0x000b, epoch_fontcard_in, NULL, NULL,
+                      epoch_fontcard_out, NULL, NULL, epoch);
     epoch_fontcard_set_page(epoch, 0);
     epoch_log("font card: %s, %u pages installed\n", path, epoch->fontcard_pages);
 }
@@ -2798,9 +2816,9 @@ epoch_init(UNUSED(const device_t *info))
     epoch->cram              = calloc(1, 4 * 1024);
     epoch->paritybad         = calloc(1, 0xA0000 >> 3);
     /* Both the 5550 and the 5535-M can carry the kanji font card; the 5550 has
-       a switch for it, the 5535-M always has one. It is installed only when
-       its ROM image is present. */
-    if (epoch_is_5535 || epoch->fontcard_enabled)
+       a switch for it, the 5535-M always has one. The 3477-S has its ROS FONT
+       ROM on the system board. It is installed only when its image is present. */
+    if (epoch_is_5535 || epoch_is_3477 || epoch->fontcard_enabled)
         epoch_fontcard_init(epoch);
 
     epoch->epochconst = (uint64_t) ((cpuclock / epoch->pixelclock) * (double) (1ull << 32));
@@ -3275,11 +3293,6 @@ machine_xt_ibm3477_init(const machine_t *model)
 
     ret = bios_load_linear("roms/machines/ibm3477/3477.bin",
                            0x000f0000, 65536, 0);
-
-    /* The F000-F7FF half is really the 32 KB 3472-P/3477-P "ROS FONT" ROM: nothing
-       jumps into F000:, but the burn-in reads the panel ID from it at F000:5F8D/94. */
-    (void) bios_load_aux_linear("roms/machines/ibm3477/card0.bin",
-                                0x000f0000, 32768, 0);
 
     if (bios_only || !ret)
         return ret;
