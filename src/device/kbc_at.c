@@ -410,8 +410,16 @@ kbc_send_to_ob(atkbc_t *dev, uint8_t val, uint8_t channel, uint8_t stat_hi)
 
             if (dev->mem[0x20] & 0x02)
                 kbc_set_do_irq(dev, channel);
-        } else if (dev->mem[0x20] & 0x01)
-            kbc_set_do_irq(dev, channel);
+        } else {
+            /* [AB] PS/55 键盘是多字节应答设备（复位序列连发 3 个 ID 字节），
+               仍有字节待取时必须置 MFULL，供 3477-S IPL 的“等状态位 5”助手
+               （ROM 0x8AE7）继续取走后续字节；否则该助手恒超时 0xFFFF。 */
+            if ((dev->ports[0] != NULL) && (dev->ports[0]->out_new != -1))
+                dev->status |= STAT_MFULL;
+
+            if (dev->mem[0x20] & 0x01)
+                kbc_set_do_irq(dev, channel);
+        }
     } else if (dev->mem[0x20] & 0x01) {
         /* AT KBC: IRQ 1 is level-triggered because it is tied to OBF. */
         if (dev->irq[0] != 0xffff) {
