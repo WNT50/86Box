@@ -1819,6 +1819,12 @@ x1xx xxxx: Sense DREQ? (only used in diag test)
                failure. */
             if (epoch_is_5535)
                 ret |= 0x20;
+            /* [AB] Bit 4 has to read set on the 3477-S: its IPL's memory walk
+               polls it at F807A8 and, when clear, jumps through the restart
+               vector at FFF3:000C -- which is why the ROS restarted once per
+               pass.  The value is undocumented; the burn-in never reads it. */
+            if (epoch_is_3477)
+                ret |= 0x10;
             pclog("3477: in 0xA0 = %02X (pc=%04X:%04X)\n", ret, CS, cpu_state.pc);
             break;
         case 0xA1: /* High address where memory error occured */
