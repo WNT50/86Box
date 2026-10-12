@@ -72,6 +72,12 @@
 #define I80186_ICU_INSERVICE    0x2Cu /* In-Service Register */
 #define I80186_ICU_REQ          0x2Eu /* Interrupt Request Register */
 #define I80186_ICU_STATUS       0x30u /* Interrupt Controller Status Register */
+#define I80186_ICU_TMR_BITS     0x0031u /* the three timer bits (codes 0, 4 and 5) */
+
+/* Slave-mode interrupt source codes, 270788-001 Table 20: timer 0 = 0,
+   timer 1 = 4, timer 2 = 5.  The request, in-service and EOI registers all use
+   these codes as bit positions. */
+static const uint8_t i80186_tmr_type[3] = { 0, 4, 5 };
 
 typedef struct i80186_t {
     uint16_t base;        /* current PCB I/O base */
@@ -112,7 +118,7 @@ i80186_tmr_pending(i80186_t *dev)
         if (!(con & 0x8000u) || !(con & 0x2000u))
             continue;
         if (i80186_tmr_overflows(dev, i) > dev->tmr_ack[i])
-            mask |= (uint16_t) (1u << i);
+            mask |= (uint16_t) (1u << i80186_tmr_type[i]);
     }
 
     return mask;
@@ -185,19 +191,22 @@ i80186_write_word(i80186_t *dev, uint16_t off, uint16_t val)
             dev->tmr_start[i] = tsc;
     }
 
-    /* Taking an EOI acknowledges the request named by its low bits until that
-       timer overflows again (the ROM: out 0x722, 0x8000 = EOI for source 0). */
+    /* A specific EOI names the source by its Table 20 type code and acknowledges
+       that request until the timer overflows again (the ROM writes 0x8000 for
+       timer 0 and 0x800C for timer 1). */
     if (off == I80186_ICU_EOI) {
         uint16_t src = val & 0x0007u;
 
-        if (src < 3)
-            dev->tmr_ack[src] = i80186_tmr_overflows(dev, (int) src);
+        for (int i = 0; i < 3; i++) {
+            if (src == i80186_tmr_type[i])
+                dev->tmr_ack[i] = i80186_tmr_overflows(dev, i);
+        }
     }
 
     /* The ROM also acknowledges a timer by writing the status register, which has
        to make the interrupt request go away until the next overflow. */
     if (off == I80186_ICU_STATUS) {
-        dev->regs[off / 2] = val & 0x0007u;
+        dev->regs[off / 2] = val & I80186_ICU_TMR_BITS;
         for (int i = 0; i < 3; i++)
             dev->tmr_ack[i] = i80186_tmr_overflows(dev, i);
     }
