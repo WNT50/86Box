@@ -3517,6 +3517,15 @@ machine_xt_ibm3477_init(const machine_t *model)
     epoch_is_3477 = 1;
 
     device_add(&fdc_xt_5550_device);
+    /* [AB] This 86Box build offers no cfg key for a floppy image (fdd_load is
+       only reachable from the Qt media menu), so allow one to be mounted from
+       the environment: FDD_IMG=<path> loads it into drive 0.  The 3477-S ROM
+       needs real boot media: without it the IPL falls through to the report +
+       reset path instead of booting. */
+    if (getenv("FDD_IMG") != NULL) {
+        pclog("3477: mounting %s into drive 0\n", getenv("FDD_IMG"));
+        fdd_load(&drives[0], getenv("FDD_IMG"));
+    }
 
     /* The 3477-S IPL drives the standard AT 8042 controller on 0x60/0x64
        (self-test 0xAA->0x55, interface tests 0xAB/0xA9, enable 0xAE, keyboard
