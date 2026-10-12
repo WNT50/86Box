@@ -3276,6 +3276,11 @@ machine_xt_ibm3477_init(const machine_t *model)
     ret = bios_load_linear("roms/machines/ibm3477/3477.bin",
                            0x000f0000, 65536, 0);
 
+    /* The F000-F7FF half is really the 32 KB 3472-P/3477-P "ROS FONT" ROM: nothing
+       jumps into F000:, but the burn-in reads the panel ID from it at F000:5F8D/94. */
+    (void) bios_load_aux_linear("roms/machines/ibm3477/card0.bin",
+                                0x000f0000, 32768, 0);
+
     if (bios_only || !ret)
         return ret;
 
