@@ -829,6 +829,13 @@ getfont_ps55dbcs_vram(epoch_t *epoch, int32_t code, int32_t line)
     int32_t  chr  = code;
     code *= 0x80;
     code += line * 4;
+    /* [AB] 3477-S: the built-in ANK font (font.bin, 256 codes x 128 bytes) is
+       loaded into the SBCS area at EPOCH_VRAM_SBCS.  The 3477 render branch
+       indexed from 0, so every lookup read zeros, every cell drew the
+       background colour and the screen stayed black even though the mode was
+       programmed correctly. */
+    if (epoch_is_3477 && chr < 0x100)
+        code += EPOCH_VRAM_SBCS;
     if (epoch->font24) { /* Font 24 (2 x 13 x 29) */
         font = epoch->vram[code];
         font <<= 8;
@@ -954,12 +961,21 @@ epoch_render_text(epoch_t *epoch)
             /* Draw character */
             for (uint32_t n = 0; n < epoch->char_width; n++)
                 p[n] = epoch->pallook[epoch->egapal[bg]]; /* draw blank */
-            /* [AB] The 3477-S ANK font (card0.bin) stores one 13-dot glyph per
-               128-byte code slot, the glyph bits in the high half of each
-               4-byte row -- exactly the layout the standard font-24 SBCS path
-               below reads.  The former 3477-only branch drew 32 bits as one
-               26-dot glyph and advanced CRAM by two words per character, so
-               every cell showed two characters merged (the 'garbage' screen). */
+            /* [Cloud server only, DO NOT USE!!!] 3477-S: one 26-dot glyph per
+               13-dot cell (40 glyphs x 26 = 1040).  The ROM stores one word per
+               character in CRAM, so consume one pair and draw the whole glyph;
+               the code indexes the card's glyph area directly. */
+            if (epoch_is_3477) {
+                uint32_t font = getfont_ps55dbcs(chr, epoch->scanline, epoch);
+                for (uint32_t n = 0; n < 26; n++) {
+                    p[n] = epoch->pallook[epoch->egapal[(font & 0x80000000) ? fg : bg]];
+                    font <<= 1;
+                }
+                x += epoch->char_width; /* the loop adds another 13 => 26 total */
+                p += epoch->char_width * 2;
+                epoch->memaddr += 2;
+                continue;
+            }
             /*  SBCS or DBCS left half */
             if (chr_wide == 0) {
                 if (attr & 0x01)
@@ -3640,20 +3656,6 @@ machine_xt_ibm3477_init(const machine_t *model)
                only, DO NOT USE!!!] */
             size_t rd = fread(epoch->vram + EPOCH_VRAM_SBCS, 1, 0x8000, fp);
             fclose(fp);
-            /* [AB] card0.bin keeps each ANK glyph in the HIGH 16-bit word of every
-               4-byte row ("the glyph in the first byte of each row"), but the
-               font-24 text renderer fetches the word at +2 -- the low half -- as
-               it must for the 5535/5550 generators.  Without this swap every
-               cell was drawn from the row's other half: two thin strokes per
-               character, i.e. the garbled screen.  Re-lay the page the way the
-               renderer reads it. */
-            {
-                uint8_t *pg = epoch->vram + EPOCH_VRAM_SBCS;
-                for (uint32_t i = 0; i + 3 < 0x8000; i += 4) {
-                    uint8_t t = pg[i]; pg[i] = pg[i + 2]; pg[i + 2] = t;
-                    t = pg[i + 1]; pg[i + 1] = pg[i + 3]; pg[i + 3] = t;
-                }
-            }
             pclog("3477: card page0 -> vram[%05X], %u bytes; 'A' row3 = %02X%02X%02X%02X\n",
                   EPOCH_VRAM_SBCS, (unsigned) rd,
                   epoch->vram[EPOCH_VRAM_SBCS + 0x41 * 0x80 + 3 * 4], epoch->vram[EPOCH_VRAM_SBCS + 0x41 * 0x80 + 3 * 4 + 1],
