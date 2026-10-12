@@ -33,6 +33,7 @@ add_library(dev OBJECT
     hwm_vt82c686.c
     i2c.c
     i2c_gpio.c
+    i80186.c
     ibm_5161.c
     inboard386.c
     ibm_xma.c
