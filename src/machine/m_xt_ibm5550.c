@@ -3443,6 +3443,29 @@ machine_xt_ibm5550_init(const machine_t *model)
     return ret;
 }
 
+/* [EXPERIMENT rombank] The 3477-S ROM is two COMPLETE 32 KB banks; each has its
+   own reset vector (its offset 0x7FF0 = "ljmp 0xFFF5:0") and its own reset stub
+   (its offset 0x7F50 = UMCS write + ljmp to its own entry), so whichever bank is
+   mapped at F8000-FFFFF boots itself.  The machine's test-mode switch selects
+   the bank: 1 = in-situ burn-in (upper), 0 = System ROS (lower).  F0000-F7FFF
+   belongs to the kanji font card window, never to the ROM.
+   [Cloud server only, DO NOT USE!!!] */
+static uint8_t       rombank[0x8000];
+static mem_mapping_t rombank_map;
+
+static uint8_t
+rombank_readb(uint32_t addr, void *priv)
+{
+    return rombank[addr & 0x7fff];
+}
+
+static uint16_t
+rombank_readw(uint32_t addr, void *priv)
+{
+    addr &= 0x7fff;
+    return (uint16_t) (rombank[addr] | (rombank[(addr + 1) & 0x7fff] << 8));
+}
+
 /* IBM 3477-S: an 80186-12 based, cut-down colour Multistation with no hard disk
    and a 1.44 MB floppy, reusing the 5550 epoch display/keyboard/font stack.
    [Cloud server only, DO NOT USE!!!] First wiring attempt, not validated. */
@@ -3519,7 +3542,26 @@ machine_xt_ibm3477_init(const machine_t *model)
     /* The 3477-S powers up running the burn-in (test) program, which the ROM's
        early 0xA0h bit 1 check selects, on a 24-dot display (0xA2h reports 0xA8,
        so the ROM polls the C000:0148 mailbox).  [Cloud server only, DO NOT USE!!!] */
-    epoch->testmode = 1;
+    /* [EXPERIMENT rombank] Let the config's testmode drive BOTH the port 0xA0
+       bit 1 and which 32 KB bank is mapped at F8000-FFFFF (see rombank above).
+       [Cloud server only, DO NOT USE!!!] */
+    {
+        FILE *fp = rom_fopen("roms/machines/ibm3477/3477ipl.bin", "rb");
+
+        if (fp != NULL) {
+            fseek(fp, epoch->testmode ? 0x8000 : 0x0000, SEEK_SET);
+            if (fread(rombank, 1, 0x8000, fp) == 0x8000) {
+                mem_mapping_add(&rombank_map, 0x000f8000, 0x8000,
+                                rombank_readb, rombank_readw, NULL,
+                                NULL, NULL, NULL,
+                                NULL, MEM_MAPPING_EXTERNAL, NULL);
+                pclog("3477: ROM bank = %s (testmode=%d)\n",
+                      epoch->testmode ? "burn-in (upper 32K)" : "System ROS (lower 32K)",
+                      epoch->testmode);
+            }
+            fclose(fp);
+        }
+    }
     epoch->font24   = 1;
 
     /* The burn-in ROM is an in-situ program: it assumes the machine has already
