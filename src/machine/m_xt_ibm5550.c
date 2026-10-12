@@ -1906,9 +1906,19 @@ x1xx xxxx: Enable parity update (Disable this -> Write data -> Enable this -> Re
 */
         case 0xA0:
             nmi_mask = val & 0x80;
-            epoch->parityenabled = val & 0x40; /* 1 = Enable read/write with parity */
-            /* Bit 3: parity error test mode (see epoch_t). */
-            epoch->parityforce = (val & 0x08) != 0;
+            if (epoch_is_3477) {
+                /* The 3477-S burn-in never writes bit 6: it uses bit 3 as
+                   "parity updating enabled" - it writes a byte with the bit
+                   clear (parity stays stale), sets the bit, reads the byte back
+                   and requires A0h bit 0 to latch.  Same disable/write/enable/
+                   read recipe the 5535-M's 0x47 test uses with bit 6. */
+                epoch->parityenabled = (val & 0x08) ? 1 : 0;
+                epoch->parityforce   = 0;
+            } else {
+                epoch->parityenabled = val & 0x40; /* 1 = Enable read/write with parity */
+                /* Bit 3: parity error test mode (see epoch_t). */
+                epoch->parityforce = (val & 0x08) != 0;
+            }
             /* The 5535-M arms and acknowledges the software timer here
                (out A0h, 41h / 40h) instead of on port 0xA6. */
             if (epoch_is_5535)
