@@ -1919,9 +1919,13 @@ x1xx xxxx: Enable parity update (Disable this -> Write data -> Enable this -> Re
                    clear (parity stays stale), sets the bit, reads the byte back
                    and requires A0h bit 0 to latch.  Same disable/write/enable/
                    read recipe the 5535-M's 0x47 test uses with bit 6. */
-                epoch->parityenabled = (val & 0x08) ? 1 : 0; /* [FIX] bit 0 as well: the System ROS
-                   uses the disable/write/enable/read recipe with bit 0 (writes 00h/01h),
-                   while the burn-in uses bit 3 (writes 28h/88h/A8h, bit 0 clear). */
+                epoch->parityenabled = (val & 0x08) ? 1 : 0;
+                /* Bit 0 of the write side stays ignored.  The manual only
+                   documents bits 6/7 here, and an undriven bit 0 reads back
+                   clear - exactly what the BIOS's "no parity error" path wants
+                   (a set bit 0 sends it to the error exit).  The System ROS's
+                   00h/01h writes to A0h are its blink-and-park loop, not a
+                   disable/write/enable/read parity recipe. */
                 epoch->parityforce   = 0;
             } else {
                 epoch->parityenabled = val & 0x40; /* 1 = Enable read/write with parity */
