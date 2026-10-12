@@ -5720,7 +5720,10 @@ keyboard_at_bat(void *priv)
     keyboard_update_states(0, 0, 0, 0);
 
     keyboard_set_in_reset(0);
-    kbc_at_dev_queue_add(dev, 0xaa, 0);
+    /* [AB] BAT 是键盘【发给主机】的数据，必须进 main=1 的数据队列；
+       上游原版写成 main=0（命令队列）⇒ 设备把它当成收到一条命令、
+       回一个 ACK 0xFA，既多出字节又让 BAT 永远到不了主机。 */
+    kbc_at_dev_queue_add(dev, 0xaa, 1);
 }
 
 static void
