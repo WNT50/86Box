@@ -1814,6 +1814,16 @@ x1xx xxxx: Sense DREQ? (only used in diag test)
             if (epoch->testsw)
                 ret |= 0x02;
             /* [AB] Test-harness switch: the 3477-S test suite contains a step
+               that waits for the operator to flip the rear-panel test switch.
+               NOTE (measured, do not retry): toggling this bit on a *read
+               counter* or on a *timer* cannot satisfy that wait loop.  86Box
+               detects the tight I/O polling loop and fast-forwards it: the
+               port handler is not called once per repeat (the log shows a
+               single call with a huge '*N repeats*' count) and the refresh
+               timers do not advance either.  So the loop is unsatisfiable in
+               the model and the ROS must be run with the switch reading off
+               (testsw=0, where the wait exits immediately).  This hook is kept
+               for the 5535-M path only and is off by default.
                that waits for the operator to flip the rear-panel test switch
                (A0h bit1 transition: F8DE:02F5 waits for 0, F8DE:02FB waits for
                1).  With TESTSW_AUTO=1 the bit toggles every 20000 reads of A0h
