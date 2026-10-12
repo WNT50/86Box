@@ -354,10 +354,9 @@ typedef struct epoch_t {
 
     int testmode;   /* [FIX] cfg [Machine] testmode: which 32 KB ROM bank is
                        mapped at F8000-FFFFF (1 = burn-in/upper). */
-    int testsw;     /* [FIX] Read the machine's own section: a machine_t-style init has no
-       "current device", so device_get_config_int() only ever returned the
-       option default and both the bank choice and 0xA0h bit 1 were stuck.
-       testmode = which 32 KB bank, testsw = the 0xA0h bit 1 switch input. */
+    int testsw;     /* cfg [Machine] testsw: the rear test-switch input the firmware
+                       reads back as port 0xA0 bit 1.  Kept separate from
+                       testmode so bank and switch can be A/B-ed. */
 
     /* 5535-M status/diagnostic register file: index port 0x368, data port
        0x36A. It latches the POST error code (indices 0x10-0x14) and is read
@@ -3535,17 +3534,10 @@ machine_xt_ibm3477_init(const machine_t *model)
        *interrupt*: the adapter has to answer the strobe.  [Cloud server only,
        DO NOT USE!!!] */
     epoch_t *epoch = device_add(&ibm5550_device);
-    /* [FIX] The cfg's [Machine] testmode binds to the *machine's* config
-       table, not the epoch device's own table, so epoch_init() always read
-       the device default (0) and both the bank choice and 0xA0h bit 1 were
-       stuck.  Read it in the machine's context and hand it to the device. */
-    /* [FIX] Read straight from the machine section: neither the machine's nor
-       the epoch device's device_get_config_int() context resolves "testmode"
-       to the [Machine] key (probe showed testmode/mem_size/font all 0), while
-       the core reads [Machine] mem_size the same way. */
-    /* [FIX] A machine_t-style init has no "current device", so
-       device_get_config_int() here always returns the option default.
-       Read the machine section directly, like the core reads mem_size. */
+    /* [FIX] Read the machine's own section.  A machine_t-style init has no
+       "current device", so device_get_config_int() only ever returned the
+       option default and both the bank choice and 0xA0h bit 1 were stuck.
+       testmode = which 32 KB bank, testsw = the 0xA0h bit 1 switch input. */
     epoch->testmode = config_get_int("Machine", "testmode", 0);
     epoch->testsw   = config_get_int("Machine", "testsw", 0);
     pclog("3477: cfg testmode = %d, testsw = %d\n", epoch->testmode, epoch->testsw);
