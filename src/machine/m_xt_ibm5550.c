@@ -3259,6 +3259,7 @@ i3477_ram_writeb(uint32_t addr, uint8_t val, void *priv)
 }
 
 
+
 static void
 i3477_ram_writew(uint32_t addr, uint16_t val, void *priv)
 {
@@ -3450,10 +3451,16 @@ machine_xt_ibm3477_init(const machine_t *model)
 {
     int ret;
 
-    /* Only F800-FFFF is ROM: nothing calls or jumps into F000-F7FF, that half of
-       the dump is the font card's window instead. */
-    ret = bios_load_linear("roms/machines/ibm3477/3477rom.bin",
-                           0x000f8000, 32768, 0);
+    /* [EXPERIMENT ipl1] The 3477-S ROM pair is a 64 KB 16-bit image: the upper
+       32 KB (F8000-FFFFF) is the in-situ burn-in (test) program ("AZALEA-DBCS
+       ... Insitu Burn-in Program Ver 1.2"), the lower half (F0000-F7FFF) is the
+       IPL/BIOS ("...System ROS (c) Copyright IBM Corp. 1989"), and the image's
+       reset vector at 0xFFFF0 is 0xEA 00 00 F5 FF = jmp F5FF:0000, i.e. into
+       the BIOS.  Load the whole 64 KB so the BIOS runs first, as it does on the
+       real machine (the burn-in itself documents that it assumes a normal BIOS
+       has already programmed the 8259).  [Cloud server only, DO NOT USE!!!] */
+    ret = bios_load_linear("roms/machines/ibm3477/3477ipl.bin",
+                           0x000f0000, 65536, 0);
 
     if (bios_only || !ret)
         return ret;
