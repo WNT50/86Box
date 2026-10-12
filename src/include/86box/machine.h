@@ -185,6 +185,7 @@ enum {
     MACHINE_TYPE_NONE       = 0,
     MACHINE_TYPE_8088,
     MACHINE_TYPE_8086,
+    MACHINE_TYPE_186,
     MACHINE_TYPE_286,
     MACHINE_TYPE_386SX,
     MACHINE_TYPE_M6117,
@@ -1755,6 +1756,7 @@ extern int             machine_xt_dtk_init(const machine_t *);
 extern int             machine_xt_pcspirit_init(const machine_t *);
 extern int             machine_genxt_init(const machine_t *);
 extern int             machine_xt_glabios_init(const machine_t *);
+extern int             machine_xt_186_init(const machine_t *);
 extern int             machine_xt_top88_init(const machine_t *);
 extern int             machine_xt_super16t_init(const machine_t *);
 extern int             machine_xt_super16te_init(const machine_t *);
@@ -1823,6 +1825,7 @@ extern const device_t  ibm5535_device;
 #endif
 extern int             machine_xt_ibm5550_init(const machine_t *);
 extern int             machine_xt_ibm5535_init(const machine_t *);
+extern int             machine_xt_ibm3477_init(const machine_t *);
 
 /* m_xt_t1000.c */
 #ifdef EMU_DEVICE_H
