@@ -325,6 +325,8 @@ typedef struct epoch_t {
        in epoch_fontcard_in() can never match. */
     uint16_t      fontcard_data;
     mem_mapping_t fontcard_map;
+    mem_mapping_t hiram_map; /* 3477-S 60 KB RAM at 0xE1000-0xEFFFF */
+    uint8_t      *hiram;
     // uint8_t *changedvram;
     uint32_t vram_display_mask;
 
@@ -758,6 +760,42 @@ epoch_inw(uint16_t addr, void *priv)
     temp = epoch_in(addr, epoch);
     epoch_iolog("epoch Inw addr %03X val %04X\n", addr, temp);
     return temp;
+}
+
+/* The 3477-S also decodes its CRTC block at 0x2D0-0x2EF; the burn-in reads
+   0x2DA for the display status and writes 0x2D7/0x2DF.  Treat it as the same
+   registers as 0x3D0-0x3EF.  [Cloud server only, DO NOT USE!!!] */
+static uint8_t
+epoch_mirror_inb(uint16_t addr, void *priv)
+{
+    epoch_t *epoch = (epoch_t *) priv;
+    uint8_t  save;
+    uint8_t  val;
+
+    if (addr != 0x2da)
+        return epoch_inb((uint16_t) (addr + 0x100), priv);
+    /* The burn-in reads 0x2DA once and needs bit 6 clear, while it polls 0x3DA
+       for bits that invert between two reads, so this is a status that can
+       report ready and must not carry the read-side inversion. */
+    save           = epoch->cgastat;
+    val            = epoch_inb((uint16_t) (addr + 0x100), priv);
+    epoch->cgastat = save;
+    return (uint8_t) (val & ~0x40);
+}
+static uint16_t
+epoch_mirror_inw(uint16_t addr, void *priv)
+{
+    return epoch_inw((uint16_t) (addr + 0x100), priv);
+}
+static void
+epoch_mirror_outb(uint16_t addr, uint8_t val, void *priv)
+{
+    epoch_outb((uint16_t) (addr + 0x100), val, priv);
+}
+static void
+epoch_mirror_outw(uint16_t addr, uint16_t val, void *priv)
+{
+    epoch_outw((uint16_t) (addr + 0x100), val, priv);
 }
 
 /* Return a memory address for 9-bit word access */
@@ -2823,6 +2861,37 @@ epoch_fontcard_init(epoch_t *epoch)
     epoch_log("font card: %s, %u pages installed\n", path, epoch->fontcard_pages);
 }
 
+/* The 3477-S has 60 KB of RAM visible from 0xE1000 to 0xEFFFF.  The burn-in
+   fills and verifies it (0xE4000-0xE7FFF with the AB54/54AB pattern, 0xE1000
+   and 0xE8000 with bit patterns), and with the range left unmapped the reads
+   return open bus so those tests record a failure.  The 4 KB shown at 0xE0000
+   is the windowed view of the first display plane.  [Cloud server only,
+   DO NOT USE!!!] */
+static uint8_t
+epoch_hiram_readb(uint32_t addr, void *priv)
+{
+    return ((epoch_t *) priv)->hiram[(addr - 0xE1000) & 0xFFFF];
+}
+static uint16_t
+epoch_hiram_readw(uint32_t addr, void *priv)
+{
+    epoch_t *epoch = (epoch_t *) priv;
+    return (uint16_t) (epoch->hiram[(addr - 0xE1000) & 0xFFFF]
+        | (epoch->hiram[(addr - 0xE1000 + 1) & 0xFFFF] << 8));
+}
+static void
+epoch_hiram_writeb(uint32_t addr, uint8_t val, void *priv)
+{
+    ((epoch_t *) priv)->hiram[(addr - 0xE1000) & 0xFFFF] = val;
+}
+static void
+epoch_hiram_writew(uint32_t addr, uint16_t val, void *priv)
+{
+    epoch_t *epoch = (epoch_t *) priv;
+    epoch->hiram[(addr - 0xE1000) & 0xFFFF]         = val & 0xff;
+    epoch->hiram[(addr - 0xE1000 + 1) & 0xFFFF]     = val >> 8;
+}
+
 static void *
 epoch_init(UNUSED(const device_t *info))
 {
@@ -2855,6 +2924,7 @@ epoch_init(UNUSED(const device_t *info))
     // for(int i=0;i<256*1024;i++) /* for debug */
     //     epoch->vram[i] = 0xff;
     epoch->cram              = calloc(1, EPOCH_SIZE_CRAM_ALL);
+    epoch->hiram             = calloc(1, 0x10000);
     epoch->paritybad         = calloc(1, 0xA0000 >> 3);
     /* Both the 5550 and the 5535-M can carry the kanji font card; the 5550 has
        a switch for it, the 5535-M always has one. The 3477-S has its ROS FONT
@@ -2873,6 +2943,8 @@ epoch_init(UNUSED(const device_t *info))
             epoch_vram_writeb, epoch_vram_writew, NULL, NULL, MEM_MAPPING_EXTERNAL, epoch);
         mem_mapping_add(&epoch->vmap2, 0xC1000, 0x1F000, NULL, epoch_vram_readw, NULL,
             epoch_vram_writeb, epoch_vram_writew, NULL, NULL, MEM_MAPPING_EXTERNAL, epoch);
+        mem_mapping_add(&epoch->hiram_map, 0xE1000, 0xF000, epoch_hiram_readb, epoch_hiram_readw, NULL,
+            epoch_hiram_writeb, epoch_hiram_writew, NULL, NULL, MEM_MAPPING_EXTERNAL, epoch);
     } else {
         mem_mapping_add(&epoch->vmap, 0xA0000, 0x40000, NULL, epoch_vram_readw, NULL,
             epoch_vram_writeb, epoch_vram_writew, NULL, NULL, MEM_MAPPING_EXTERNAL, epoch);
@@ -2890,6 +2962,11 @@ epoch_init(UNUSED(const device_t *info))
     if (epoch_is_3477)
         io_sethandler(0x400, 0x0001,
                       epoch_misc_in, NULL, NULL, epoch_misc_out, NULL, NULL, epoch);
+    /* The 3477-S also decodes its CRTC block at 0x2D0-0x2EF. */
+    if (epoch_is_3477)
+        io_sethandler(0x02d0, 0x0020,
+                      epoch_mirror_inb, epoch_mirror_inw, NULL,
+                      epoch_mirror_outb, epoch_mirror_outw, NULL, epoch);
     // io_sethandler(0x160, 0x0010,
     //               epoch_misc_in, NULL, NULL, epoch_misc_out, NULL, NULL, epoch);
 
@@ -2977,6 +3054,7 @@ epoch_close(void *priv)
     if (epoch_dbg_cur == epoch)
         epoch_dbg_cur = NULL;
     free(epoch->cram);
+    free(epoch->hiram);
     free(epoch->vram);
     free(epoch->paritybad);
     free(epoch->fontcard_win);
