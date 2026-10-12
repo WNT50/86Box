@@ -3139,6 +3139,19 @@ i3477_doorbell_out(uint16_t port, uint8_t val, void *priv)
     pclog("3477: doorbell %03X <- %02X (pc=%04X:%04X)\n", port, val, CS, cpu_state.pc);
 }
 
+/* A log's trailing byte is A5h minus the 8-bit sum of its whole range; the ROM
+   recomputes it the same way after every entry it records. */
+static uint8_t
+i3477_log_checksum(const uint8_t *ram, uint32_t base, uint32_t len)
+{
+    uint8_t sum = 0;
+
+    for (uint32_t i = 0; i < len; i++)
+        sum += ram[base + i];
+
+    return (uint8_t) (0xa5 - sum);
+}
+
 static void
 i3477_shared_reset(void *priv)
 {
@@ -3154,6 +3167,13 @@ i3477_shared_reset(void *priv)
     dev->ram[0x001e] = 0xaa;
     dev->ram[0x0148] = 0x00;
     dev->ram[0x0149] = 0xaa;
+
+    /* Unused log entries read 0xFF - the state a previously booted machine
+       leaves, and what the burn-in tests an entry for emptiness with. */
+    memset(&dev->ram[0x001f], 0xff, 0x0771 - 0x001f);
+    dev->ram[0x0771] = i3477_log_checksum(dev->ram, 0x001d, 0x0754);
+    memset(&dev->ram[0x014a], 0xff, 0x06ee - 0x014a);
+    dev->ram[0x06ee] = i3477_log_checksum(dev->ram, 0x0148, 0x05a6);
 }
 
 static void
