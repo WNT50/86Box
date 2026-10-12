@@ -87,13 +87,14 @@
 #define EPOCH_FONTCARD_ROM_OLD  0 /* Old font card ROM revision (94X1372) */
 #define EPOCH_FONTCARD_ROM_NEW  1 /* New font card ROM revision (65X1460) */
 #define EPOCH_FONTCARD_ROM_SIZE (512 * 1024) /* Font card ROM size (512K) */
+#define EPOCH_FONTCARD_ROM_SIZE_3477 (1024 * 1024) /* 3477-S ROS FONT ROM size (1M, 32 x 32K pages) */
 #define EPOCH_FONTCARD_ROM_PATH_OLD "roms/machines/ibm5535/94X1372.BIN"
 #define EPOCH_FONTCARD_ROM_PATH_NEW "roms/machines/ibm5535/65X1460.BIN"
 #define EPOCH_FONTCARD_ROM_PATH_K16 "roms/machines/ibm5550/FONTK16.BIN"
 #define EPOCH_FONTCARD_ROM_PATH_K24 "roms/machines/ibm5550/FONTK24.BIN"
 #define EPOCH_FONTCARD_ROM_PATH_K52 "roms/machines/ibm5550/FONTK52.BIN"
 #define EPOCH_FONTCARD_ROM_PATH_P24 "roms/machines/ibm5550/FONTP24.BIN"
-#define EPOCH_FONTCARD_ROM_PATH_3477 "roms/machines/ibm3477/card0.bin" /* 3477-S built-in ROS FONT ROM */
+#define EPOCH_FONTCARD_ROM_PATH_3477 "roms/machines/ibm3477/font.bin" /* 3477-S built-in ROS FONT ROM */
 
 /* Korean (Hangul) and Traditional Chinese version of Multistation DOS are not dumped yet,
    so font image cannot be generated. They would have ID 4 and 8 for codepages 934 and 938. */
@@ -2617,8 +2618,7 @@ epoch_fontcard_set_page(epoch_t *epoch, uint32_t page)
         page %= epoch->fontcard_pages;
     epoch->fontcard_page = page;
     offset               = page * EPOCH_FONTCARD_WIN_SIZE;
-    if ((epoch->fontcard_rom != NULL)
-     && (offset + EPOCH_FONTCARD_WIN_SIZE <= EPOCH_FONTCARD_ROM_SIZE))
+    if ((epoch->fontcard_rom != NULL) && (page < epoch->fontcard_pages))
         memcpy(epoch->fontcard_win, &epoch->fontcard_rom[offset],
                EPOCH_FONTCARD_WIN_SIZE);
     else
@@ -2727,7 +2727,10 @@ epoch_fontcard_init(epoch_t *epoch)
 {
     FILE       *fp;
     size_t      fsize;
+    uint32_t    rom_size;
     const char *path;
+
+    rom_size = epoch_is_3477 ? EPOCH_FONTCARD_ROM_SIZE_3477 : EPOCH_FONTCARD_ROM_SIZE;
 
     if (epoch_is_3477) {
         path = EPOCH_FONTCARD_ROM_PATH_3477;
@@ -2756,8 +2759,8 @@ epoch_fontcard_init(epoch_t *epoch)
     fp = rom_fopen(path, "rb");
     if (fp == NULL)
         return; /* No font card installed. */
-    epoch->fontcard_rom = calloc(1, EPOCH_FONTCARD_ROM_SIZE);
-    fsize = fread(epoch->fontcard_rom, 1, EPOCH_FONTCARD_ROM_SIZE, fp);
+    epoch->fontcard_rom = calloc(1, rom_size);
+    fsize = fread(epoch->fontcard_rom, 1, rom_size, fp);
     fclose(fp);
     if (fsize < EPOCH_FONTCARD_WIN_SIZE) {
         free(epoch->fontcard_rom);
