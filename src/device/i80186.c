@@ -68,6 +68,8 @@
 #define I80186_DMA1_END         0xDBu
 
 /* Interrupt controller request/status registers (270788-001 section 9.6.2). */
+#define I80186_ICU_EOI          0x22u /* End Of Interrupt (write-only) */
+#define I80186_ICU_INSERVICE    0x2Cu /* In-Service Register */
 #define I80186_ICU_REQ          0x2Eu /* Interrupt Request Register */
 #define I80186_ICU_STATUS       0x30u /* Interrupt Controller Status Register */
 
@@ -183,7 +185,16 @@ i80186_write_word(i80186_t *dev, uint16_t off, uint16_t val)
             dev->tmr_start[i] = tsc;
     }
 
-    /* The ROM acknowledges a timer by writing the status register, which has
+    /* Taking an EOI acknowledges the request named by its low bits until that
+       timer overflows again (the ROM: out 0x722, 0x8000 = EOI for source 0). */
+    if (off == I80186_ICU_EOI) {
+        uint16_t src = val & 0x0007u;
+
+        if (src < 3)
+            dev->tmr_ack[src] = i80186_tmr_overflows(dev, (int) src);
+    }
+
+    /* The ROM also acknowledges a timer by writing the status register, which has
        to make the interrupt request go away until the next overflow. */
     if (off == I80186_ICU_STATUS) {
         dev->regs[off / 2] = val & 0x0007u;
