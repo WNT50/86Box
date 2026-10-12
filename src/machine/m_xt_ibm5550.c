@@ -2990,7 +2990,13 @@ epoch_init(UNUSED(const device_t *info))
     mem_mapping_add(&epoch->paritymap, 0, 0xA0000, epoch_parity_readb, epoch_parity_readw, NULL,
         epoch_parity_writeb, epoch_parity_writew, NULL, NULL, MEM_MAPPING_CACHE, epoch);
 
-    io_sethandler(0x03d0, 0x0020, epoch_inb, epoch_inw, NULL, epoch_outb, epoch_outw, NULL, epoch);
+    /* [AB] The 3477-S drives the PS/55 DA2 display controller, whose register
+       window is 0x3D0-0x3DA.  Claiming the epoch display controller's wider
+       0x3D0-0x3EF window here shadowed the DA2 on the 3477: every video register
+       the IPL programmed landed in epoch_outb, so the DA2's CRTC was never set up
+       (black screen, video mode never changed).  The 5535/5550 keep it. */
+    if (!epoch_is_3477)
+        io_sethandler(0x03d0, 0x0020, epoch_inb, epoch_inw, NULL, epoch_outb, epoch_outw, NULL, epoch);
 
     io_sethandler(0x44, 0x0001,
                   epoch_misc_in, NULL, NULL, epoch_misc_out, NULL, NULL, epoch);
