@@ -1624,15 +1624,21 @@ static uint8_t
 epoch_parity_readb(uint32_t addr, void *priv)
 {
     epoch_t *epoch = (epoch_t *) priv;
+    int newerr = 0;
     if (epoch->parityenabled != 0) {
-        if (epoch_parity_check(epoch, addr) || epoch->parityforce)
+        if (epoch_parity_check(epoch, addr) || epoch->parityforce) {
+            newerr = (epoch->parityerror == 0);
             epoch->parityerror = 1;
+            if (epoch_is_3477)
+                epoch->parityforce = 0; /* [AB] the arm is one-shot */
+        }
     }
     if ((epoch->parityerror != 0) && (epoch->parityenabled != 0)) {
         epoch->parityerroraddr = (addr >> 16) & 0xFF; /* X000:0 */
         epoch_log("%04X:%04X perror at %0X\n", cs >> 4, cpu_state.pc, addr);
-        if (nmi_mask)
+        if (nmi_mask && (!epoch_is_3477 || newerr)) {
             nmi_raise();
+        }
     }
     if (epoch->lowmemorydisabled) {
         if ((addr >= 0x40000) && (addr < 0xA0000)) {
@@ -1649,15 +1655,21 @@ static uint16_t
 epoch_parity_readw(uint32_t addr, void *priv)
 {
     epoch_t *epoch = (epoch_t *) priv;
+    int newerr = 0;
     if (epoch->parityenabled != 0) {
-        if (epoch_parity_check(epoch, addr) || epoch_parity_check(epoch, addr + 1) || epoch->parityforce)
+        if (epoch_parity_check(epoch, addr) || epoch_parity_check(epoch, addr + 1) || epoch->parityforce) {
+            newerr = (epoch->parityerror == 0);
             epoch->parityerror = 1;
+            if (epoch_is_3477)
+                epoch->parityforce = 0; /* [AB] the arm is one-shot */
+        }
     }
     if ((epoch->parityerror != 0) && (epoch->parityenabled != 0)) {
         epoch->parityerroraddr = (addr >> 16) & 0xFF;
         epoch_log("%04X:%04X perror at %X\n", cs >> 4, cpu_state.pc, addr);
-        if (nmi_mask)
+        if (nmi_mask && (!epoch_is_3477 || newerr)) {
             nmi_raise();
+        }
     }
     if (epoch->lowmemorydisabled) {
         if ((addr >= 0x40000) && (addr < 0xA0000)) {
@@ -1926,7 +1938,10 @@ x1xx xxxx: Enable parity update (Disable this -> Write data -> Enable this -> Re
                    (a set bit 0 sends it to the error exit).  The System ROS's
                    00h/01h writes to A0h are its blink-and-park loop, not a
                    disable/write/enable/read parity recipe. */
-                epoch->parityforce   = 0;
+                /* [AB] Bit 5 arms one parity error for the next memory read: the
+                   System ROS stores with 88h/A8h (bit 7 set) and
+                   loads the word back, requiring the A0h bit 0 latch and the NMI. */
+                epoch->parityforce   = (val & 0x80) ? 1 : 0;
             } else {
                 epoch->parityenabled = val & 0x40; /* 1 = Enable read/write with parity */
                 /* Bit 3: parity error test mode (see epoch_t). */
