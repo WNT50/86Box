@@ -80,6 +80,10 @@ static int         is_special                       = 0;
 
 static uint16_t    bat_counter                      = 0;
 
+/* [AB] BAT 只需在上电/复位后发一次；状态机每次排空命令队列都会重入
+   execute_bat（kbc_at_dev.c:158 / :181），原实现会因此反复重发 0xAA。 */
+static int         bat_pending                      = 0;
+
 const scancode scancode_set1_at[512] = {
   // clang-format off
     { .mk = {            0 }, .brk = {                   0 } }, /* 000 */
@@ -5699,20 +5703,24 @@ keyboard_at_bat(void *priv)
 {
     atkbc_dev_t *dev = (atkbc_dev_t *) priv;
 
-    if (bat_counter == 0x0000) {
-        keyboard_at_set_defaults(dev);
-
-        keyboard_scan = 1;
-
-        keyboard_all_up();
-        keyboard_update_states(0, 0, 0, 0);
-
-        keyboard_set_in_reset(0);
-        kbc_at_dev_queue_add(dev, 0xaa, 0);
-    } else {
-        bat_counter--;
-        dev->state = DEV_STATE_EXECUTE_BAT;
+    if (!bat_pending) {
+        if (bat_counter)
+            bat_counter--;
+        dev->state = DEV_STATE_MAIN_OUT;
+        return;
     }
+
+    bat_pending = 0;
+
+    keyboard_at_set_defaults(dev);
+
+    keyboard_scan = 1;
+
+    keyboard_all_up();
+    keyboard_update_states(0, 0, 0, 0);
+
+    keyboard_set_in_reset(0);
+    kbc_at_dev_queue_add(dev, 0xaa, 0);
 }
 
 static void
@@ -6053,6 +6061,7 @@ keyboard_at_init(const device_t *info)
     if (dev->port != NULL) {
         kbc_at_dev_reset(dev, 0);
         bat_counter = 0x0000;
+        bat_pending = 1;
     }
 
     if ((dev->type & FLAG_TYPE_MASK) > KBD_84_KEY)
