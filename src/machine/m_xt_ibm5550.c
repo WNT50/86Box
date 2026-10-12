@@ -72,6 +72,11 @@
 #define EPOCH_SIZE_CRAM            (4 * 1024)    /* 0x1000 */
 #define EPOCH_MASK_A000            0x1ffff       /* 0x1FFFF */
 #define EPOCH_MASK_CRAM            0xfff         /* 0xFFF */
+/* The 3477-S picks one of four 4 KB planes of the display RAM into the 0xE0000
+   window through write-only port 0x400 (its burn-in writes 3,2,1,0 there and
+   runs the same pattern test on each). [Cloud server only, DO NOT USE!!!] */
+#define EPOCH_CRAM_PLANES          4
+#define EPOCH_SIZE_CRAM_ALL        (EPOCH_SIZE_CRAM * EPOCH_CRAM_PLANES)
 #define EPOCH_MASK_VRAM            0x3ffff       /* 0xFFFFF */
 // #define EPOCH_MASK_VRAMPLANE       0x1ffff       /* 0x1FFFF */
 #define EPOCH_PIXELCLOCK24         40000000.0    /* 40 MHz interlaced */
@@ -328,6 +333,7 @@ typedef struct epoch_t {
     uint8_t parityerroraddr;
     int lowmemorydisabled;
     int crtioenabled;
+    uint8_t dispbank; /* port 0x400: bits 1-0 pick the 0xE0000 plane (3477-S) */
 
     int fullchange;
 
@@ -1472,12 +1478,22 @@ epoch_vram_readw(uint32_t addr, void *priv)
 }
 
 
+/* Index into the display RAM: the 3477-S window shows the plane port 0x400
+   points at, everyone else gets the single flat 4 KB block. */
+static uint32_t
+epoch_cram_index(epoch_t *epoch, uint32_t addr)
+{
+    addr &= EPOCH_MASK_CRAM;
+    if (epoch_is_3477)
+        addr += (uint32_t) (epoch->dispbank & 3) << 12;
+    return addr;
+}
+
 static void
 epoch_cram_write(uint32_t addr, uint8_t val, void *priv)
 {
     epoch_t *epoch = (epoch_t *) priv;
-    addr &= EPOCH_MASK_CRAM;
-    epoch->cram[addr] = val;
+    epoch->cram[epoch_cram_index(epoch, addr)] = val;
     epoch->fullchange = 3;
     // epoch_log("cw %04X:%04X %04X %02X\n", cs >> 4, cpu_state.pc, addr, val);
 }
@@ -1511,8 +1527,7 @@ static uint8_t
 epoch_cram_read(uint32_t addr, void *priv)
 {
     epoch_t *epoch = (epoch_t *) priv;
-    addr &= EPOCH_MASK_CRAM;
-    return epoch->cram[addr];
+    return epoch->cram[epoch_cram_index(epoch, addr)];
 }
 static uint8_t
 epoch_cram_readb(uint32_t addr, void *priv)
@@ -1700,6 +1715,11 @@ epoch_misc_in(uint16_t port, void *priv)
     uint8_t           ret = 0xff;
 
     switch (port) {
+        case 0x400:
+            /* Display-RAM plane select (3477-S).  The burn-in reads it back
+               and keeps bit 5, which therefore reads set. */
+            ret = epoch->dispbank | 0x20;
+            break;
 /*
 I/O A0h R:
 xxxx xxx1: Memory or parity error?
@@ -1833,6 +1853,9 @@ epoch_misc_out(uint16_t port, uint8_t val, void *priv)
         epoch_log("%04X:%04X I/O Out %02X: %02X\n", cs >> 4, cpu_state.pc, port, val);
 
     switch (port) {
+        case 0x400:
+            epoch->dispbank = val; /* 3477-S display-RAM plane select */
+            break;
         case 0x44:
             for (uint8_t i = 0; i < 3; i++) {
                 pit_intf->set_gate(pit_intf->data, i, val & 1);
@@ -2524,6 +2547,7 @@ epoch_reset(void *priv)
     epoch->parityforce = 0;
     memset(epoch->paritybad, 0, 0xA0000 >> 3);
     epoch->parityenabled = 1;
+    epoch->dispbank      = 0;
     /* A hard reset is a power-on: only the soft reset a POST restart command
        issues (see epoch_misc_out's 0x36A/0xA1) leaves this set. */
     epoch->warmstart  = 0;
@@ -2830,7 +2854,7 @@ epoch_init(UNUSED(const device_t *info))
     epoch->vram              = calloc(1, 256* 1024);
     // for(int i=0;i<256*1024;i++) /* for debug */
     //     epoch->vram[i] = 0xff;
-    epoch->cram              = calloc(1, 4 * 1024);
+    epoch->cram              = calloc(1, EPOCH_SIZE_CRAM_ALL);
     epoch->paritybad         = calloc(1, 0xA0000 >> 3);
     /* Both the 5550 and the 5535-M can carry the kanji font card; the 5550 has
        a switch for it, the 5535-M always has one. The 3477-S has its ROS FONT
@@ -2862,6 +2886,10 @@ epoch_init(UNUSED(const device_t *info))
                   epoch_misc_in, NULL, NULL, epoch_misc_out, NULL, NULL, epoch);
     io_sethandler(0xA0, 0x0008,
                   epoch_misc_in, NULL, NULL, epoch_misc_out, NULL, NULL, epoch);
+    /* The 3477-S selects the display-RAM plane shown at 0xE0000 here. */
+    if (epoch_is_3477)
+        io_sethandler(0x400, 0x0001,
+                      epoch_misc_in, NULL, NULL, epoch_misc_out, NULL, NULL, epoch);
     // io_sethandler(0x160, 0x0010,
     //               epoch_misc_in, NULL, NULL, epoch_misc_out, NULL, NULL, epoch);
 
