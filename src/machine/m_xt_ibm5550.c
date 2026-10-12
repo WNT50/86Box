@@ -1833,12 +1833,11 @@ x1xx xxxx: Sense DREQ? (only used in diag test)
                behaviour. */
             {
                 static int auto_sw = -1;
-                static uint64_t n_sw = 0;
                 static int sw_state = 0;
                 if (auto_sw < 0)
                     auto_sw = (getenv("TESTSW_AUTO") != NULL);
                 if (auto_sw) {
-                    if (++n_sw >= 20000) { n_sw = 0; sw_state ^= 1; }
+                    sw_state ^= 1;
                     if (sw_state)
                         ret |= 0x02;
                 }
