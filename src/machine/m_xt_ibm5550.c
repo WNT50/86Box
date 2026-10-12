@@ -3516,12 +3516,17 @@ machine_xt_ibm3477_init(const machine_t *model)
         FILE *fp = rom_fopen("roms/machines/ibm3477/card0.bin", "rb");
 
         if (fp != NULL) {
-            size_t rd = fread(epoch->vram, 1, 0x8000, fp);
+            /* The font-24 text renderer fetches the half-width generator from
+               EPOCH_VRAM_SBCS (0x38000), 128 bytes per code - loading the page
+               at vram[0] leaves the renderer reading zeros (the ankA=00000000
+               seen in every run).  Put it where it is read.  [Cloud server
+               only, DO NOT USE!!!] */
+            size_t rd = fread(epoch->vram + EPOCH_VRAM_SBCS, 1, 0x8000, fp);
             fclose(fp);
-            pclog("3477: card page0 -> vram[0], %u bytes; 'A' row3 = %02X%02X%02X%02X\n",
-                  (unsigned) rd,
-                  epoch->vram[0x41 * 0x80 + 3 * 4], epoch->vram[0x41 * 0x80 + 3 * 4 + 1],
-                  epoch->vram[0x41 * 0x80 + 3 * 4 + 2], epoch->vram[0x41 * 0x80 + 3 * 4 + 3]);
+            pclog("3477: card page0 -> vram[%05X], %u bytes; 'A' row3 = %02X%02X%02X%02X\n",
+                  EPOCH_VRAM_SBCS, (unsigned) rd,
+                  epoch->vram[EPOCH_VRAM_SBCS + 0x41 * 0x80 + 3 * 4], epoch->vram[EPOCH_VRAM_SBCS + 0x41 * 0x80 + 3 * 4 + 1],
+                  epoch->vram[EPOCH_VRAM_SBCS + 0x41 * 0x80 + 3 * 4 + 2], epoch->vram[EPOCH_VRAM_SBCS + 0x41 * 0x80 + 3 * 4 + 3]);
         } else
             pclog("3477: card0.bin missing (roms/machines/ibm3477/card0.bin)\n");
     }
