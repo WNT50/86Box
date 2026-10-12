@@ -175,7 +175,10 @@ kbc_at_dev_reset(atkbc_dev_t *dev, int do_fa)
     *dev->scan = 1;
 
     if (do_fa) {
-        kbc_at_dev_queue_add(dev, 0xfa, 0);
+        /* [AB] ACK 是发给【主机】的数据，必须进 main=1 的数据队列；
+           原写成 main=0 会把它塞回设备自己的命令队列 ⇒ 设备再回一个 ACK，
+           主机每轮多收一个 0xFA，ROM 单字节校验持续错位。 */
+        kbc_at_dev_queue_add(dev, 0xfa, 1);
         dev->state = DEV_STATE_MAIN_WANT_EXECUTE_BAT;
     } else
         dev->state = DEV_STATE_EXECUTE_BAT;
