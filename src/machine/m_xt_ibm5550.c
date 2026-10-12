@@ -3249,7 +3249,12 @@ i3477_ram_readw(uint32_t addr, void *priv)
 static void
 i3477_ram_writeb(uint32_t addr, uint8_t val, void *priv)
 {
-    pclog("3477: wrb C000:%04X = %02X\n", addr & 0xfff, val);
+    uint16_t off = addr & 0xfff;
+
+    if ((off >= 0x1D) && (off <= 0x45)) /* the burn-in's failure-code log */
+        pclog("3477: wrb C000:%04X = %02X bp=%04X (pc=%04X:%04X)\n", off, val, BP, CS, cpu_state.pc);
+    else
+        pclog("3477: wrb C000:%04X = %02X\n", off, val);
     ((i3477_shared_t *) priv)->ram[addr & 0xfff] = val;
 }
 
