@@ -3258,6 +3258,7 @@ i3477_ram_writeb(uint32_t addr, uint8_t val, void *priv)
     ((i3477_shared_t *) priv)->ram[addr & 0xfff] = val;
 }
 
+
 static void
 i3477_ram_writew(uint32_t addr, uint16_t val, void *priv)
 {
