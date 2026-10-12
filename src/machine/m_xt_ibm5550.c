@@ -195,7 +195,7 @@ extern uint8_t *rom; /* [FIX] the ROM buffer bios_load_linear filled */
    5535-M is the same platform with a 286 and a different IPL, and it moves
    the software timer's arm/ack from port 0xA6 to bit 0 of port 0xA0. */
 static int epoch_is_5535 = 0;
-static int epoch_is_3477 = 0;
+int epoch_is_3477 = 0; /* [AB] non-static: the FDC model needs it */
 
 enum epoch_nvr_ADDR {
     epoch_nvr_SECOND1,

@@ -931,6 +931,7 @@ pic2_init(void)
 void
 picint_common(uint16_t num, int level, int set, uint8_t *irq_state)
 {
+
     int     raise;
     int     max = 16;
     uint8_t b;

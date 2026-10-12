@@ -357,6 +357,8 @@ fdc_track0(fdc_t *fdc, int drive)
            fdd_track0(fdc->fdd[drive]);
 }
 
+extern int epoch_is_3477; /* [AB] 3477-S machine state */
+
 static void
 fdc_int(fdc_t *fdc, int set_fintr)
 {
@@ -2043,7 +2045,15 @@ fdc_callback(void *priv)
             memset(fdc->pcn, 0x00, 4 * sizeof(uint16_t));
             return;
         case -1: /* Reset */
-            fdc_int(fdc, 1);
+            /* [AB] The 3477-S IPL writes 3F2=00 to hold the controller in reset and
+               then keeps interrupts disabled for a long stretch; the reset-time
+               request would stay latched in the PIC and be delivered inside a later
+               "expect silence" self-test window (error code 6).  The 5550/5535
+               keep the stock behaviour. */
+            if (epoch_is_3477)
+                picintc(1 << fdc->irq);
+            else
+                fdc_int(fdc, 1);
             fdc->fintr = 0;
             memset(fdc->pcn, 0x00, 4 * sizeof(uint16_t));
             fdc->reset_stat = 4;
