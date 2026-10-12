@@ -826,8 +826,16 @@ getfont_ps55dbcs_vram(epoch_t *epoch, int32_t code, int32_t line)
 {
     uint32_t font = 0;
 
+    int32_t  chr  = code;
     code *= 0x80;
     code += line * 4;
+    /* [AB] 3477-S: the built-in ANK font (font.bin, 256 codes x 128 bytes) is
+       loaded into the SBCS area at EPOCH_VRAM_SBCS.  The 3477 render branch
+       indexed from 0, so every lookup read zeros, every cell drew the
+       background colour and the screen stayed black even though the mode was
+       programmed correctly. */
+    if (epoch_is_3477 && chr < 0x100)
+        code += EPOCH_VRAM_SBCS;
     if (epoch->font24) { /* Font 24 (2 x 13 x 29) */
         font = epoch->vram[code];
         font <<= 8;
