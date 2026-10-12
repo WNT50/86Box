@@ -44,6 +44,8 @@
 #include <86box/ppi.h>
 #include <86box/nmi.h>
 #include <86box/mem.h>
+#include <86box/log.h>
+#include <86box/i80186.h>
 #include <86box/device.h>
 #include <86box/lpt.h>
 #include <86box/nvr.h>
@@ -183,6 +185,7 @@
    5535-M is the same platform with a 286 and a different IPL, and it moves
    the software timer's arm/ack from port 0xA6 to bit 0 of port 0xA0. */
 static int epoch_is_5535 = 0;
+static int epoch_is_3477 = 0;
 
 enum epoch_nvr_ADDR {
     epoch_nvr_SECOND1,
@@ -242,7 +245,9 @@ epoch_log(const char *fmt, ...)
 typedef struct epoch_t {
     mem_mapping_t cmapping;
 
-    uint16_t crtc[32];
+    /* The controller exposes a full 256-entry register file: the 3477-S ROM
+       write/read-back tests indices all the way up to 0xE5. */
+    uint16_t crtc[256];
     // uint16_t crtc_vpreg[128];
     // uint8_t  crtc_vpsel;
     uint8_t  crtmode;
@@ -298,7 +303,7 @@ typedef struct epoch_t {
     /* SBCS Font Buffer D8000-DBFFFh (16 KB) */
     /* APA Buffer A0000-DFFFFh (256 KB) */
     uint8_t *vram;
-    mem_mapping_t cmap, vmap, paritymap;
+    mem_mapping_t cmap, vmap, vmap2, paritymap;
     /* Kanji font card (optional): the card's page ROM and the 32 or 48 KB
        window RAM the guest sees at F0000h. */
     uint8_t      *fontcard_rom;
@@ -422,11 +427,9 @@ epoch_out(uint16_t addr, uint16_t val, void *priv)
     epoch_iolog("%04X:%04X epoch Out addr %03X val %02X\n", cs >> 4, cpu_state.pc, addr, val);
     switch (addr) {
         case LC_INDEX:
-            epoch->crtcaddr = val;
+            epoch->crtcaddr = val & 0xFF;
             break;
         case LC_DATA:
-            if (epoch->crtcaddr > 0x1f)
-                return;
             if (epoch->crtioenabled == 0)
                 return;
             if (!(epoch->crtcaddr == LC_CURSOR_LOC_HIGH || epoch->crtcaddr == LC_CURSOR_LOC_LOWJ))
@@ -557,8 +560,6 @@ epoch_in(uint16_t addr, void *priv)
             temp = epoch->crtcaddr;
             break;
         case LC_DATA:
-            if (epoch->crtcaddr > 0x1f)
-                return EPOCH_INVALIDACCESS16;
             if (epoch->crtioenabled == 0)
                 return EPOCH_INVALIDACCESS16;
             temp = epoch->crtc[epoch->crtcaddr];
@@ -621,10 +622,17 @@ epoch_in(uint16_t addr, void *priv)
  * out b(idx), in b, in b(data)
  * out b(idx), in w(data)
  */
+/* [Cloud server only, DO NOT USE!!!] 3477-S bring-up: latest epoch instance, so
+   the sampler can report what the display controller would draw. */
+static epoch_t *epoch_dbg_cur = NULL;
+
 static void
 epoch_outb(uint16_t addr, uint8_t val, void *priv)
 {
     epoch_t *epoch = (epoch_t *) priv;
+
+    epoch_dbg_cur = epoch;
+    pclog("3477: outb %03X <- %02X\n", addr, val);
     // epoch_iolog("%04X:%04X epoch Outb addr %03X val %02X es:di=%x:%x ds:si=%x:%x\n", cs >> 4, cpu_state.pc, addr, val, ES, DI, DS, SI);
     epoch->inflipflop = 0;
     switch (addr) {
@@ -873,6 +881,21 @@ epoch_render_text(epoch_t *epoch)
             /* Draw character */
             for (uint32_t n = 0; n < epoch->char_width; n++)
                 p[n] = epoch->pallook[epoch->egapal[bg]]; /* draw blank */
+            /* [Cloud server only, DO NOT USE!!!] 3477-S: one 26-dot glyph per
+               13-dot cell (40 glyphs x 26 = 1040).  The ROM stores one word per
+               character in CRAM, so consume one pair and draw the whole glyph;
+               the code indexes the card's glyph area directly. */
+            if (epoch_is_3477) {
+                uint32_t font = getfont_ps55dbcs(chr, epoch->scanline, epoch);
+                for (uint32_t n = 0; n < 26; n++) {
+                    p[n] = epoch->pallook[epoch->egapal[(font & 0x80000000) ? fg : bg]];
+                    font <<= 1;
+                }
+                x += epoch->char_width; /* the loop adds another 13 => 26 total */
+                p += epoch->char_width * 2;
+                epoch->memaddr += 2;
+                continue;
+            }
             /*  SBCS or DBCS left half */
             if (chr_wide == 0) {
                 if (attr & 0x01)
@@ -1313,6 +1336,16 @@ epoch_vram_write(uint32_t addr, uint8_t val, void *priv)
     epoch_t *epoch = (epoch_t *) priv;
     // epoch_log("epoch_vw: %x %x\n", addr, val);
     addr &= EPOCH_MASK_VRAM;
+    /* [Cloud server only, DO NOT USE!!!] 3477-S bring-up: the ANK (SBCS) font
+       area lives in VRAM at 0x38000; log the first writes so we can tell whether
+       anything ever loads it. */
+    if (addr >= EPOCH_VRAM_SBCS) {
+        static int n = 0;
+        if (n < 24) {
+            pclog("3477: vram ank %05X <- %02X\n", addr, val);
+            n++;
+        }
+    }
     epoch->vram[addr] = val;
     epoch->fullchange = 3;
 }
@@ -1438,6 +1471,14 @@ epoch_cram_writeb(uint32_t addr, uint8_t val, void *priv)
 static void
 epoch_cram_writew(uint32_t addr, uint16_t val, void *priv)
 {
+    static int dbg_n = 0;
+
+    /* [Cloud server only, DO NOT USE!!!] 3477-S bring-up: show the first
+       text/attribute writes at 0xE0000. */
+    if (dbg_n < 8) {
+        pclog("3477: cram wr %05X <- %04X\n", addr, val);
+        dbg_n++;
+    }
     // epoch_log("epoch_cram_writ   ew: Write to %x, val %x\n", addr, val);
     epoch_t *epoch = (epoch_t *) priv;
     cycles -= video_timing_write_w;
@@ -1667,6 +1708,7 @@ x1xx xxxx: Sense DREQ? (only used in diag test)
                failure. */
             if (epoch_is_5535)
                 ret |= 0x20;
+            pclog("3477: in 0xA0 = %02X (pc=%04X:%04X)\n", ret, CS, cpu_state.pc);
             break;
         case 0xA1: /* High address where memory error occured */
             ret = epoch->parityerroraddr;
@@ -1681,7 +1723,11 @@ x1xx xxxx: No floppy drive
 1xxx xxxx: No (bootable?) hard drive
 */
         case 0xA2:
-            if (epoch->font24)
+            if (epoch_is_3477) {
+                /* The 3477-S IPL identifies its display as (A2 & 0xA0) == 0x80
+                   for the 24-dot panel; the 5550 values (bit 5 set) never match. */
+                ret = epoch->font24 ? 0x88 : 0x22;
+            } else if (epoch->font24)
                 ret = 0xA8; /* Mono 24 */
             else
                 ret = 0xA2; /* Mono 16 */
@@ -2467,7 +2513,10 @@ epoch_reset(void *priv)
        requires the first unbacked block to be at 0xA0000 (memory-size walk at
        F871C, error 0x6111), so it must not be hidden there. */
     epoch->lowmemorydisabled = epoch_is_5535 ? 0 : 1;
-    epoch->crtioenabled = 0;
+    /* The 5550's IPL opens the CRTC I/O and video output by writing 3D2h; the
+       3477-S never does, so it must power up open or every CRTC write is
+       dropped and nothing is drawn.  [Cloud server only, DO NOT USE!!!] */
+    epoch->crtioenabled = epoch_is_3477 ? 1 : 0;
     /* The IPL reads 0x286 before programming the block and requires the two
        control bits to read as set then (FCE5B), so those power up set. */
     epoch->mem_ctrl = 0xc0;
@@ -2758,8 +2807,17 @@ epoch_init(UNUSED(const device_t *info))
 
     mem_mapping_add(&epoch->cmap, 0xE0000, 0x1000, epoch_cram_readb, epoch_cram_readw, NULL,
         epoch_cram_writeb, epoch_cram_writew, NULL, NULL, MEM_MAPPING_EXTERNAL, epoch);
-    mem_mapping_add(&epoch->vmap, 0xA0000, 0x40000, NULL, epoch_vram_readw, NULL,
-        epoch_vram_writeb, epoch_vram_writew, NULL, NULL, MEM_MAPPING_EXTERNAL, epoch);
+    if (epoch_is_3477) {
+        /* The 3477-S shares 0xC0000 with its display controller, so leave that
+           page out of the VRAM window. [Cloud server only, DO NOT USE!!!] */
+        mem_mapping_add(&epoch->vmap, 0xA0000, 0x20000, NULL, epoch_vram_readw, NULL,
+            epoch_vram_writeb, epoch_vram_writew, NULL, NULL, MEM_MAPPING_EXTERNAL, epoch);
+        mem_mapping_add(&epoch->vmap2, 0xC1000, 0x1F000, NULL, epoch_vram_readw, NULL,
+            epoch_vram_writeb, epoch_vram_writew, NULL, NULL, MEM_MAPPING_EXTERNAL, epoch);
+    } else {
+        mem_mapping_add(&epoch->vmap, 0xA0000, 0x40000, NULL, epoch_vram_readw, NULL,
+            epoch_vram_writeb, epoch_vram_writew, NULL, NULL, MEM_MAPPING_EXTERNAL, epoch);
+    }
     mem_mapping_add(&epoch->paritymap, 0, 0xA0000, epoch_parity_readb, epoch_parity_readw, NULL,
         epoch_parity_writeb, epoch_parity_writew, NULL, NULL, MEM_MAPPING_CACHE, epoch);
 
@@ -2851,6 +2909,10 @@ epoch_close(void *priv)
     epoch_log("PIC IRR=%02X ISR=%02X IMR=%02X ICW1=%02X ICW2=%02X ICW3=%02X ICW4=%02X OCW2=%02X OCW3=%02X\n",
           pic.irr, pic.isr, pic.imr, pic.icw1, pic.icw2, pic.icw3, pic.icw4, pic.ocw2, pic.ocw3);
 #endif
+    /* The 3477 sampler caches this pointer; a hard reset frees the epoch here
+       and a fresh one is made later, so drop the stale reference. */
+    if (epoch_dbg_cur == epoch)
+        epoch_dbg_cur = NULL;
     free(epoch->cram);
     free(epoch->vram);
     free(epoch->paritybad);
@@ -3001,6 +3063,167 @@ const device_t ibm5550_device = {
     .config        = epoch_5550_config
 };
 
+/* -------------------------------------------------------------------------
+   IBM 3477-S: the CPU talks to a separate keyboard/display controller through
+   a shared RAM at segment C000 (mailboxes + POST log) plus 0x362/0x363
+   doorbells.  This is a minimal model: a 4 KB RAM window with the "other
+   side" mailbox already published (0x00AA at C000:001D / C000:0148).
+   [Cloud server only, DO NOT USE!!!] Experimental, not validated.
+   ------------------------------------------------------------------------- */
+typedef struct i3477_shared_t {
+    mem_mapping_t map;
+    uint8_t       ram[0x1000];
+    pc_timer_t    sample_timer;
+} i3477_shared_t;
+
+static uint8_t
+i3477_ram_readb(uint32_t addr, void *priv)
+{
+    uint8_t v = ((i3477_shared_t *) priv)->ram[addr & 0xfff];
+
+    pclog("3477: rdb C000:%04X = %02X\n", addr & 0xfff, v);
+    return v;
+}
+
+static uint16_t
+i3477_ram_readw(uint32_t addr, void *priv)
+{
+    i3477_shared_t *dev = (i3477_shared_t *) priv;
+    uint16_t        v   = (uint16_t) (dev->ram[addr & 0xfff] | (dev->ram[(addr + 1) & 0xfff] << 8));
+
+    pclog("3477: rdw C000:%04X = %04X\n", addr & 0xfff, v);
+    return v;
+}
+
+static void
+i3477_ram_writeb(uint32_t addr, uint8_t val, void *priv)
+{
+    pclog("3477: wrb C000:%04X = %02X\n", addr & 0xfff, val);
+    ((i3477_shared_t *) priv)->ram[addr & 0xfff] = val;
+}
+
+static void
+i3477_ram_writew(uint32_t addr, uint16_t val, void *priv)
+{
+    i3477_shared_t *dev = (i3477_shared_t *) priv;
+
+    pclog("3477: wrw C000:%04X = %04X\n", addr & 0xfff, val);
+    dev->ram[addr & 0xfff]         = val & 0xff;
+    dev->ram[(addr + 1) & 0xfff]   = val >> 8;
+}
+
+static void
+i3477_doorbell_out(uint16_t port, uint8_t val, void *priv)
+{
+    pclog("3477: doorbell %03X <- %02X (pc=%04X:%04X)\n", port, val, CS, cpu_state.pc);
+}
+
+static void
+i3477_shared_reset(void *priv)
+{
+    i3477_shared_t *dev = (i3477_shared_t *) priv;
+
+    memset(dev->ram, 0, sizeof(dev->ram));
+    /* The "other side" state.  Both words are read by the IPL with byte 0 in
+       AH (big-endian compare), so a matched signature becomes 55 then AA and
+       the ready mailbox word becomes 00 then AA. */
+    dev->ram[0x0000] = 0x55;
+    dev->ram[0x0001] = 0xaa;
+    dev->ram[0x001d] = 0x00;
+    dev->ram[0x001e] = 0xaa;
+    dev->ram[0x0148] = 0x00;
+    dev->ram[0x0149] = 0xaa;
+}
+
+static void
+i3477_shared_close(void *priv)
+{
+    i3477_shared_t *dev = (i3477_shared_t *) priv;
+
+    io_removehandler(0x0362, 2, NULL, NULL, NULL, i3477_doorbell_out, NULL, NULL, dev);
+    free(dev);
+}
+
+static void
+i3477_sample(void *priv)
+{
+    i3477_shared_t *dev = (i3477_shared_t *) priv;
+    static int      n   = 0;
+    static int      hb  = 0;
+
+    /* Fast sampling (20us) but only log the first 60 PCs that are NOT the known
+       permanent spin in the ROS delay loop, so the code between delays shows up. */
+    if ((n < 60) && !((CS == 0xF9F6) && (cpu_state.pc >= 0x0443) && (cpu_state.pc <= 0x044B))) {
+        pclog("3477: PC %04X:%04X ret %04X:%04X\n", CS, cpu_state.pc,
+              mem_readw_phys(ss + SP + 6), mem_readw_phys(ss + SP + 4));
+        n++;
+    }
+
+    /* Heartbeat every 2 s, unconditionally: shows where the ROM rests once the
+       early sample budget is exhausted and whether it is still moving. */
+    if (++hb >= 100000) {
+        hb = 0;
+        pclog("3477: HB PC %04X:%04X\n", CS, cpu_state.pc);
+
+        /* What the display controller would draw right now. */
+        if (epoch_dbg_cur != NULL) {
+            epoch_t *e = epoch_dbg_cur;
+            char     buf[17];
+            for (int i = 0; i < 16; i++) {
+                uint8_t c = e->cram[i * 2];
+                buf[i]    = ((c >= 0x20) && (c < 0x7f)) ? (char) c : '.';
+            }
+            buf[16] = '\0';
+            pclog("3477: DISP crtmode=%02X render=%s memaddr=%04X hdisp=%d cw=%d f24=%d "
+                  "crtc00=%02X crtc01=%02X crtc06=%02X htotal=%d dispend=%d vtotal=%d "
+                  "latch=%04X c0C=%02X c0D=%02X row=%d ankA=%02X%02X%02X%02X cram0='%s'\n",
+                  e->crtmode,
+                  (e->render == epoch_render_text) ? "text" :
+                  (e->render == epoch_render_blank) ? "blank" :
+                  (e->render == epoch_render_color_4bpp) ? "gfx4" : "other",
+                  e->memaddr, e->hdisp, e->char_width, e->font24,
+                  e->crtc[0x00], e->crtc[0x01], e->crtc[0x06], e->htotal, e->dispend, e->vtotal,
+                  e->memaddr_latch, e->crtc[0x0C], e->crtc[0x0D], e->rowcount,
+                  e->vram[EPOCH_VRAM_SBCS + 0x41 * 0x80 + 8 * 4 + 2], e->vram[EPOCH_VRAM_SBCS + 0x41 * 0x80 + 8 * 4 + 3],
+                  e->vram[EPOCH_VRAM_SBCS + 0x41 * 0x80 + 16 * 4 + 2], e->vram[EPOCH_VRAM_SBCS + 0x41 * 0x80 + 16 * 4 + 3],
+                  buf);
+        }
+    }
+
+    timer_advance_u64(&dev->sample_timer, 20ULL * TIMER_USEC);
+}
+
+static void *
+i3477_shared_init(const device_t *info)
+{
+    i3477_shared_t *dev = (i3477_shared_t *) calloc(1, sizeof(i3477_shared_t));
+
+    i3477_shared_reset(dev);
+
+    mem_mapping_add(&dev->map, 0xC0000, 0x1000, i3477_ram_readb, i3477_ram_readw, NULL,
+                    i3477_ram_writeb, i3477_ram_writew, NULL, NULL, MEM_MAPPING_EXTERNAL, dev);
+    io_sethandler(0x0362, 2, NULL, NULL, NULL, i3477_doorbell_out, NULL, NULL, dev);
+
+    timer_add(&dev->sample_timer, i3477_sample, dev, 0);
+    timer_set_delay_u64(&dev->sample_timer, 50000ULL * TIMER_USEC);
+
+    return dev;
+}
+
+static const device_t i3477_shared_device = {
+    .name          = "IBM 3477-S shared RAM controller (EXPERIMENTAL)",
+    .internal_name = "i3477_shared",
+    .flags         = 0,
+    .local         = 0,
+    .init          = i3477_shared_init,
+    .close         = i3477_shared_close,
+    .reset         = i3477_shared_reset,
+    .available     = NULL,
+    .speed_changed = NULL,
+    .force_redraw  = NULL,
+    .config        = NULL
+};
+
 int
 machine_xt_ibm5550_init(const machine_t *model)
 {
@@ -3038,6 +3261,88 @@ machine_xt_ibm5550_init(const machine_t *model)
         mouse_set_sample_rate(30.0);
         mouse_set_poll(epoch_mouse_poll, kbc);
     }
+
+    return ret;
+}
+
+/* IBM 3477-S: an 80186-12 based, cut-down colour Multistation with no hard disk
+   and a 1.44 MB floppy, reusing the 5550 epoch display/keyboard/font stack.
+   [Cloud server only, DO NOT USE!!!] First wiring attempt, not validated. */
+int
+machine_xt_ibm3477_init(const machine_t *model)
+{
+    int ret;
+
+    ret = bios_load_linear("roms/machines/ibm3477/3477.bin",
+                           0x000f0000, 65536, 0);
+
+    if (bios_only || !ret)
+        return ret;
+
+    epoch_is_5535 = 0;
+    epoch_is_3477 = 1;
+
+    device_add(&fdc_xt_5550_device);
+
+    /* The 3477-S IPL drives the standard AT 8042 controller on 0x60/0x64
+       (self-test 0xAA->0x55, interface tests 0xAB/0xA9, enable 0xAE, keyboard
+       reset 0xFF, set-scancode 0xF0), not the 5550's epoch 0x60-0x63 map.
+       [Cloud server only, DO NOT USE!!!] */
+    device_add_params(machine_get_kbc_device(machine), (void *) model->kbc_params);
+
+    /* The ROM is an in-situ burn-in program: it assumes a normal BIOS has
+       already programmed the 8259 to the XT convention (8086 mode, base 8, its
+       IVT entries 8..0x13) and never programs it itself. Without this the
+       controller stays in 8080 mode, an IRQ resolves to (irq << 3), and IRQ 4
+       lands on the unfilled vector 0x20 - the CPU then runs away into video
+       memory.  [Cloud server only, DO NOT USE!!!] */
+    pic_init();
+    pic_xt_bios_init(0x08);
+    dma_init();
+    pit_ibm5550_init();
+    nmi_mask = 0;
+
+    /* Shared RAM + doorbells towards the keyboard/display controller.  Register
+       before the epoch device so this window wins over its 0xA0000-0xDFFFF map. */
+    device_add(&i3477_shared_device);
+
+    /* The 80186's integrated peripherals / chip-select block (the ROM programs
+       UMCS via out 0xFFA0 at reset). [Cloud server only, DO NOT USE!!!] */
+    device_add(&i80186_device);
+
+    epoch_t *epoch = device_add(&ibm5550_device);
+    /* The 3477-S powers up running the burn-in (test) program, which the ROM's
+       early 0xA0h bit 1 check selects, on a 24-dot display (0xA2h reports 0xA8,
+       so the ROM polls the C000:0148 mailbox).  [Cloud server only, DO NOT USE!!!] */
+    epoch->testmode = 1;
+    epoch->font24   = 1;
+
+    /* The burn-in ROM is an in-situ program: it assumes the machine has already
+       been booted, so the half-width (ANK) character generator in VRAM
+       (0x38000, 128 bytes per code) is normally loaded by the IPL / OS and the
+       ROM never loads one itself.  The 3477 IPL does not read a disk either, so
+       the generator has to come from ROM: use the ANK font from the 3477 boot
+       volume ($SYSHN16.FNT: 80-byte header then 64 bytes per code, 32 rows of
+       2 bytes, the glyph in the first byte of each row) and lay it out the way
+       the font-24 text renderer reads it (one 16-bit word per row at +2).
+       [Cloud server only, DO NOT USE!!!] */
+    {
+        FILE *fp = rom_fopen("roms/machines/ibm3477/card0.bin", "rb");
+
+        if (fp != NULL) {
+            size_t rd = fread(epoch->vram, 1, 0x8000, fp);
+            fclose(fp);
+            pclog("3477: card page0 -> vram[0], %u bytes; 'A' row3 = %02X%02X%02X%02X\n",
+                  (unsigned) rd,
+                  epoch->vram[0x41 * 0x80 + 3 * 4], epoch->vram[0x41 * 0x80 + 3 * 4 + 1],
+                  epoch->vram[0x41 * 0x80 + 3 * 4 + 2], epoch->vram[0x41 * 0x80 + 3 * 4 + 3]);
+        } else
+            pclog("3477: card0.bin missing (roms/machines/ibm3477/card0.bin)\n");
+    }
+
+    device_add(&lpt_port_device);
+    serial_t *uart = device_add(&ns8250_device);
+    serial_setup(uart, 0x3f8, 1); /* Use IRQ 1 */
 
     return ret;
 }

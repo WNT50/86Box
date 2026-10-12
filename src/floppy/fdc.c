@@ -949,6 +949,9 @@ fdc_write(uint16_t addr, uint8_t val, void *priv)
 {
     fdc_t *fdc = (fdc_t *) priv;
 
+    if (fdc->flags & FDC_FLAG_5550)
+        pclog("3477: fdc wr %03X <- %02X\n", addr, val);
+
     int drive;
     int drive_num;
 
@@ -1679,6 +1682,9 @@ fdc_read(uint16_t addr, void *priv)
     uint8_t      ret   = 0xff;
     int          drive = 0;
     fdd_drive_t *drv;
+
+    if (fdc->flags & FDC_FLAG_5550)
+        pclog("3477: fdc rd %03X\n", addr);
 
     cycles -= ISA_CYCLES(8);
 

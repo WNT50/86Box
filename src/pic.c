@@ -75,6 +75,10 @@ static void (*irq_callback)(uint16_t, int, void *);
 static void *irq_callback_priv;
 
 static uint16_t latched_irqs   = 0x0000;
+/* [Cloud server only, DO NOT USE!!!] XT-convention vector base requested by a
+   machine whose ROM expects the BIOS to have initialized the 8259 (-1 = none);
+   re-applied by pic_reset() because a reset would otherwise clear it again. */
+static int pic_probe_xt_base = -1;
 static int16_t  irq_vector_override[8] = {
     -1, -1, -1, -1, -1, -1, -1, -1
 };
@@ -355,6 +359,15 @@ pic_reset(void)
 #ifdef USE_VFIO
     pic_acked = 0x0000;
 #endif
+    /* [Cloud server only, DO NOT USE!!!] Re-apply a machine-requested XT-style
+       vector base; a reset would otherwise leave the controller in 8080 mode. */
+    if (pic_probe_xt_base >= 0) {
+        pic.icw1  = 0x13;
+        pic.icw2  = (uint8_t) pic_probe_xt_base;
+        pic.icw3  = 0x00;
+        pic.icw4  = 0x01;
+        pic.state = STATE_NONE;
+    }
 }
 
 void
@@ -825,6 +838,21 @@ pic_init(void)
 
     shadow = 0;
     io_sethandler(0x0020, 0x0002, pic_read, NULL, NULL, pic_write, NULL, NULL, &pic);
+}
+
+/* [Cloud server only, DO NOT USE!!!] Program the interrupt controller the way a
+   conventional XT BIOS leaves it: 8086 mode with the vector base at 8.
+
+   The IBM 3477-S ROM is an in-situ burn-in program that assumes a normal BIOS
+   has already initialized the 8259 and never programs it itself. Without this
+   the controller stays in its post-reset 8080 mode, where an acknowledged IRQ
+   resolves to (irq << 3) - IRQ 4 becomes vector 0x20, an IVT entry the ROM
+   never fills, and the CPU runs away into video memory. */
+void
+pic_xt_bios_init(uint8_t base)
+{
+    pic_probe_xt_base = base;
+    pic_reset();
 }
 
 /* The Convertible implements a single-controller subset and exposes its
