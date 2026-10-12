@@ -3443,6 +3443,34 @@ machine_xt_ibm5550_init(const machine_t *model)
     return ret;
 }
 
+/* [EXPERIMENT k5] Log every access to the 5250 adapter port banks (0x1B0-0x1D7
+   and 0x100-0x10F) with the accessing PC.  The burn-in's self-test drives these
+   through a port table built by FD43:0A0E, and the sub-tests record their result
+   in the parameter block's bytes 2 and 3 (FD43:0AFA folds them into DS:[0]/[1]
+   with or 0x30).  This shows what each sub-test writes and what it expects to
+   read back.  [Cloud server only, DO NOT USE!!!] */
+static int i3477_k5_log;
+
+static uint8_t
+i3477_k5_in(uint16_t port, void *priv)
+{
+    if (i3477_k5_log < 4000)
+        pclog("3477: K5 in  %03X -> FF (pc=%04X:%04X)\n", port, CS, cpu_state.pc);
+
+    i3477_k5_log++;
+
+    return 0xff;
+}
+
+static void
+i3477_k5_out(uint16_t port, uint8_t val, void *priv)
+{
+    if (i3477_k5_log < 4000)
+        pclog("3477: K5 out %03X <- %02X (pc=%04X:%04X)\n", port, val, CS, cpu_state.pc);
+
+    i3477_k5_log++;
+}
+
 /* IBM 3477-S: an 80186-12 based, cut-down colour Multistation with no hard disk
    and a 1.44 MB floppy, reusing the 5550 epoch display/keyboard/font stack.
    [Cloud server only, DO NOT USE!!!] First wiring attempt, not validated. */
@@ -3503,6 +3531,9 @@ machine_xt_ibm3477_init(const machine_t *model)
     /* The 80186's integrated peripherals / chip-select block (the ROM programs
        UMCS via out 0xFFA0 at reset). [Cloud server only, DO NOT USE!!!] */
     device_add(&i80186_device);
+
+    io_sethandler(0x0100, 0x0010, i3477_k5_in, NULL, NULL, i3477_k5_out, NULL, NULL, NULL);
+    io_sethandler(0x01b0, 0x0028, i3477_k5_in, NULL, NULL, i3477_k5_out, NULL, NULL, NULL);
 
     epoch_t *epoch = device_add(&ibm5550_device);
     /* The 3477-S powers up running the burn-in (test) program, which the ROM's
