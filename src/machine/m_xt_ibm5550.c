@@ -1839,12 +1839,27 @@ x1xx xxxx: Sense DREQ? (only used in diag test)
                behaviour. */
             {
                 static int auto_sw = -1;
-                static int sw_state = 0;
                 if (auto_sw < 0)
                     auto_sw = (getenv("TESTSW_AUTO") != NULL);
                 if (auto_sw) {
-                    sw_state ^= 1;
-                    if (sw_state)
+                    /* [3477-S] Rear-panel test switch.  The ROM waits for a
+                       0 -> 1 transition *observed inside its own poll loop* at
+                       F8DE:02F5 (loop while bit1 == 1) then F8DE:02FB (loop
+                       while bit1 == 0).  A global read counter is no use - the
+                       ROM has already read A0h thousands of times before it
+                       gets there, so bit1 must be delivered per-visit: hold 0
+                       for the first few polls of that loop, then release to 1,
+                       and reset when the ROM moves on. */
+                    static int  sw_phase = 0;
+                    static long sw_polls = 0;
+                    if ((CS == 0xF8DE) && (cpu_state.pc >= 0x02F5) && (cpu_state.pc <= 0x02FF)) {
+                        if (++sw_polls > 8)
+                            sw_phase = 1;
+                    } else {
+                        sw_polls = 0;
+                        sw_phase = 0;
+                    }
+                    if (sw_phase)
                         ret |= 0x02;
                 }
             }
