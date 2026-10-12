@@ -2532,8 +2532,11 @@ epoch_reset(void *priv)
     /* The 0x310-0x316 window un-hides the 0x40000-0x9FFFF range, and only the
        5550's IPL uses it.  The 5535-M always has that memory, and its IPL
        requires the first unbacked block to be at 0xA0000 (memory-size walk at
-       F871C, error 0x6111), so it must not be hidden there. */
-    epoch->lowmemorydisabled = epoch_is_5535 ? 0 : 1;
+       F871C, error 0x6111), so it must not be hidden there.  The 3477-S also
+       has 640 KB and never touches the window, and its RAM pattern test
+       (F05CC, run out of the copy at 0200:0) walks 0x10000-0x7FFFF expecting
+       the range to be backed. */
+    epoch->lowmemorydisabled = (epoch_is_5535 || epoch_is_3477) ? 0 : 1;
     /* The 5550's IPL opens the CRTC I/O and video output by writing 3D2h; the
        3477-S never does, so it must power up open or every CRTC write is
        dropped and nothing is drawn.  [Cloud server only, DO NOT USE!!!] */
