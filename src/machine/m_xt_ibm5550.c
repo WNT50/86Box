@@ -1873,6 +1873,12 @@ x1xx xxxx: No floppy drive
                 /* The 3477-S IPL identifies its display as (A2 & 0xA0) == 0x80
                    for the 24-dot panel; the 5550 values (bit 5 set) never match. */
                 ret = epoch->font24 ? 0x88 : 0x22;
+                /* A2h 的 bit7 同时是"无错误"标志：RAM 测试校验失败时 ROM 会
+                   out 0xA2 锁存错误，随后 in 0xA2 / not al / test al,0x80 判断
+                   是否出错（0x6E5）；而面板 ID 测试用 and al,0xA0 / cmp al,0x80
+                  （0x6D44）——两处用法推出：错误锁存时 bit7 应为 0。 */
+                if (epoch->parityerror & 1)
+                    ret &= ~0x80;
             } else if (epoch->font24)
                 ret = 0xA8; /* Mono 24 */
             else
