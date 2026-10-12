@@ -3294,8 +3294,10 @@ machine_xt_ibm3477_init(const machine_t *model)
 {
     int ret;
 
-    ret = bios_load_linear("roms/machines/ibm3477/3477.bin",
-                           0x000f0000, 65536, 0);
+    /* Only F800-FFFF is ROM: nothing calls or jumps into F000-F7FF, that half of
+       the dump is the font card's window instead. */
+    ret = bios_load_linear("roms/machines/ibm3477/3477rom.bin",
+                           0x000f8000, 32768, 0);
 
     if (bios_only || !ret)
         return ret;
