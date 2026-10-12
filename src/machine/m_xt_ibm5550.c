@@ -3459,6 +3459,14 @@ machine_xt_ibm3477_init(const machine_t *model)
        the BIOS.  Load the whole 64 KB so the BIOS runs first, as it does on the
        real machine (the burn-in itself documents that it assumes a normal BIOS
        has already programmed the 8259).  [Cloud server only, DO NOT USE!!!] */
+    /* The lower half of the ROM (F0000-F7FFF) is a second, independent
+       firmware program - the normal-boot IPL - and the burn-in never reads it:
+       a read probe on that window logs zero reads over a whole run, and the
+       run is byte-for-byte identical whether the lower half is present or not.
+       (The one difference seen earlier, a second recording pass, came from
+       this window shadowing the font card while the character generator was
+       still blank.)  The burn-in is self-contained, so no burn-in failure code
+       can be about the lower half.  [Cloud server only, DO NOT USE!!!] */
     ret = bios_load_linear("roms/machines/ibm3477/3477ipl.bin",
                            0x000f0000, 65536, 0);
 
