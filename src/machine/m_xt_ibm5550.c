@@ -1279,7 +1279,12 @@ epoch_poll(void *priv)
                 video_wait_for_buffer();
             }
 
-            if ((epoch->displine ^ !epoch->oddeven) & 1)
+            /* [AB] The 3477-S display is not interlaced: the IPL programs a 29-line
+               character cell and the built-in font supplies 29 glyph lines 1:1.  The
+               odd/even gate below (5535/5550 timing) rendered only every other
+               display line, so each glyph lost half of its scanlines and the screen
+               came out as garbage. */
+            if (epoch_is_3477 || ((epoch->displine ^ !epoch->oddeven) & 1))
                 epoch->render(epoch);
 
             if (epoch->lastline < epoch->displine)
