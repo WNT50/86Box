@@ -1435,16 +1435,6 @@ epoch_vram_write(uint32_t addr, uint8_t val, void *priv)
     epoch_t *epoch = (epoch_t *) priv;
     // epoch_log("epoch_vw: %x %x\n", addr, val);
     addr &= EPOCH_MASK_VRAM;
-    /* [Cloud server only, DO NOT USE!!!] 3477-S bring-up: the ANK (SBCS) font
-       area lives in VRAM at 0x38000; log the first writes so we can tell whether
-       anything ever loads it. */
-    if (addr >= EPOCH_VRAM_SBCS) {
-        static int n = 0;
-        if (n < 24) {
-            pclog("3477: vram ank %05X <- %02X\n", addr, val);
-            n++;
-        }
-    }
     epoch->vram[addr] = val;
     epoch->fullchange = 3;
 }
@@ -3731,22 +3721,39 @@ machine_xt_ibm3477_init(const machine_t *model)
     }
     epoch->font24   = 1;
 
-    /* The 3477-S half-width (ANK) character generator comes from the ROS FONT
-       ROM (font.bin, 1M = 32 x 32K pages): page 1 carries the half-width codes,
-       128 bytes per index, 32 rows of 4 bytes with the 13-dot glyph in the
-       *high* 16 bits of every row, and the index is the character code minus
-       0x20 (index 0 is the space).  The font-24 text renderer fetches the
-       generator from EPOCH_VRAM_SBCS (0x38000), 128 bytes per code, taking the
-       *low* 16 bits of each row, so the page is laid down here with the two
-       halves of every row swapped and the indices shifted.  [Cloud server
-       only, DO NOT USE!!!] */
+    /* The 3477-S card is a GB2312 kanji card.  Its 1 MB image (font.bin,
+       32 pages) is a flat glyph array: g0..g862 = GB2312 rows 1-9 (symbols),
+       g863..g7773 = rows 16-87 (hanzi), the rest = the card's own parts; every
+       glyph is 128 bytes = 32 rows of 4 bytes = a 32x32 bitmap, MSB left.  Row
+       3 carries the full-width ASCII set - its position n is code 0x20 + n and
+       the row starts at g192, so a half-width code maps to glyph
+       191 + (code - 0x20) (verified against the extracted font: g192 = full
+       width '!', g207 = '0', g224 = 'A', g249 = 'Z').  The font-24 text
+       renderer fetches the generator from EPOCH_VRAM_SBCS (0x38000), 128 bytes
+       per code, taking the *low* 16 bits of each row, so the left half of the
+       32-column glyph is laid down here with the two halves of every row
+       swapped.  A half-width cell is 13 dots wide, so it shows half of the
+       full-width glyph - the machine cuts the 32-column bitmap in two instead
+       of keeping a second, narrow font.  [Cloud server only, DO NOT USE!!!] */
     if ((epoch->fontcard_rom != NULL) && (epoch->fontcard_pages > 2)) {
-        /* page 1 = the half-width text generator, page 2 = its alternate map
-           (attribute bit 1: block and line graphics - e.g. the solid block the
-           IBM logo is built from).  Both are indexed from code 0x20. */
-        for (uint32_t map = 0; map < 2; map++) {
-            const uint8_t *page = epoch->fontcard_rom + (map + 1) * EPOCH_FONTCARD_WIN_SIZE;
-            uint8_t       *base = epoch->vram + (map ? EPOCH_VRAM_SBEX : EPOCH_VRAM_SBCS);
+        /* Half-width (ANK) generator: GB2312 row 3, left half of each glyph. */
+        for (uint32_t code = 0x20; code < 0x80; code++) {
+            const uint8_t *src = epoch->fontcard_rom + (191u + (code - 0x20)) * 128u;
+            uint8_t       *dst = epoch->vram + EPOCH_VRAM_SBCS + (code * 0x80);
+
+            for (uint32_t row = 0; row < 32; row++) {
+                dst[row * 4 + 0] = 0x00;
+                dst[row * 4 + 1] = 0x00;
+                dst[row * 4 + 2] = src[row * 4 + 0];
+                dst[row * 4 + 3] = src[row * 4 + 1];
+            }
+        }
+        /* The alternate generator (attribute bit 1: block and line graphics -
+           e.g. the solid block the IBM logo is built from) still comes from
+           card page 2, indexed from code 0x20. */
+        {
+            const uint8_t *page = epoch->fontcard_rom + 2 * EPOCH_FONTCARD_WIN_SIZE;
+            uint8_t       *base = epoch->vram + EPOCH_VRAM_SBEX;
 
             for (uint32_t code = 0x20; code < 0x100; code++) {
                 const uint8_t *src = page + (code - 0x20) * 0x80;
@@ -3760,7 +3767,7 @@ machine_xt_ibm3477_init(const machine_t *model)
                 }
             }
         }
-        pclog("3477: ANK + alternate generator <- ROS FONT ROM pages 1-2\n");
+        pclog("3477: ANK <- GB2312 row 3 left half; alternate generator <- card page 2\n");
     } else
         pclog("3477: font ROM not installed, ANK generators left empty\n");
 
