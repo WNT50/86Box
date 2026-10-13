@@ -97,7 +97,13 @@ i80186_tmr_max(i80186_t *dev, int i)
 {
     uint16_t reg = (dev->tmr_alt[i] && (i != 2)) ? I80186_TMR_MAXB(i) : I80186_TMR_MAXA(i);
 
-    return (uint64_t) dev->regs[reg / 2] + 1u; /* a maximum count of 0 means 65536 */
+    uint64_t m = (uint64_t) dev->regs[reg / 2];
+
+    /* 270788-001: a maximum count register of 0 means 65536, not 1.  Treating
+       it as 1 makes a prescaled timer see a huge jump in its source-event
+       count the moment the MAX register is written, latching a spurious
+       request (the ROM's timer test treats an early request as a failure). */
+    return m ? (m + 1u) : 0x10000u;
 }
 
 /* Clock events counted by a timer since it was last started. Timer 2 always
@@ -215,7 +221,8 @@ i80186_write_word(i80186_t *dev, uint16_t off, uint16_t val)
     /* A control or count-register write (re)starts the count cycle; the request
        latch itself is only touched through the interrupt controller registers. */
     for (int i = 0; i < 3; i++) {
-        if ((off == I80186_TMR_CON(i)) || (off == I80186_TMR_COUNT(i)))
+        if ((off == I80186_TMR_CON(i)) || (off == I80186_TMR_COUNT(i)) ||
+            (off == I80186_TMR_MAXA(i)) || (off == I80186_TMR_MAXB(i)))
             i80186_tmr_restart(dev, i);
     }
 
