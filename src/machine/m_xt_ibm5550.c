@@ -2058,9 +2058,23 @@ x1xx xxxx: Enable parity update (Disable this -> Write data -> Enable this -> Re
                    (a set bit 0 sends it to the error exit).  The System ROS's
                    00h/01h writes to A0h are its blink-and-park loop, not a
                    disable/write/enable/read parity recipe. */
-                /* [AB] Bit 5 arms one parity error for the next memory read: the
-                   System ROS stores with 88h/A8h (bit 7 set) and
-                   loads the word back, requiring the A0h bit 0 latch and the NMI. */
+                /* [AB] Bit 7 arms one parity error for the next memory read,
+                   NOT bit 5: the IPL's own recipe is 88h (bit 5 clear, no arm)
+                   then A8h (bit 5 set), and driving the arm from bit 5 instead
+                   makes the parity loop at F800:01F1 fail with its own code 5
+                   at F800:021B - so the arm is load-bearing and bit 7 is what
+                   raises it.  The System ROS stores with 88h/A8h (both with
+                   bit 7 set) and loads the word back, requiring the A0h bit 0
+                   latch.  The deliberate case is F800:0833
+                   (`mov al,0xA9 / out A0h,al`): the very next read
+                   (F914:000C) consumes the arm and is also how the IPL fetches
+                   the SS base at 0x131.  That read is a test, not a fault, so
+                   an armed error latches A0h bit 0 WITHOUT raising an NMI -
+                   raising one there drops the IPL straight into its
+                   interrupt-cause dispatch (F800:0D4B) and it hands the board
+                   back with AL=0xFA before reaching the acknowledge at
+                   F914:0040.  Real faults (the paritybad bitmap) still
+                   propagate as an NMI. */
                 epoch->parityforce   = (val & 0x80) ? 1 : 0;
             } else {
                 epoch->parityenabled = val & 0x40; /* 1 = Enable read/write with parity */
