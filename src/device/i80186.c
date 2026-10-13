@@ -42,7 +42,9 @@
 #include <86box/io.h>
 #include <86box/log.h>
 #include <86box/timer.h>
+#include <86box/dma.h>
 #include <86box/i80186.h>
+#include <86box/mem.h>
 
 #define I80186_PCB_BASE_DEFAULT 0xFF00u
 #define I80186_PCB_SIZE         0x100u
@@ -66,6 +68,14 @@
 #define I80186_DMA1_BASE        0xD0u /* channel 1 descriptor, 0xD0-0xDB */
 #define I80186_DMA1_END         0xDBu
 
+/* Word indices of the channel 0 descriptor inside regs[]. */
+#define I80186_DMA0_SRC_LO      (I80186_DMA0_BASE / 2)
+#define I80186_DMA0_SRC_HI      ((I80186_DMA0_BASE + 2) / 2)
+#define I80186_DMA0_DST_LO      ((I80186_DMA0_BASE + 4) / 2)
+#define I80186_DMA0_DST_HI      ((I80186_DMA0_BASE + 6) / 2)
+#define I80186_DMA0_COUNT       ((I80186_DMA0_BASE + 8) / 2)
+#define I80186_DMA0_CTRL        ((I80186_DMA0_BASE + 10) / 2)
+
 /* Interrupt controller request/status registers (270788-001 section 9.6.2). */
 #define I80186_ICU_REQ          0x2Eu /* Interrupt Request Register */
 #define I80186_ICU_STATUS       0x30u /* Interrupt Controller Status Register */
@@ -81,6 +91,86 @@ typedef struct i80186_t {
     uint16_t tmr_req;       /* sticky timer request latches: bit i = timer i */
     uint8_t  tmr_alt[3];    /* MAX COUNT register in use: 0 = A, 1 = B (ALT) */
 } i80186_t;
+
+/* ---------------------------------------------------------------------------
+ * [cloud] 3477-S: the on-chip DMA channel 0 is the only data path the IPL's
+ * disk service uses -- it programs source = the floppy data port (0x3F5, I/O
+ * space), destination = the buffer it then verifies, count = one sector, and
+ * starts the channel, while the board's 8237 is never touched.  The transfer
+ * therefore has to happen here; the floppy controller hands over each byte it
+ * would have driven onto the bus.  The return values mirror
+ * dma_channel_write()/dma_channel_read(): the terminal count rides in
+ * DMA_OVER.
+ *
+ * Only channel 0, and only the incrementing memory destination the IPL uses,
+ * are modelled; the other channels still just store their registers.
+ * ------------------------------------------------------------------------- */
+
+static i80186_t *i80186_dma_dev = NULL;
+
+int
+i80186_dma0_ready(void)
+{
+    i80186_t *dev = i80186_dma_dev;
+
+    /* Armed while the programmed transfer count has not run out. */
+    return (dev != NULL) && (dev->regs[I80186_DMA0_COUNT] != 0);
+}
+
+static uint32_t
+i80186_dma0_dest(i80186_t *dev)
+{
+    return ((uint32_t) dev->regs[I80186_DMA0_DST_LO]) |
+           ((uint32_t) dev->regs[I80186_DMA0_DST_HI] << 16);
+}
+
+static void
+i80186_dma0_dest_set(i80186_t *dev, uint32_t dest)
+{
+    dev->regs[I80186_DMA0_DST_LO] = (uint16_t) (dest & 0xFFFFu);
+    dev->regs[I80186_DMA0_DST_HI] = (uint16_t) (dest >> 16);
+}
+
+/* Shared tail of one byte transfer: step the destination pointer on, drop the
+   count and latch the terminal count when it runs out. */
+static int
+i80186_dma0_step(i80186_t *dev)
+{
+    i80186_dma0_dest_set(dev, i80186_dma0_dest(dev) + 1);
+
+    if (--dev->regs[I80186_DMA0_COUNT] == 0) {
+        /* The channel's TC status bit latches.  The interrupt controller is
+           still unwired, so no DMA interrupt is raised here. */
+        dev->regs[I80186_DMA0_CTRL] |= 0x0008u;
+        return DMA_OVER;
+    }
+
+    return 0;
+}
+
+int
+i80186_dma0_write(uint8_t val)
+{
+    if (!i80186_dma0_ready())
+        return DMA_OVER;
+
+    mem_writeb_phys(i80186_dma0_dest(i80186_dma_dev), val);
+
+    return i80186_dma0_step(i80186_dma_dev);
+}
+
+int
+i80186_dma0_read(void)
+{
+    int ret;
+
+    if (!i80186_dma0_ready())
+        return DMA_OVER | 0xFF;
+
+    ret = mem_readb_phys(i80186_dma0_dest(i80186_dma_dev));
+
+    return ret | i80186_dma0_step(i80186_dma_dev);
+}
 
 static uint16_t i80186_inw(uint16_t port, void *priv);
 static void     i80186_outw(uint16_t port, uint16_t val, void *priv);
@@ -290,6 +380,9 @@ i80186_close(void *priv)
     if (dev->handler_set)
         io_removehandler(dev->base, I80186_PCB_SIZE, NULL, i80186_inw, NULL, NULL, i80186_outw, NULL, dev);
 
+    if (i80186_dma_dev == dev)
+        i80186_dma_dev = NULL;
+
     free(dev);
 }
 
@@ -299,6 +392,8 @@ i80186_init(const device_t *info)
     i80186_t *dev = (i80186_t *) calloc(1, sizeof(i80186_t));
 
     i80186_reset(dev);
+
+    i80186_dma_dev = dev; /* [cloud] 3477-S disk-service DMA channel 0 */
 
     return dev;
 }

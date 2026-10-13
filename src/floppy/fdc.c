@@ -39,6 +39,7 @@
 #include <86box/plat_fallthrough.h>
 #include <86box/plat_unused.h>
 #include <86box/fifo.h>
+#include <86box/i80186.h>
 
 const uint8_t command_has_drivesel[32] = {
     0, 0,
@@ -2487,7 +2488,11 @@ fdc_data(fdc_t *fdc, uint8_t data, int last)
             dma_set_drq(fdc->dma_ch, 1);
 
             fdc->dat = data;
-            result = dma_channel_write(fdc->dma_ch, data);
+            /* [cloud] 3477-S: the IPL moves the sector with the on-chip DMA
+               channel 0 and never programs the 8237, so hand the byte to that
+               channel instead; 5535/5550 keep the stock 8237 path. */
+            result = ((epoch_is_3477 && i80186_dma0_ready()) ? i80186_dma0_write(data)
+                                                             : dma_channel_write(fdc->dma_ch, data));
 
             if (result & DMA_OVER) {
                 fdc_log("FDC command %02X: Lower DRQ on data read from drive without FIFO #1\n", fdc->processed_cmd);
@@ -2508,7 +2513,10 @@ fdc_data(fdc_t *fdc, uint8_t data, int last)
                 dma_set_drq(fdc->dma_ch, 1);
 
                 while (!fifo_get_empty(fdc->fifo_p)) {
-                    result = dma_channel_write(fdc->dma_ch, fifo_read(fdc->fifo_p));
+                    /* [cloud] 3477-S: see the non-FIFO path above. */
+                    result = ((epoch_is_3477 && i80186_dma0_ready())
+                                  ? i80186_dma0_write(fifo_read(fdc->fifo_p))
+                                  : dma_channel_write(fdc->dma_ch, fifo_read(fdc->fifo_p)));
 
                     if (result & DMA_OVER) {
                         fdc_log("FDC command %02X: Lower DRQ on data read from drive with FIFO #1\n", fdc->processed_cmd);
@@ -2637,7 +2645,10 @@ fdc_getdata(fdc_t *fdc, int last)
         }
     } else {
         if (!fdc->fifo || (fdc->tfifo < 1)) {
-            data = dma_channel_read(fdc->dma_ch);
+            /* [cloud] 3477-S: mirror of the read path -- the IPL's own DMA
+               channel is the one that has the destination programmed. */
+            data = ((epoch_is_3477 && i80186_dma0_ready()) ? i80186_dma0_read()
+                                                           : dma_channel_read(fdc->dma_ch));
             fdc_log("FDC command %02X: Lower DRQ on data write to drive without FIFO\n", fdc->processed_cmd);
             dma_set_drq(fdc->dma_ch, 0);
 
