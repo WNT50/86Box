@@ -848,16 +848,12 @@ getfont_ps55dbcs_vram(epoch_t *epoch, int32_t code, int32_t line)
 {
     uint32_t font = 0;
 
-    int32_t  chr  = code;
     code *= 0x80;
     code += line * 4;
-    /* [AB] 3477-S: the built-in ANK font (font.bin, 256 codes x 128 bytes) is
-       loaded into the SBCS area at EPOCH_VRAM_SBCS.  The 3477 render branch
-       indexed from 0, so every lookup read zeros, every cell drew the
-       background colour and the screen stayed black even though the mode was
-       programmed correctly. */
-    if (epoch_is_3477 && chr < 0x100)
-        code += EPOCH_VRAM_SBCS;
+    /* DBCS glyphs live in the video memory's kanji area, indexed by the 16-bit
+       code, exactly as on the 5550.  (A 3477-only redirect of small codes into
+       the SBCS area used to sit here; it existed solely for the 26-dot per-cell
+       experiment's lookup of ASCII codes as DBCS codes, and is gone.) */
     if (epoch->font24) { /* Font 24 (2 x 13 x 29) */
         font = epoch->vram[code];
         font <<= 8;
@@ -2028,17 +2024,6 @@ x1xx xxxx: Enable parity update (Disable this -> Write data -> Enable this -> Re
 */
         case 0xA0:
             nmi_mask = val & 0x80;
-            /* [AB-TEMP-PROBE] A0h 写入总表 + 停摆循环签名(00/01) */
-            if (getenv("A0ALL")) {
-                static int cnt[256];
-                static int n00 = 0;
-                if (cnt[val]++ < 3)
-                    pclog("A0ALL val=%02X pc=%04X:%04X\n", val, cs >> 4, cpu_state.pc);
-                if (((val == 0x00) || (val == 0x01)) && (n00 < 30)) {
-                    n00++;
-                    pclog("A0STALL #%d val=%02X pc=%04X:%04X\n", n00, val, cs >> 4, cpu_state.pc);
-                }
-            }
             if (epoch_is_3477) {
                 /* The 3477-S burn-in never writes bit 6: it uses bit 3 as
                    "parity updating enabled" - it writes a byte with the bit
