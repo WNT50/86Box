@@ -3752,33 +3752,38 @@ machine_xt_ibm3477_init(const machine_t *model)
     }
     epoch->font24   = 1;
 
-    /* The burn-in ROM is an in-situ program: it assumes the machine has already
-       been booted, so the half-width (ANK) character generator in VRAM
-       (0x38000, 128 bytes per code) is normally loaded by the IPL / OS and the
-       ROM never loads one itself.  The 3477 IPL does not read a disk either, so
-       the generator has to come from ROM: use the ANK font from the 3477 boot
-       volume ($SYSHN16.FNT: 80-byte header then 64 bytes per code, 32 rows of
-       2 bytes, the glyph in the first byte of each row) and lay it out the way
-       the font-24 text renderer reads it (one 16-bit word per row at +2).
-       [Cloud server only, DO NOT USE!!!] */
-    {
-        FILE *fp = rom_fopen("roms/machines/ibm3477/card0.bin", "rb");
+    /* The 3477-S half-width (ANK) character generator comes from the ROS FONT
+       ROM (font.bin, 1M = 32 x 32K pages): page 1 carries the half-width codes,
+       128 bytes per index, 32 rows of 4 bytes with the 13-dot glyph in the
+       *high* 16 bits of every row, and the index is the character code minus
+       0x20 (index 0 is the space).  The font-24 text renderer fetches the
+       generator from EPOCH_VRAM_SBCS (0x38000), 128 bytes per code, taking the
+       *low* 16 bits of each row, so the page is laid down here with the two
+       halves of every row swapped and the indices shifted.  [Cloud server
+       only, DO NOT USE!!!] */
+    if ((epoch->fontcard_rom != NULL) && (epoch->fontcard_pages > 2)) {
+        /* page 1 = the half-width text generator, page 2 = its alternate map
+           (attribute bit 1: block and line graphics - e.g. the solid block the
+           IBM logo is built from).  Both are indexed from code 0x20. */
+        for (uint32_t map = 0; map < 2; map++) {
+            const uint8_t *page = epoch->fontcard_rom + (map + 1) * EPOCH_FONTCARD_WIN_SIZE;
+            uint8_t       *base = epoch->vram + (map ? EPOCH_VRAM_SBEX : EPOCH_VRAM_SBCS);
 
-        if (fp != NULL) {
-            /* The font-24 text renderer fetches the half-width generator from
-               EPOCH_VRAM_SBCS (0x38000), 128 bytes per code - loading the page
-               at vram[0] leaves the renderer reading zeros (the ankA=00000000
-               seen in every run).  Put it where it is read.  [Cloud server
-               only, DO NOT USE!!!] */
-            size_t rd = fread(epoch->vram + EPOCH_VRAM_SBCS, 1, 0x8000, fp);
-            fclose(fp);
-            pclog("3477: card page0 -> vram[%05X], %u bytes; 'A' row3 = %02X%02X%02X%02X\n",
-                  EPOCH_VRAM_SBCS, (unsigned) rd,
-                  epoch->vram[EPOCH_VRAM_SBCS + 0x41 * 0x80 + 3 * 4], epoch->vram[EPOCH_VRAM_SBCS + 0x41 * 0x80 + 3 * 4 + 1],
-                  epoch->vram[EPOCH_VRAM_SBCS + 0x41 * 0x80 + 3 * 4 + 2], epoch->vram[EPOCH_VRAM_SBCS + 0x41 * 0x80 + 3 * 4 + 3]);
-        } else
-            pclog("3477: card0.bin missing (roms/machines/ibm3477/card0.bin)\n");
-    }
+            for (uint32_t code = 0x20; code < 0x100; code++) {
+                const uint8_t *src = page + (code - 0x20) * 0x80;
+                uint8_t       *dst = base + (code * 0x80);
+
+                for (uint32_t row = 0; row < 32; row++) {
+                    dst[row * 4 + 0] = 0x00;
+                    dst[row * 4 + 1] = 0x00;
+                    dst[row * 4 + 2] = src[row * 4 + 0];
+                    dst[row * 4 + 3] = src[row * 4 + 1];
+                }
+            }
+        }
+        pclog("3477: ANK + alternate generator <- ROS FONT ROM pages 1-2\n");
+    } else
+        pclog("3477: font ROM not installed, ANK generators left empty\n");
 
     device_add(&lpt_port_device);
     serial_t *uart = device_add(&ns8250_device);
