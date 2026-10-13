@@ -985,21 +985,15 @@ epoch_render_text(epoch_t *epoch)
             /* Draw character */
             for (uint32_t n = 0; n < epoch->char_width; n++)
                 p[n] = epoch->pallook[epoch->egapal[bg]]; /* draw blank */
-            /* [Cloud server only, DO NOT USE!!!] 3477-S: one 26-dot glyph per
-               13-dot cell (40 glyphs x 26 = 1040).  The ROM stores one word per
-               character in CRAM, so consume one pair and draw the whole glyph;
-               the code indexes the card's glyph area directly. */
-            if (epoch_is_3477) {
-                uint32_t font = getfont_ps55dbcs(chr, epoch->scanline, epoch);
-                for (uint32_t n = 0; n < 26; n++) {
-                    p[n] = epoch->pallook[epoch->egapal[(font & 0x80000000) ? fg : bg]];
-                    font <<= 1;
-                }
-                x += epoch->char_width; /* the loop adds another 13 => 26 total */
-                p += epoch->char_width * 2;
-                epoch->memaddr += 2;
-                continue;
-            }
+            /* 3477-S: the text cell is 13 dots wide (80 columns x 13 = 1040, as
+               measured on the machine), one CRAM word pair per cell, and the
+               half-width generator comes from ROS FONT ROM page 1 (see the ANK
+               loader in the machine init).  An earlier experiment drew one
+               26-dot DBCS glyph per cell and advanced 26 dots per character;
+               that read the *kanji* area for every text cell (so every cell
+               came out as the same wrong glyph) and doubled the cell pitch, so
+               it is gone.  DBCS characters are drawn as two 13-dot halves by
+               the branches below. */
             /*  SBCS or DBCS left half */
             if (chr_wide == 0) {
                 if (attr & 0x01)
