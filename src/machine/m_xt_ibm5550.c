@@ -978,18 +978,24 @@ epoch_render_text(epoch_t *epoch)
                 fg = ((epoch->blink & 0x20) || (!(attr & 0x80))) ? fg : bg;
                 // if(chr!=0x20) epoch_log("chr: %x, %x, %x, %x, %x    ", chr, attr, fg, epoch->egapal[fg], epoch->pallook[epoch->egapal[fg]]);
             }
+            /* 3477-S: a text cell is 26 dots wide - a single 32x32 card bitmap
+               split down the middle into two adjacent 13-dot halves (see the
+               SBCS branch below).  Every cell uses that 26-dot pitch so that
+               the block/line graphics (attr bit 1) line up with the text; only
+               DBCS characters (attr bit 0) still take two separate cells. */
+            uint32_t cell_dots = epoch->char_width;
+            uint16_t font_hi   = 0;
+            if (epoch_is_3477 && !(attr & 0x01))
+                cell_dots = 26;
             /* Draw character */
-            for (uint32_t n = 0; n < epoch->char_width; n++)
+            for (uint32_t n = 0; n < cell_dots; n++)
                 p[n] = epoch->pallook[epoch->egapal[bg]]; /* draw blank */
-            /* 3477-S: the text cell is 13 dots wide (80 columns x 13 = 1040, as
-               measured on the machine), one CRAM word pair per cell, and the
-               half-width generator comes from ROS FONT ROM page 1 (see the ANK
-               loader in the machine init).  An earlier experiment drew one
-               26-dot DBCS glyph per cell and advanced 26 dots per character;
-               that read the *kanji* area for every text cell (so every cell
-               came out as the same wrong glyph) and doubled the cell pitch, so
-               it is gone.  DBCS characters are drawn as two 13-dot halves by
-               the branches below. */
+            /* 3477-S: the half-width generator comes from the card's GB2312
+               row 3 (see the ANK loader in the machine init), and a text cell
+               is 26 dots: the 32x32 bitmap of the character is cut down the
+               middle and its two halves are drawn side by side.  DBCS
+               characters (attr bit 0) are drawn as two 13-dot halves by the
+               branches below. */
             /*  SBCS or DBCS left half */
             if (chr_wide == 0) {
                 if (attr & 0x01)
@@ -1016,10 +1022,33 @@ epoch_render_text(epoch_t *epoch)
                         fontbase = EPOCH_VRAM_SBEX;
                     else
                         fontbase = EPOCH_VRAM_SBCS;
-                    if (epoch->font24) {
+                    if (epoch_is_3477 && epoch->font24 && !(attr & 0x01)) {
+                        /* The card holds one 32x32 bitmap per code and the text
+                           cell is 26 dots, so the single bitmap is split down
+                           the middle: the cell shows the first 13 dots of the
+                           bitmap's left 16 columns, then the first 13 dots of
+                           its right 16 - two adjacent 13-dot halves joined. */
+                        const uint32_t fbase = fontbase + chr * 0x80 + epoch->scanline * 4;
+
+                        font    = epoch->vram[fbase + 0];
+                        font    = (uint16_t) ((font << 8) | epoch->vram[fbase + 1]);
+                        font_hi = epoch->vram[fbase + 2];
+                        font_hi = (uint16_t) ((font_hi << 8) | epoch->vram[fbase + 3]);
+                        for (uint32_t n = 0; n < 13; n++) {
+                            p[n]      = epoch->pallook[epoch->egapal[(font & 0x8000) ? fg : bg]];
+                            p[13 + n] = epoch->pallook[epoch->egapal[(font_hi & 0x8000) ? fg : bg]];
+                            font    <<= 1;
+                            font_hi <<= 1;
+                        }
+                    } else if (epoch->font24) {
                         font = epoch->vram[fontbase + chr * 0x80 + epoch->scanline * 4 + 2]; /* w13xh29 font */
                         font <<= 8;
                         font |= epoch->vram[fontbase + chr * 0x80 + epoch->scanline * 4 + 3];
+                        /* Draw 13 dots */
+                        for (uint32_t n = 0; n < epoch->char_width; n++) {
+                            p[n] = epoch->pallook[epoch->egapal[(font & 0x8000) ? fg : bg]];
+                            font <<= 1;
+                        }
                     } else {
                         uint32_t bitnum, bit9addr;
                         fontbase += chr * 0x80 + epoch->scanline * 4;
@@ -1033,13 +1062,13 @@ epoch_render_text(epoch_t *epoch)
                         font <<= 8;
                         font |= (epoch->vram[bit9addr] << (7 - bitnum)) & 0x80;
                         // if(chr!=0x20) epoch_log("faddr: %x, scline: %x, chr: %x, font: %x    ", fontbase + chr * 0x80 + epoch->scanline * 4, epoch->scanline, chr, font);
+                        /* Draw 13 dots */
+                        for (uint32_t n = 0; n < epoch->char_width; n++) {
+                            p[n] = epoch->pallook[epoch->egapal[(font & 0x8000) ? fg : bg]];
+                            font <<= 1;
+                        }
                     }
                     // if(chr!=0x20) epoch_log("memaddr: %x, scanline: %x, chr: %x, font: %x    ", epoch->memaddr, epoch->scanline, chr, font);
-                    /* Draw 13 dots */
-                    for (uint32_t n = 0; n < epoch->char_width; n++) {
-                        p[n] = epoch->pallook[epoch->egapal[(font & 0x8000) ? fg : bg]];
-                        font <<= 1;
-                    }
                 }
             }
             /* right half of DBCS */
@@ -1054,7 +1083,7 @@ epoch_render_text(epoch_t *epoch)
             }
             /* Line 28 (Underscore) Note: Draw this first to display blink + vertical + underline correctly. */
             if (epoch->scanline == underscore_y && attr & 0x40 && !colormode) { /* Underscore only in monochrome mode */
-                for (uint32_t n = 0; n < epoch->char_width; n++)
+                for (uint32_t n = 0; n < cell_dots; n++)
                     p[n] = epoch->pallook[epoch->egapal[fg]]; /* under line (white) */
             }
             /* Column 1 (Vertical Line) */
@@ -1062,14 +1091,14 @@ epoch_render_text(epoch_t *epoch)
                 p[0] = epoch->pallook[epoch->egapal[2]]; /* vertical line (white) */
             }
             if (epoch->scanline == 0 && attr & 0x20) { /* HGrid */
-                for (uint32_t n = 0; n < epoch->char_width; n++)
+                for (uint32_t n = 0; n < cell_dots; n++)
                     p[n] = epoch->pallook[epoch->egapal[2]]; /* horizontal line (white) */
             }
             /* Drawing text cursor */
             drawcursor = ((epoch->memaddr == epoch->cursoraddr) && epoch->cursorvisible && epoch->cursoron);
             if (drawcursor) {
                 // int cursorwidth = (epoch->crtc[LC_COMPATIBILITY] & 0x20 ? 26 : 13);
-                int cursorwidth = epoch->char_width;
+                int cursorwidth = cell_dots;
                 int cursorcolor = 2; /* Choose color 2 if mode 8 */
                 fg              = ((attr & 0x08) ? 3 : 2);
                 bg              = 0;
@@ -1084,7 +1113,7 @@ epoch_render_text(epoch_t *epoch)
                         p[n] = (p[n] == epoch->pallook[epoch->egapal[bg]]) ? epoch->pallook[epoch->egapal[cursorcolor]] : p[n];
             }
             epoch->memaddr += 2;
-            p += epoch->char_width;
+            p += cell_dots;
         }
     }
 }
@@ -3730,22 +3759,39 @@ machine_xt_ibm3477_init(const machine_t *model)
        191 + (code - 0x20) (verified against the extracted font: g192 = full
        width '!', g207 = '0', g224 = 'A', g249 = 'Z').  The font-24 text
        renderer fetches the generator from EPOCH_VRAM_SBCS (0x38000), 128 bytes
-       per code, taking the *low* 16 bits of each row, so the left half of the
-       32-column glyph is laid down here with the two halves of every row
-       swapped.  A half-width cell is 13 dots wide, so it shows half of the
-       full-width glyph - the machine cuts the 32-column bitmap in two instead
-       of keeping a second, narrow font.  [Cloud server only, DO NOT USE!!!] */
+       per code, and a text cell is 26 dots wide: the renderer cuts the bitmap
+       in two down the middle and draws the halves side by side (the left 16
+       columns' first 13 dots, then the right 16 columns' first 13 dots), so the
+       machine cuts the 32-column bitmap instead of keeping a second, narrow
+       font.  [Cloud server only, DO NOT USE!!!] */
     if ((epoch->fontcard_rom != NULL) && (epoch->fontcard_pages > 2)) {
-        /* Half-width (ANK) generator: GB2312 row 3, left half of each glyph. */
+        /* Half-width (ANK) generator: GB2312 row 3.  The position of a code in
+           the row is n = code - 0x20 and the row starts at g192 (g192 is the
+           full-width '!', verified against the extracted font: g192 = '!',
+           g207 = '0', g224 = 'A', g249 = 'Z'), so glyph 191 + (code - 0x20) is
+           the full-width form of that code.  This card carries one extra glyph
+           between 'Z' and 'a' (verified: g257 = 'a', g258 = 'b', ... g263 = 'g'),
+           so the lower-case block is shifted by one and uses 192 + (code - 0x20);
+           reading it with 191 showed every lower-case letter as its predecessor. */
         for (uint32_t code = 0x20; code < 0x80; code++) {
-            const uint8_t *src = epoch->fontcard_rom + (191u + (code - 0x20)) * 128u;
+            const uint32_t base = (code >= 0x61) ? 192u : 191u;
             uint8_t       *dst = epoch->vram + EPOCH_VRAM_SBCS + (code * 0x80);
+            if (code == 0x20) {
+                /* The card's glyph before the row-3 start is a filled block, not a
+                   blank, so a space must be cleared explicitly. */
+                memset(dst, 0, 128);
+                continue;
+            }
+            const uint8_t *src = epoch->fontcard_rom + (base + (code - 0x20)) * 128u;
 
             for (uint32_t row = 0; row < 32; row++) {
-                dst[row * 4 + 0] = 0x00;
-                dst[row * 4 + 1] = 0x00;
-                dst[row * 4 + 2] = src[row * 4 + 0];
-                dst[row * 4 + 3] = src[row * 4 + 1];
+                /* A text cell is 26 dots: the renderer draws two adjacent
+                   13-dot halves, so store the left 16 columns in the high half
+                   of the word and the right 16 in the low half. */
+                dst[row * 4 + 0] = src[row * 4 + 0];
+                dst[row * 4 + 1] = src[row * 4 + 1];
+                dst[row * 4 + 2] = src[row * 4 + 2];
+                dst[row * 4 + 3] = src[row * 4 + 3];
             }
         }
         /* The alternate generator (attribute bit 1: block and line graphics -
