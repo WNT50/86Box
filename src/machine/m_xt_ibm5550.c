@@ -627,7 +627,7 @@ epoch_in(uint16_t addr, void *priv)
             /* The 3477-S burn-in watches bits 4-6 and needs them to invert
                between two consecutive reads, but only while mode register 2 is
                selected: it reads 0x94 twice, then 0x04 (F8655/F86C2). */
-            if (epoch_is_3477 && (epoch->crtmode == 0x04)) {
+            if (epoch_is_3477 && ((epoch->crtmode == 0x04) || (epoch->crtmode == 0x10) || (epoch->crtmode == 0x94))) {
                 epoch->cgastat ^= 0x30;
                 epoch->cgastat ^= 0x08;
             }
