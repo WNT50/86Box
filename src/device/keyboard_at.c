@@ -5976,6 +5976,11 @@ keyboard_at_write(void *priv)
 
             case 0xff: /* reset */
                 keyboard_set_in_reset(1);
+                /* A keyboard reset re-runs the BAT: the device must answer the
+                   0xFA ACK and then send 0xAA (BAT OK), as real AT keyboards do.
+                   bat_pending is consumed by the first BAT at init, so re-arm it
+                   here or every later reset silently produces no 0xAA. */
+                bat_pending = 1;
                 kbc_at_dev_reset(dev, 1);
                 bat_counter = 1000;
                 break;
