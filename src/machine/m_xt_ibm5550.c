@@ -339,6 +339,16 @@ typedef struct epoch_t {
     int lowmemorydisabled;
     int crtioenabled;
     uint8_t dispbank; /* port 0x400: bits 1-0 pick the 0xE0000 plane (3477-S) */
+    /* [3477-S] Write-only memory-window selectors.  0x390 picks the
+       view of 0x40000-0x9FFFF that the IPL's memory walk uses (it
+       writes 2 to open and 0 to close around the 0x4000+ pass);
+       0x1B2/0x2C2 hold the A2h-derived window parameters.  All three
+       are write-only on the real board - the firmware never reads them
+       back.  On a single-board model there is no second view, so these
+       latch the value without re-mapping (the range stays visible). */
+    uint8_t map390;   /* port 0x390: memory-window select */
+    uint8_t reg1b2;   /* port 0x1B2: window parameter (A2h bit 7 = 0) */
+    uint8_t reg2c2;   /* port 0x2C2: window parameter (A2h bit 7 = 1) */
 
     int fullchange;
 
@@ -2106,6 +2116,16 @@ x1xx xxxx: Enable parity update (Disable this -> Write data -> Enable this -> Re
                 epoch_log("Low memory disabled\n");
             }
             break;
+        /* [3477-S] Write-only memory-window selectors (see epoch_t). */
+        case 0x390:
+            epoch->map390 = val;
+            break;
+        case 0x1B2:
+            epoch->reg1b2 = val;
+            break;
+        case 0x2C2:
+            epoch->reg2c2 = val;
+            break;
         case 0x368: /* register index */
             epoch->diag_index = val;
             break;
@@ -2712,6 +2732,9 @@ epoch_reset(void *priv)
     memset(epoch->paritybad, 0, 0xA0000 >> 3);
     epoch->parityenabled = 1;
     epoch->dispbank      = 0;
+    epoch->map390        = 0;
+    epoch->reg1b2        = 0;
+    epoch->reg2c2        = 0;
     /* A hard reset is a power-on: only the soft reset a POST restart command
        issues (see epoch_misc_out's 0x36A/0xA1) leaves this set. */
     epoch->warmstart  = 0;
@@ -3114,6 +3137,16 @@ epoch_init(UNUSED(const device_t *info))
 
     io_sethandler(0x310, 0x0008,
                   epoch_misc_in, NULL, NULL, epoch_misc_out, NULL, NULL, epoch);
+
+    /* [3477-S] Write-only memory-window selectors. */
+    if (epoch_is_3477) {
+        io_sethandler(0x390, 0x0001,
+                      epoch_misc_in, NULL, NULL, epoch_misc_out, NULL, NULL, epoch);
+        io_sethandler(0x1B2, 0x0001,
+                      epoch_misc_in, NULL, NULL, epoch_misc_out, NULL, NULL, epoch);
+        io_sethandler(0x2C2, 0x0001,
+                      epoch_misc_in, NULL, NULL, epoch_misc_out, NULL, NULL, epoch);
+    }
 
     /* Only the 5535-M's IPL uses the status register file at 0x368/0x36A. */
     if (epoch_is_5535)
