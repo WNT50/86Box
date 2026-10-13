@@ -1669,18 +1669,28 @@ epoch_parity_readb(uint32_t addr, void *priv)
     epoch_t *epoch = (epoch_t *) priv;
     int newerr = 0;
     if (epoch->parityenabled != 0) {
+        /* [EXP] The 3477-S IPL arms a deliberate error with A0h bit 7
+           (`mov al,0xA9 / out 0xA0,al` at F800:0836) and then consumes it with
+           the very next read (F914:000C, which is also how it fetches the SS
+           base at 0x131).  That read is a test, not a fault: the IPL only
+           ever looks at A0h bit 0 for the walk at F800:0796, and it
+           acknowledges the interrupt condition at F914:0040 (0x730) - which
+           it can only reach if the armed read does not raise an NMI.  A real
+           fault (the paritybad bitmap) still propagates. */
+        int armed = 0;
         if (epoch_parity_check(epoch, addr) || epoch->parityforce) {
             newerr = (epoch->parityerror == 0);
+            armed  = (epoch_is_3477 && (epoch->parityforce != 0));
             epoch->parityerror = 1;
             if (epoch_is_3477)
                 epoch->parityforce = 0; /* [AB] the arm is one-shot */
         }
-    }
-    if ((epoch->parityerror != 0) && (epoch->parityenabled != 0)) {
-        epoch->parityerroraddr = (addr >> 16) & 0xFF; /* X000:0 */
-        epoch_log("%04X:%04X perror at %0X\n", cs >> 4, cpu_state.pc, addr);
-        if (nmi_mask && (!epoch_is_3477 || newerr)) {
-            nmi_raise();
+        if ((epoch->parityerror != 0) && (epoch->parityenabled != 0)) {
+            epoch->parityerroraddr = (addr >> 16) & 0xFF; /* X000:0 */
+            epoch_log("%04X:%04X perror at %0X\n", cs >> 4, cpu_state.pc, addr);
+            if (nmi_mask && (!epoch_is_3477 || newerr) && !armed) {
+                nmi_raise();
+            }
         }
     }
     if (epoch->lowmemorydisabled) {
