@@ -985,6 +985,21 @@ epoch_render_text(epoch_t *epoch)
             /* Draw character */
             for (uint32_t n = 0; n < epoch->char_width; n++)
                 p[n] = epoch->pallook[epoch->egapal[bg]]; /* draw blank */
+            /* [Cloud server only, DO NOT USE!!!] 3477-S: one 26-dot glyph per
+               13-dot cell (40 glyphs x 26 = 1040).  The ROM stores one word per
+               character in CRAM, so consume one pair and draw the whole glyph;
+               the code indexes the card's glyph area directly. */
+            if (epoch_is_3477) {
+                uint32_t font = getfont_ps55dbcs(chr, epoch->scanline, epoch);
+                for (uint32_t n = 0; n < 26; n++) {
+                    p[n] = epoch->pallook[epoch->egapal[(font & 0x80000000) ? fg : bg]];
+                    font <<= 1;
+                }
+                x += epoch->char_width; /* the loop adds another 13 => 26 total */
+                p += epoch->char_width * 2;
+                epoch->memaddr += 2;
+                continue;
+            }
             /*  SBCS or DBCS left half */
             if (chr_wide == 0) {
                 if (attr & 0x01)
@@ -999,19 +1014,6 @@ epoch_render_text(epoch_t *epoch)
                     /* Get the font pattern */
                     uint32_t font = getfont_ps55dbcs(chr_dbcs, epoch->scanline, epoch);
                     /* Draw 13 dots */
-                    for (uint32_t n = 0; n < epoch->char_width; n++) {
-                        p[n] = epoch->pallook[epoch->egapal[(font & 0x80000000) ? fg : bg]];
-                        font <<= 1;
-                    }
-                } else if (epoch_is_3477) {
-                    /* 3477-S SBCS (ANK): one 26-dot wide character per cell.
-                       The ROS FONT ROM page (glyph number == code in the ASCII
-                       range) holds one 32-dot row per scanline and the character
-                       sits on columns 1-27 of it, so the glyph is the top 26 bits
-                       of the row.  The cell is 26 dots wide, so this is exactly
-                       one CRAM cell -- the loop's own advance is enough. */
-                    uint32_t font = getfont_ps55dbcs(chr, epoch->scanline, epoch);
-
                     for (uint32_t n = 0; n < epoch->char_width; n++) {
                         p[n] = epoch->pallook[epoch->egapal[(font & 0x80000000) ? fg : bg]];
                         font <<= 1;
@@ -1050,13 +1052,8 @@ epoch_render_text(epoch_t *epoch)
                     }
                 }
             }
-            /* right half of DBCS: on the 3477-S the cell is 26 dots wide, so a
-               DBCS character is a single cell and the left half above has
-               already drawn every dot of it.  The trail byte's cell stays
-               blank. */
-            else if (epoch_is_3477) {
-                chr_wide = 0;
-            } else {
+            /* right half of DBCS */
+            else {
                 uint32_t font = getfont_ps55dbcs(chr_dbcs, epoch->scanline, epoch);
                 /* Draw 13 dots */
                 for (uint32_t n = 0; n < epoch->char_width; n++) {
@@ -1228,21 +1225,8 @@ epoch_recalctimings(epoch_t *epoch)
         epoch->render            = epoch_render_text;
         epoch->vram_display_mask = EPOCH_MASK_CRAM;
         if (epoch->font24) {
-            if (epoch_is_3477) {
-                /* 3477-S: the character cell is 26 dots wide, not 13.  The ANK
-                   page of the ROS FONT ROM draws a character across columns
-                   1-27 of a 32-dot row (its design box measures 28 x 24, a
-                   24-dot system), so the 80 characters the CRTC displays span
-                   80 x 26 = 2080 dots.  With the 5535/5550 13-dot cell every
-                   cell overlapped its neighbour and each character came out as
-                   fragments of itself and of its neighbour -- which is what made
-                   the banner look like a font problem. */
-                epoch->hdisp *= 26;
-                epoch->char_width = 26;
-            } else {
-                epoch->hdisp *= 13;
-                epoch->char_width = 13;
-            }
+            epoch->hdisp *= 13;
+            epoch->char_width = 13;
         } else {
             epoch->hdisp *= 9;
             epoch->char_width = 9;
