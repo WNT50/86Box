@@ -1023,16 +1023,18 @@ epoch_render_text(epoch_t *epoch)
                     else
                         fontbase = EPOCH_VRAM_SBCS;
                     if (epoch_is_3477 && epoch->font24 && !(attr & 0x01)) {
-                        /* The card keeps the ANK form in the left 16 columns of
-                           its 32x32 cell (right half empty), so a 13-dot text
-                           cell shows the first 13 of those 16 dots. */
+                        /* The card draws the ANK form in the middle of its 32x32
+                           cell (e.g. 'A' occupies columns 3-25, 'M' 2-26), so a
+                           13-dot text cell takes the middle 13 columns - 9-21 -
+                           and the left/right of neighbouring cells line up. */
                         const uint32_t fbase = fontbase + chr * 0x80 + epoch->scanline * 4;
+                        const uint16_t lo = (uint16_t) ((epoch->vram[fbase + 0] << 8) | epoch->vram[fbase + 1]);
+                        const uint16_t hi = (uint16_t) ((epoch->vram[fbase + 2] << 8) | epoch->vram[fbase + 3]);
+                        uint32_t       mid = ((uint32_t) (lo & 0x007F) << 6) | ((hi >> 10) & 0x003F);
 
-                        font = epoch->vram[fbase + 0];
-                        font = (uint16_t) ((font << 8) | epoch->vram[fbase + 1]);
                         for (uint32_t n = 0; n < 13; n++) {
-                            p[n] = epoch->pallook[epoch->egapal[(font & 0x8000) ? fg : bg]];
-                            font <<= 1;
+                            p[n] = epoch->pallook[epoch->egapal[(mid & 0x1000) ? fg : bg]];
+                            mid <<= 1;
                         }
                     } else if (epoch->font24) {
                         font = epoch->vram[fontbase + chr * 0x80 + epoch->scanline * 4 + 2]; /* w13xh29 font */
