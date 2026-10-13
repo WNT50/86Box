@@ -636,8 +636,20 @@ epoch_in(uint16_t addr, void *priv)
             temp = 0xff;
             /* The 3477-S burn-in watches bits 4-6 and needs them to invert
                between two consecutive reads, but only while mode register 2 is
-               selected: it reads 0x94 twice, then 0x04 (F8655/F86C2). */
-            if (epoch_is_3477 && ((epoch->crtmode == 0x04) || (epoch->crtmode == 0x10) || (epoch->crtmode == 0x94))) {
+               selected: it reads 0x94 twice, then 0x04 (F8655/F86C2).
+
+               The 0x94 pass must NOT invert.  The IPL enters the poll block at
+               F800:0547 with mode 0x94, and its exit at F800:0587 is only the
+               success path once the timeout branch has run -- that branch is
+               what sets AH (xor ah, 0FFh at F800:05C0), while AH = 0 at
+               F800:05C8 sends it to the error exit F800:05C5 (jmp 0x53B ->
+               mov ax, 0Bh).  The timeout branch itself writes mode 0x04
+               (F800:05B0), so inverting only for 0x04/0x10 makes sweep #1 time
+               out, the timeout set AH and switch to 0x04, and sweep #2 invert
+               and satisfy the poll.  Inverting for 0x94 as well let sweep #1
+               satisfy the poll immediately, leaving AH = 0 and the IPL
+               reporting failure code 0x0B at the handoff doorbell. */
+            if (epoch_is_3477 && ((epoch->crtmode == 0x04) || (epoch->crtmode == 0x10))) {
                 epoch->cgastat ^= 0x30;
                 epoch->cgastat ^= 0x08;
             }
