@@ -978,15 +978,15 @@ epoch_render_text(epoch_t *epoch)
                 fg = ((epoch->blink & 0x20) || (!(attr & 0x80))) ? fg : bg;
                 // if(chr!=0x20) epoch_log("chr: %x, %x, %x, %x, %x    ", chr, attr, fg, epoch->egapal[fg], epoch->pallook[epoch->egapal[fg]]);
             }
-            /* 3477-S: a text cell is 26 dots wide - a single 32x32 card bitmap
-               split down the middle into two adjacent 13-dot halves (see the
-               SBCS branch below).  Every cell uses that 26-dot pitch so that
-               the block/line graphics (attr bit 1) line up with the text; only
-               DBCS characters (attr bit 0) still take two separate cells. */
+            /* 3477-S: a text cell is 13 dots wide (80 columns x 13 = 1040, as
+               measured on the machine), one CRAM word pair per cell.  The
+               half-width generator comes from the card's GB2312 row 3 (see the
+               ANK loader in the machine init); the card stores those ANK forms
+               in the left 16 columns of the 32x32 cell with the right half
+               empty, so the cell shows the first 13 of those 16 dots.  DBCS
+               characters (attr bit 0) are drawn as two 13-dot halves by the
+               branches below. */
             uint32_t cell_dots = epoch->char_width;
-            uint16_t font_hi   = 0;
-            if (epoch_is_3477 && !(attr & 0x01))
-                cell_dots = 26;
             /* Draw character */
             for (uint32_t n = 0; n < cell_dots; n++)
                 p[n] = epoch->pallook[epoch->egapal[bg]]; /* draw blank */
@@ -1023,22 +1023,16 @@ epoch_render_text(epoch_t *epoch)
                     else
                         fontbase = EPOCH_VRAM_SBCS;
                     if (epoch_is_3477 && epoch->font24 && !(attr & 0x01)) {
-                        /* The card holds one 32x32 bitmap per code and the text
-                           cell is 26 dots, so the single bitmap is split down
-                           the middle: the cell shows the first 13 dots of the
-                           bitmap's left 16 columns, then the first 13 dots of
-                           its right 16 - two adjacent 13-dot halves joined. */
+                        /* The card keeps the ANK form in the left 16 columns of
+                           its 32x32 cell (right half empty), so a 13-dot text
+                           cell shows the first 13 of those 16 dots. */
                         const uint32_t fbase = fontbase + chr * 0x80 + epoch->scanline * 4;
 
-                        font    = epoch->vram[fbase + 0];
-                        font    = (uint16_t) ((font << 8) | epoch->vram[fbase + 1]);
-                        font_hi = epoch->vram[fbase + 2];
-                        font_hi = (uint16_t) ((font_hi << 8) | epoch->vram[fbase + 3]);
+                        font = epoch->vram[fbase + 0];
+                        font = (uint16_t) ((font << 8) | epoch->vram[fbase + 1]);
                         for (uint32_t n = 0; n < 13; n++) {
-                            p[n]      = epoch->pallook[epoch->egapal[(font & 0x8000) ? fg : bg]];
-                            p[13 + n] = epoch->pallook[epoch->egapal[(font_hi & 0x8000) ? fg : bg]];
-                            font    <<= 1;
-                            font_hi <<= 1;
+                            p[n] = epoch->pallook[epoch->egapal[(font & 0x8000) ? fg : bg]];
+                            font <<= 1;
                         }
                     } else if (epoch->font24) {
                         font = epoch->vram[fontbase + chr * 0x80 + epoch->scanline * 4 + 2]; /* w13xh29 font */
