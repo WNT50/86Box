@@ -1023,14 +1023,12 @@ epoch_render_text(epoch_t *epoch)
                     else
                         fontbase = EPOCH_VRAM_SBCS;
                     if (epoch_is_3477 && epoch->font24 && !(attr & 0x01)) {
-                        /* The card draws the ANK form in the middle of its 32x32
-                           cell (e.g. 'A' occupies columns 3-25, 'M' 2-26), so a
-                           13-dot text cell takes the middle 13 columns - 9-21 -
-                           and the left/right of neighbouring cells line up. */
+                        /* The generator was already narrowed to the 13-dot text
+                           cell at load time (see epoch_ank_narrow): its thirteen
+                           columns are the top 13 bits of the first word. */
                         const uint32_t fbase = fontbase + chr * 0x80 + epoch->scanline * 4;
                         const uint16_t lo = (uint16_t) ((epoch->vram[fbase + 0] << 8) | epoch->vram[fbase + 1]);
-                        const uint16_t hi = (uint16_t) ((epoch->vram[fbase + 2] << 8) | epoch->vram[fbase + 3]);
-                        uint32_t       mid = ((uint32_t) (lo & 0x007F) << 6) | ((hi >> 10) & 0x003F);
+                        uint32_t       mid = (uint32_t) (lo >> 3);
 
                         for (uint32_t n = 0; n < 13; n++) {
                             p[n] = epoch->pallook[epoch->egapal[(mid & 0x1000) ? fg : bg]];
@@ -1616,6 +1614,55 @@ epoch_cram_writew(uint32_t addr, uint16_t val, void *priv)
     epoch_cram_write(addr + 1, val >> 8, epoch);
 }
 
+/* Build the narrow (13 dot) form of a card glyph.  The card stores a character
+   across its 32 column cell as two 16 column halves ('M' has ink in columns 2-13
+   and 16-26), so a text cell is built from the ink bounding box's left six
+   columns joined with its right six, plus one blank column:
+   6 + 6 + 1 = 13.  The thirteen bits land in the top of each row (columns 0-12),
+   which the text renderer reads as bits 15..3 of the first word. */
+static void
+epoch_ank_narrow(const uint8_t *src, uint8_t *dst)
+{
+    uint32_t rowbits[32];
+    int      c0 = 32, c1 = -1;
+
+    for (uint32_t row = 0; row < 32; row++) {
+        const uint32_t v = ((uint32_t) src[row * 4 + 0] << 24) |
+                           ((uint32_t) src[row * 4 + 1] << 16) |
+                           ((uint32_t) src[row * 4 + 2] << 8) |
+                           (uint32_t) src[row * 4 + 3];
+
+        rowbits[row] = v;
+        for (int col = 0; col < 32; col++) {
+            if (v & (0x80000000u >> col)) {
+                if (col < c0)
+                    c0 = col;
+                if (col > c1)
+                    c1 = col;
+            }
+        }
+    }
+    for (uint32_t row = 0; row < 32; row++) {
+        uint32_t out = 0;
+
+        if (c1 >= c0) {
+            int w = c1 - c0 + 1;
+            if (w > 6)
+                w = 6;
+            for (int i = 0; i < w; i++)
+                out |= ((rowbits[row] >> (31 - (c0 + i))) & 1u) << (12 - i);
+            for (int i = 0; i < w; i++)
+                out |= ((rowbits[row] >> (31 - (c1 - w + 1 + i))) & 1u) << (12 - w - i);
+        }
+        const uint32_t w32 = out << 19;
+
+        dst[row * 4 + 0] = (uint8_t) (w32 >> 24);
+        dst[row * 4 + 1] = (uint8_t) (w32 >> 16);
+        dst[row * 4 + 2] = (uint8_t) (w32 >> 8);
+        dst[row * 4 + 3] = (uint8_t) w32;
+    }
+}
+
 static uint8_t
 epoch_cram_read(uint32_t addr, void *priv)
 {
@@ -1933,12 +1980,15 @@ x1xx xxxx: No floppy drive
                 /* The 3477-S IPL identifies its display as (A2 & 0xA0) == 0x80
                    for the 24-dot panel; the 5550 values (bit 5 set) never match. */
                 ret = epoch->font24 ? 0x88 : 0x22;
-                /* A2h 的 bit7 同时是"无错误"标志：RAM 测试校验失败时 ROM 会
-                   out 0xA2 锁存错误，随后 in 0xA2 / not al / test al,0x80 判断
-                   是否出错（0x6E5）；而面板 ID 测试用 and al,0xA0 / cmp al,0x80
-                  （0x6D44）——两处用法推出：错误锁存时 bit7 应为 0。 */
-                if (epoch->parityerror & 1)
-                    ret &= ~0x80;
+                /* A2h bit7 is the panel/model-configuration bit and stays set
+                   even while a memory error is latched.  The floppy-resident
+                   IBMBIO picks the 3472/3477 banner with
+                   `in al,0xA2 / test al,0x80` (IBMBIO.COM+0x7A8), and the
+                   models differ in their RAM hole layout, so this bit is how a
+                   3477 says so; clearing it on a stale error latch (the IPL's
+                   own armed test at F914:0010 is never acknowledged) printed
+                   "3472 Microcode" on a 3477.  The error itself is still
+                   reported on A0h bit 0 and cleared by a write to A2h. */
             } else if (epoch->font24)
                 ret = 0xA8; /* Mono 24 */
             else
@@ -3780,15 +3830,8 @@ machine_xt_ibm3477_init(const machine_t *model)
             }
             const uint8_t *src = epoch->fontcard_rom + (base + (code - 0x20)) * 128u;
 
-            for (uint32_t row = 0; row < 32; row++) {
-                /* A text cell is 26 dots: the renderer draws two adjacent
-                   13-dot halves, so store the left 16 columns in the high half
-                   of the word and the right 16 in the low half. */
-                dst[row * 4 + 0] = src[row * 4 + 0];
-                dst[row * 4 + 1] = src[row * 4 + 1];
-                dst[row * 4 + 2] = src[row * 4 + 2];
-                dst[row * 4 + 3] = src[row * 4 + 3];
-            }
+            /* Narrow it into the 13-dot text cell (see epoch_ank_narrow). */
+            epoch_ank_narrow(src, dst);
         }
         /* The alternate generator (attribute bit 1: block and line graphics -
            e.g. the solid block the IBM logo is built from) still comes from
@@ -3801,15 +3844,12 @@ machine_xt_ibm3477_init(const machine_t *model)
                 const uint8_t *src = page + (code - 0x20) * 0x80;
                 uint8_t       *dst = base + (code * 0x80);
 
-                for (uint32_t row = 0; row < 32; row++) {
-                    dst[row * 4 + 0] = 0x00;
-                    dst[row * 4 + 1] = 0x00;
-                    dst[row * 4 + 2] = src[row * 4 + 0];
-                    dst[row * 4 + 3] = src[row * 4 + 1];
-                }
+                /* Same narrow form as the text generator so the renderer reads
+                   one layout for both. */
+                epoch_ank_narrow(src, dst);
             }
         }
-        pclog("3477: ANK <- GB2312 row 3 left half; alternate generator <- card page 2\n");
+        pclog("3477: ANK <- GB2312 row 3 (narrowed to 13 dots); alternate generator <- card page 2\n");
     } else
         pclog("3477: font ROM not installed, ANK generators left empty\n");
 
