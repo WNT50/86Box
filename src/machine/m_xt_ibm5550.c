@@ -3028,11 +3028,13 @@ epoch_init(UNUSED(const device_t *info))
         epoch->fontcard_isnew = device_get_config_int("font");
     } else {
         epoch->font24 = device_get_config_int("model");
-    /* [AB-TEST] device_get_config_int() 在旧式机型 init 里只返回默认值（0），
-       而 3477-S 就是 24 点显示器：其 IPL 用 (A2 & 0xA0) == 0x80 识别面板，
-       font24=0 会让 A2h 报 0x22 从而走错分支。先强制为 1 验证。 */
-    if (epoch_is_3477)
-        epoch->font24 = 1;
+        if (epoch_is_3477) {
+            /* The 3477-S is a 24-dot panel, but device_get_config_int()
+               returns only the default (0) in this legacy machine init, and
+               font24=0 makes A2h report 0x22 so the IPL takes the wrong
+               branch. */
+            epoch->font24 = 1;
+        }
         epoch->fontcard_charset = device_get_config_int("font");
         epoch->fontcard_enabled = (epoch->fontcard_charset != EPOCH_FONTCARD_CHARSET_NONE);
     }
