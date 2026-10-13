@@ -1601,12 +1601,6 @@ epoch_cram_writew(uint32_t addr, uint16_t val, void *priv)
 {
     static int dbg_n = 0;
 
-    /* [Cloud server only, DO NOT USE!!!] 3477-S bring-up: show the first
-       text/attribute writes at 0xE0000. */
-    if (dbg_n < 8) {
-        pclog("3477: cram wr %05X <- %04X\n", addr, val);
-        dbg_n++;
-    }
     // epoch_log("epoch_cram_writ   ew: Write to %x, val %x\n", addr, val);
     epoch_t *epoch = (epoch_t *) priv;
     cycles -= video_timing_write_w;
@@ -1614,17 +1608,23 @@ epoch_cram_writew(uint32_t addr, uint16_t val, void *priv)
     epoch_cram_write(addr + 1, val >> 8, epoch);
 }
 
-/* Build the narrow (13 dot) form of a card glyph.  The card stores a character
-   across its 32 column cell as two 16 column halves ('M' has ink in columns 2-13
-   and 16-26), so a text cell is built from the ink bounding box's left six
-   columns joined with its right six, plus one blank column:
-   6 + 6 + 1 = 13.  The thirteen bits land in the top of each row (columns 0-12),
-   which the text renderer reads as bits 15..3 of the first word. */
+/* Build the narrow (13 dot) form of a card glyph.  The card draws every ANK
+   character TWICE inside its 32 column cell - two complete narrow glyphs side
+   by side, one per 16 column half, with the gap always over columns 13-15
+   (verified: 'I' shows two stems with two sets of serifs, 'M' two complete M's,
+   'V' two complete V's, '0' two complete ovals).  So the narrow form is not a
+   crop of a wide glyph at all: it is one of those two copies.  Take the left
+   half and centre its ink bounding box in the 13 dot cell, squeezing by a dot
+   or two when the copy is slightly wider than 13 ('M' spans 14 columns).  That
+   way nothing is cut off (the old left-six-plus-right-six rule threw away the
+   middle of V/M/I) and no ink is drawn twice (it duplicated '.' and 'i').
+   The thirteen bits land in the top of each row (columns 0-12), which the text
+   renderer reads as bits 15..3 of the first word. */
 static void
 epoch_ank_narrow(const uint8_t *src, uint8_t *dst)
 {
     uint32_t rowbits[32];
-    int      c0 = 32, c1 = -1;
+    int      c0 = 16, c1 = -1;
 
     for (uint32_t row = 0; row < 32; row++) {
         const uint32_t v = ((uint32_t) src[row * 4 + 0] << 24) |
@@ -1633,7 +1633,7 @@ epoch_ank_narrow(const uint8_t *src, uint8_t *dst)
                            (uint32_t) src[row * 4 + 3];
 
         rowbits[row] = v;
-        for (int col = 0; col < 32; col++) {
+        for (int col = 0; col < 16; col++) {
             if (v & (0x80000000u >> col)) {
                 if (col < c0)
                     c0 = col;
@@ -1646,13 +1646,28 @@ epoch_ank_narrow(const uint8_t *src, uint8_t *dst)
         uint32_t out = 0;
 
         if (c1 >= c0) {
-            int w = c1 - c0 + 1;
-            if (w > 6)
-                w = 6;
-            for (int i = 0; i < w; i++)
-                out |= ((rowbits[row] >> (31 - (c0 + i))) & 1u) << (12 - i);
-            for (int i = 0; i < w; i++)
-                out |= ((rowbits[row] >> (31 - (c1 - w + 1 + i))) & 1u) << (12 - w - i);
+            const int w = c1 - c0 + 1;
+
+            if (w <= 13) {
+                const int off = (13 - w) / 2;
+
+                for (int i = 0; i < w; i++)
+                    out |= ((rowbits[row] >> (31 - (c0 + i))) & 1u) << (12 - off - i);
+            } else {
+                for (int i = 0; i < 13; i++) {
+                    int a = c0 + (i * w) / 13;
+                    int b = c0 + ((i + 1) * w) / 13;
+
+                    if (b <= a)
+                        b = a + 1;
+                    for (int col = a; (col < b) && (col < 16); col++) {
+                        if (rowbits[row] & (0x80000000u >> col)) {
+                            out |= 1u << (12 - i);
+                            break;
+                        }
+                    }
+                }
+            }
         }
         const uint32_t w32 = out << 19;
 
@@ -2938,8 +2953,10 @@ static uint8_t
 epoch_fontcard_readb(uint32_t addr, void *priv)
 {
     epoch_t *epoch = (epoch_t *) priv;
+    uint8_t  ret   = epoch->fontcard_win[addr & (EPOCH_FONTCARD_WIN_SIZE - 1)];
 
-    return epoch->fontcard_win[addr & (EPOCH_FONTCARD_WIN_SIZE - 1)];
+
+    return ret;
 }
 
 static uint16_t
@@ -2947,6 +2964,24 @@ epoch_fontcard_readw(uint32_t addr, void *priv)
 {
     epoch_t *epoch = (epoch_t *) priv;
     addr &= EPOCH_FONTCARD_WIN_SIZE - 1;
+
+    /* [Cloud server only, DO NOT USE!!!] same read counter as readb. */
+    {
+        static int      on = -1;
+        static uint32_t n  = 0;
+
+        if (on < 0)
+            on = (getenv("CARDRD") != NULL) ? 1 : 0;
+        if (on) {
+            n++;
+            if (n <= 60)
+                pclog("3477: card rdw %04X (pc=%04X:%04X)\n", addr,
+                      (unsigned) (cs >> 4), cpu_state.pc);
+            if ((n % 4096) == 0)
+                pclog("3477: card rdw 计数 %u\n", n);
+        }
+    }
+
     return (uint16_t) (epoch->fontcard_win[addr]
         | (epoch->fontcard_win[(addr + 1) & (EPOCH_FONTCARD_WIN_SIZE - 1)] << 8));
 }
@@ -2957,6 +2992,8 @@ epoch_fontcard_writeb(uint32_t addr, uint8_t val, void *priv)
     epoch_t *epoch = (epoch_t *) priv;
 
     addr &= EPOCH_FONTCARD_WIN_SIZE - 1;
+
+
     /* Writing 2 to the first byte is IBMBIO's "serve" command; re-serving
        page 0 keeps the signature comparison it does right after reading a
        stable place. */
