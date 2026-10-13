@@ -554,6 +554,10 @@ at_main_ibf:
                 if ((dev->status & STAT_IFULL) && (dev->status & STAT_CD)) {
                     dev->status &= ~STAT_IFULL;
                     kbc_at_process_cmd(dev);
+                } else if ((dev->status & STAT_IFULL) && dev->wantdata && (dev->state == STATE_KBC_PARAM)) {
+                    /* The host wrote the pending command parameter while OBF is still set: IBF
+                       clearing does not depend on OBF being read out, so take it here too. */
+                    kbc_param_take(dev);
                 }
             } else if (dev->status & STAT_IFULL)
                 kbc_ibf_process(dev);
