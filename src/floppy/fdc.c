@@ -1128,6 +1128,13 @@ fdc_write(uint16_t addr, uint8_t val, void *priv)
             case 5: /*Command register*/
                 if (fdc->flags & FDC_FLAG_5550)
                     picintc(1 << fdc->irq);
+                /* [3477-S] While the result phase is still pending, a write to the data
+                   register must be dropped: it would otherwise take the `pnum != ptot`
+                   path below, which assigns stat = 0x90 (CB=1, DIO=0) and destroys the
+                   result phase the guest is still reading.  3477-S's BIOS then polls
+                   MSR for DIO (0xD0) forever and ends up in the CCCC runaway loop. */
+                if (epoch_is_3477 && fdc->paramstogo)
+                    return;
                 if (fdc->fifointest) {
                     /* Write FIFO buffer in the test mode (PS/55) */
                     fdc_log("FIFO buffer position = %X\n", ((fifo_t *) fdc->fifo_p)->end);
