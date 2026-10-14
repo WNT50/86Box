@@ -1028,6 +1028,17 @@ epoch_render_text(epoch_t *epoch)
                            columns are the top 13 bits of the first word. */
                         const uint32_t fbase = fontbase + chr * 0x80 + epoch->scanline * 4;
                         const uint16_t lo = (uint16_t) ((epoch->vram[fbase + 0] << 8) | epoch->vram[fbase + 1]);
+                        if (getenv("EPOCH3477_GLYPH") && (chr != 0x20) && (epoch->scanline == 8)) {
+                            static int gn = 0;
+                            if (gn < 6) {
+                                gn++;
+                                pclog("3477: GLYPH chr=%02X base=%05X fbase=%05X b=%02X %02X %02X %02X %02X %02X %02X %02X\n",
+                                    chr, fontbase, fbase,
+                                    epoch->vram[fbase + 0], epoch->vram[fbase + 1], epoch->vram[fbase + 2],
+                                    epoch->vram[fbase + 3], epoch->vram[fbase + 4], epoch->vram[fbase + 5],
+                                    epoch->vram[fbase + 6], epoch->vram[fbase + 7]);
+                            }
+                        }
                         uint32_t       mid = (uint32_t) (lo >> 3);
 
                         for (uint32_t n = 0; n < 13; n++) {
@@ -1596,13 +1607,24 @@ epoch_cram_write(uint32_t addr, uint8_t val, void *priv)
         {
             /* Parity census: even offsets = character codes, odd = attributes
                (renderer: chr = cram[memaddr], attr = cram[memaddr + 1]). */
-            static long     neven = 0, nodd = 0;
+            static long     neven = 0, nodd = 0, ntext = 0;
             static uint32_t mine = 0xffffffffu, maxe = 0u, mino = 0xffffffffu, maxo = 0u;
+            static uint32_t mintx = 0xffffffffu, maxtx = 0u;
             if (addr & 1) { nodd++; if (addr < mino) mino = addr; if (addr > maxo) maxo = addr; }
-            else          { neven++; if (addr < mine) mine = addr; if (addr > maxe) maxe = addr; }
+            else {
+                neven++;
+                if (addr < mine) mine = addr; if (addr > maxe) maxe = addr;
+                /* Non-space character codes tell us whether real text landed. */
+                if (val != 0x20) {
+                    ntext++;
+                    if (addr < mintx) mintx = addr; if (addr > maxtx) maxtx = addr;
+                }
+            }
             if (((neven + nodd) % 5000) == 0)
-                pclog("3477: CRAMW even=%ld [%05X..%05X] odd=%ld [%05X..%05X] last=%05X:%02X\n",
-                      neven, mine, maxe, nodd, mino, maxo, addr, val);
+                pclog("3477: CRAMW even=%ld [%05X..%05X] odd=%ld [%05X..%05X] "
+                      "nonblank=%ld [%05X..%05X] last=%05X:%02X\n",
+                      neven, mine, maxe, nodd, mino, maxo,
+                      ntext, mintx, maxtx, addr, val);
         }
         if (0) {
             int i, j;
