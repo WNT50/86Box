@@ -3192,7 +3192,15 @@ execx86_instruction(void)
                 rep_c_flag = 0;
                 break;
 
-            case 0xf4:             /* HLT */
+            case 0xf4: /* HLT */
+                if (getenv("HLTTRC")) {
+                    static uint32_t n = 0;
+
+                    if (((++n) % 512) == 0)
+                        pclog("3477: HLT 累计 %u (pc=%04X:%04X IF=%d)\n", n,
+                              (unsigned) (cs >> 4), cpu_state.pc,
+                              !!(cpu_state.flags & T_FLAG));
+                }
                 if (!repeating) {
                     wait_cycs(1, 0);
                     pfq_clear();

@@ -27,6 +27,9 @@
 #include <86box/mouse.h>
 #include <86box/machine.h>
 
+/* [PROBE-TEMP] 打开 keyboard_at 日志，跑完 git checkout 撤净 */
+#define ENABLE_KEYBOARD_AT_LOG 1
+
 #define FIFO_SIZE      16
 
 #define BAT_COUNT      1000

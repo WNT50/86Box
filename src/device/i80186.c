@@ -79,6 +79,26 @@
 /* Interrupt controller request/status registers (270788-001 section 9.6.2). */
 #define I80186_ICU_REQ          0x2Eu /* Interrupt Request Register */
 #define I80186_ICU_STATUS       0x30u /* Interrupt Controller Status Register */
+#define I80186_ICU_EOI          0x22u /* End of Interrupt Register (Fig. 87) */
+#define I80186_ICU_POLL         0x24u
+#define I80186_ICU_POLLSTATUS   0x26u
+#define I80186_ICU_MASK         0x28u /* Mask Register (Fig. 83) */
+#define I80186_ICU_PRIMASK      0x2Au /* Priority Mask Register (Fig. 84) */
+#define I80186_ICU_INSERVICE    0x2Cu /* In-Service Register (Fig. 85) */
+
+/* [EXPERIMENT icu3477] On-chip interrupt-controller latches for the 3477-S disk
+   completion; bit 0 is that source.  Declared up here because the register
+   handlers below use them. */
+/* [EXPERIMENT evseq] One monotonically increasing sequence shared by every
+   instrumented event, so the FDC's interrupt raises, the guest's MSR reads and
+   its EOIs can be placed on a single timeline (see the wait loop at
+   0650:863F which times out unless the ISR sets [53B8] bit 7 in time). */
+uint64_t ev_seq = 0;
+
+static uint16_t icu3477_req = 0;     /* request latch */
+static uint16_t icu3477_isr = 0;     /* in-service latch */
+uint32_t        icu3477_delivered = 0; /* completions delivered */
+uint32_t        icu3477_waited = 0;    /* completions that had to wait for EOI */
 
 typedef struct i80186_t {
     uint16_t base;        /* current PCB I/O base */
@@ -108,13 +128,63 @@ typedef struct i80186_t {
 
 static i80186_t *i80186_dma_dev = NULL;
 
+/* [EXPERIMENT icutrace] Which PCs touch which interrupt-controller register with
+   which value, de-duplicated so polling loops do not flood the log.  Needed to
+   settle whether the ISR's `out 0x722,0x000E` is a specific EOI for a channel
+   whose control register really holds 0x0E, or something else entirely. */
+static void
+i80186_icu_trace(uint16_t off, uint16_t val, int is_write)
+{
+    /* NOTE: `pc` and `cs` are macros in cpu.h, so the members must not use
+       those names. */
+    static struct { uint16_t tpc, tcs, toff, tval; uint8_t twr, tused; } seen[512];
+    static unsigned n_seen = 0, n_seen_max = 0;
+
+    if (!getenv("ICUTR"))
+        return;
+    if ((off < 0x20u) || (off > 0x3Fu))
+        return;
+
+    n_seen++;
+    for (unsigned i = 0; i < n_seen_max; i++) {
+        if ((seen[i].tpc == cpu_state.pc) && (seen[i].tcs == CS) &&
+            (seen[i].toff == off) && (seen[i].tval == val) &&
+            (seen[i].twr == (uint8_t) !!is_write))
+            return;
+    }
+    if (n_seen_max < (sizeof(seen) / sizeof(seen[0]))) {
+        seen[n_seen_max].tpc  = cpu_state.pc;
+        seen[n_seen_max].tcs  = CS;
+        seen[n_seen_max].toff = off;
+        seen[n_seen_max].tval = val;
+        seen[n_seen_max].twr  = (uint8_t) !!is_write;
+        seen[n_seen_max].tused = 1;
+        n_seen_max++;
+        pclog("3477: ★ICU %s off=%02X val=%04X (pc=%04X:%04X) [累计 %u]\n",
+              is_write ? "写" : "读", off, val, CS, cpu_state.pc, n_seen);
+    }
+}
+
 int
 i80186_dma0_ready(void)
 {
     i80186_t *dev = i80186_dma_dev;
+    int       rdy = (dev != NULL) && (dev->regs[I80186_DMA0_COUNT] != 0);
 
-    /* Armed while the programmed transfer count has not run out. */
-    return (dev != NULL) && (dev->regs[I80186_DMA0_COUNT] != 0);
+    /* [EXPERIMENT DMA0RDY] Log readiness transitions only: does the count stay 0
+       after the guest reprograms it (which would starve the FDC delivery path)? */
+    if (getenv("DMA0RDY")) {
+        static int last = -1;
+
+        if (rdy != last) {
+            pclog("3477: ☆dma0ready %d->%d count=%u pc=%04X:%04X\n", last, rdy,
+                  (dev != NULL) ? (unsigned) dev->regs[I80186_DMA0_COUNT] : 0,
+                  (unsigned) (cs >> 4), cpu_state.pc);
+            last = rdy;
+        }
+    }
+
+    return rdy;
 }
 
 static uint32_t
@@ -264,6 +334,8 @@ i80186_read_word(i80186_t *dev, uint16_t off)
        section 6.1: the count resets to zero when it equals the maximum). */
     i80186_tmr_update(dev);
 
+    i80186_icu_trace(off, dev->regs[off / 2], 0);
+
     for (int i = 0; i < 3; i++) {
         if (off == I80186_TMR_COUNT(i)) {
             if (dev->regs[I80186_TMR_CON(i) / 2] & 0x8000u)
@@ -285,6 +357,21 @@ i80186_read_word(i80186_t *dev, uint16_t off)
 static void
 i80186_write_word(i80186_t *dev, uint16_t off, uint16_t val)
 {
+    /* [EXPERIMENT icuack] Progress meter: the guest's disk ISR acknowledges a
+       completed result phase by writing the vector number to PCB+0x22
+       (`0650:8779 mov ax,0xE / out dx,ax` with dx=0x722).  Counting those tells
+       us whether the boot keeps completing disk operations or is stuck
+       retrying one. */
+    if (off == 0x22 && val == 0x000E) {
+        static uint32_t n = 0;
+
+        n++;
+        if (getenv("EVSEQ"))
+            pclog("3477: EV%llu eoi000E n=%u (pc=%04X:%04X)\n", ++ev_seq, n, CS, cpu_state.pc);
+    }
+
+    i80186_icu_trace(off, val, 1);
+
     pclog("3477: i80186 wr %04X <- %04X (pc=%04X:%04X)\n", off, val, CS, cpu_state.pc);
 
     if (off == I80186_RELOC_OFF) {
@@ -328,6 +415,17 @@ i80186_write_word(i80186_t *dev, uint16_t off, uint16_t val)
        does `in 0x2E / and 0xFFFE / out 0x2E` before its timer test. */
     if ((off == I80186_ICU_REQ) && !(val & 0x0001u))
         dev->tmr_req = 0;
+
+    /* [EXPERIMENT icu3477] End of Interrupt Register (PCB+0x22, Figure 87):
+       a *specific* EOI names the interrupt type to take out of service.  The
+       guest's disk ISR acknowledges with `out 0x722,0x000E` (measured at
+       pc=0650:8780), so type 0x0E is the disk completion on this machine. */
+    if (off == I80186_ICU_EOI) {
+        if ((val & 0x00FFu) == 0x000Eu) {
+            icu3477_isr &= ~0x0001u;
+            icu3477_req &= ~0x0001u;
+        }
+    }
 }
 
 static uint16_t
@@ -344,6 +442,57 @@ i80186_outw(uint16_t port, uint16_t val, void *priv)
 {
     i80186_write_word((i80186_t *) priv, (uint16_t) ((port - ((i80186_t *) priv)->base) & 0xFEu), val);
 }
+
+/* [EXPERIMENT icu3477] Native delivery of the 3477-S disk completion through the
+   80186's on-chip interrupt controller (270788-001 section 9.5/9.6, Figure 80):
+
+     - PCB+0x2E (Interrupt Request Register): internal-source requests are
+       *latched* (section 9.5.3.1) and cleared by the processor;
+     - PCB+0x22 (End of Interrupt Register): a specific EOI takes the named
+       interrupt type out of service;
+     - PCB+0x28 (Mask Register, guest programs 0x0098) / 0x2A (Priority Mask, 7).
+
+   Evidence that the vector is 0x0E: IBMBIO's disk ISR lives at IVT entry 0x0E
+   and acknowledges with `out 0x722,0x000E` (measured, pc=0650:8780).  The
+   on-chip ICU is what the model has been missing; the three environment-gated
+   switches (FDC3477IRQ6 / FDC5550IRQ / PIC3477AEOI) only impersonate it. */
+void
+i80186_icu3477_complete(void)
+{
+    if (!getenv("ICU3477"))
+        return;
+    if (i80186_dma_dev == NULL)
+        return;
+
+    icu3477_req |= 0x0001u;
+
+    /* A second completion while the first is still in service waits, as on the
+       real chip; the guest's specific EOI releases it. */
+    if (icu3477_isr & 0x0001u) {
+        icu3477_waited++;
+        return;
+    }
+
+    /* Mask Register bit 0 covers this source and the guest programs 0x0098
+       (bit 0 clear = unmasked); honour it in case a guest masks it later. */
+    if (i80186_dma_dev->regs[I80186_ICU_MASK / 2] & 0x0001u)
+        return;
+
+    icu3477_isr |= 0x0001u;
+    icu3477_delivered++;
+
+    /* NOTE: no vector is injected from here.  Measured + manual evidence says the
+       vector arrives through the *external* 8259 (guest initialised it with base
+       0x08, so IRQ6 -> vector 0x0E, and the guest's specific EOI names exactly
+       that type), with the on-chip ICU cascaded behind it.  Delivery therefore
+       stays with picint() in fdc_int(); this function only maintains the ICU's
+       request / in-service state, which the guest's `out 0x722,0x000E` clears.
+       An earlier attempt that called x86_int(0x0E) directly took the machine
+       into the weeds (segment CCCC:) -- do not retry that. */
+}
+
+/* Progress meter: how often a completion had to wait for the guest's EOI. */
+
 
 static void
 i80186_reset(void *priv)

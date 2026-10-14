@@ -17,6 +17,7 @@
 /* [AB] temporary: log the KBC exchange so the 3477-S ROS's
    self-test handshake (0xAA -> 0x55) can be traced. */
 #define ENABLE_KBC_AT_LOG 1
+#define ENABLE_KBC_AT_DEV_LOG 1   /* [PROBE-TEMP] 设备侧日志 */
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -436,6 +437,7 @@ kbc_send_to_ob(atkbc_t *dev, uint8_t val, uint8_t channel, uint8_t stat_hi)
 static void
 kbc_delay_to_ob(atkbc_t *dev, uint8_t val, uint8_t channel, uint8_t stat_hi)
 {
+    if (getenv("KBTRC")) pclog("[KBTRC] delay_to_ob val=%02X ch=%d state=%d status=%02X is_asic=%d pending=%d\n", val, channel, dev->state, dev->status, dev->is_asic, dev->pending);
     dev->val = val;
     dev->channel = channel;
     dev->stat_hi = stat_hi;
@@ -576,6 +578,7 @@ at_main_ibf:
         case STATE_KBC_DELAY_OUT:
             /* Keyboard controller command want to output a single byte. */
             kbc_at_log("ATkbc: %02X coming from channel %i with high status %02X\n", dev->val, dev->channel, dev->stat_hi);
+            if (getenv("KBTRC")) pclog("[KBTRC] SERVICED(goto) val=%02X ch=%d stat_hi=%02X\n", dev->val, dev->channel, dev->stat_hi);
             kbc_send_to_ob(dev, dev->val, dev->channel, dev->stat_hi);
             dev->state = STATE_MAIN_IBF;
             dev->pending = 0;
@@ -721,6 +724,7 @@ kbc_at_poll_ps2(atkbc_t *dev)
             break;
         case STATE_KBC_DELAY_OUT:
             /* Keyboard controller command want to output a single byte. */
+            if (getenv("KBTRC")) pclog("[KBTRC] SERVICED(no-goto) val=%02X ch=%d stat_hi=%02X status_before=%02X\n", dev->val, dev->channel, dev->stat_hi, dev->status);
             kbc_at_log("ATkbc: %02X coming from channel %i with high status %02X\n", dev->val, dev->channel, dev->stat_hi);
             kbc_send_to_ob(dev, dev->val, dev->channel, dev->stat_hi);
             dev->state = STATE_MAIN_IBF;

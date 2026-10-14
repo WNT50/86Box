@@ -347,6 +347,13 @@ fdd_seek_complete_callback(void *priv)
 
     drv->seek_in_progress = 0;
 
+    if (getenv("FDDDEF")) {
+        static unsigned dd_seek = 0;
+        dd_seek++;
+        pclog("3477: ★seek 完成回调 #%u drive=%d trk=%d pending=%d\n",
+              dd_seek, drv->id, drv->track, drv->pending.pending);
+    }
+
     fdd_log("fdd_seek_complete_callback(drive=%d) - TIMER FIRED! seek_in_progress=1\n",
             drv->id);
     fdd_log("Notifying FDC of seek completion\n");
@@ -357,6 +364,12 @@ fdd_seek_complete_callback(void *priv)
         fdd_pending_op_t *po = &drv->pending;
         fdd_log("Starting deferred op %d after seek on drive %d (trk=%d, side=%d, sec=%d)\n",
                 po->op, drv->id, po->track, po->side, po->sector);
+        if (getenv("FDDDEF")) {
+            static unsigned dd_resume = 0;
+            dd_resume++;
+            pclog("3477: ★延迟项重跑 #%u op=%d C=%d H=%d R=%d\n",
+                  dd_resume, po->op, po->track, po->side, po->sector);
+        }
 
         switch (po->op) {
             case FDD_OP_READ:
@@ -911,6 +924,16 @@ fdd_hole(void *priv)
 int
 fdd_index(void *priv)
 {
+    /* [EXPERIMENT POSPROBE] Do index pulses still arrive at the stall?
+       Each revolution of a 300 RPM drive spans 200 ms = 3200 us-units. */
+    if (getenv("POSPROBE")) {
+        static unsigned long ix = 0;
+
+        ix++;
+        if ((ix <= 40) || ((ix % 8) == 0))
+            pclog("3477: ☆index #%lu\n", ix);
+    }
+
     fdd_drive_t *drv   = (fdd_drive_t *) priv;
 
     if ((drv == NULL) || !drv->motoron ||
@@ -938,6 +961,23 @@ fdd_byteperiod(void *priv)
     if ((drv != NULL) && (drv->byteperiod != NULL))
         ret = drv->byteperiod(drv);
 
+    /* [EXPERIMENT 3477fast] The 3477-S guest arms the on-chip DMA and then
+       waits for the whole sector with a *bounded* poll loop.  The model
+       paces the bytes at the drive's rotation rate (32 us/byte at 250
+       kbit/s), so a 512-byte sector takes 16.4 ms of simulated time; if the
+       guest's window is tighter than the delivery, the read "starts" and
+       never completes.  FDC3477FAST=<N> divides the byte period by N. */
+    {
+        static int fast = -1;
+
+        if (fast < 0) {
+            const char *e = getenv("FDC3477FAST");
+            fast = e ? atoi(e) : 0;
+        }
+        if (fast > 1)
+            ret /= (uint64_t) fast;
+    }
+
     return ret;
 }
 
@@ -948,6 +988,13 @@ fdd_set_motor_enable(void *priv, int motor_enable)
 
     fdd_log("fdd_set_motor_enable(%d, %d)\n", drv->id, motor_enable);
     fdd_audio_set_motor_enable(drv, motor_enable);
+
+    if (getenv("FDDPOLL") && (motor_enable != drv->motoron)) {
+        static unsigned me_n = 0;
+        me_n++;
+        pclog("3477: ★★电机 %s #%u drive=%d trk=%d seek_in_progress=%d\n",
+              motor_enable ? "开" : "关", me_n, drv->id, drv->track, drv->seek_in_progress);
+    }
 
     if (motor_enable && !drv->motoron)
         timer_set_delay_u64(&drv->poll_time, fdd_byteperiod(drv));
@@ -960,6 +1007,7 @@ fdd_set_motor_enable(void *priv, int motor_enable)
 static void
 fdd_poll(void *priv)
 {
+    if (getenv("PLLARM")) { static unsigned long pl = 0; pl++; if ((pl <= 6) || ((pl % 128) == 0)) pclog("3477: \u2606poll #%lu\n", pl); }
     fdd_drive_t *drv   = (fdd_drive_t *) priv;
     fdc_t       *fdc   = (fdc_t *) drv->fdc;
 
@@ -970,6 +1018,14 @@ fdd_poll(void *priv)
 
     if (drv->poll)
         drv->poll((void *) drv);
+
+    if (getenv("FDDPOLL")) {
+        static unsigned pl_n = 0;
+        pl_n++;
+        if ((pl_n % 20000) == 0)
+            pclog("3477: ★轮询心跳 %u drive=%d motoron=%d trk=%d\n",
+                  pl_n, drv->id, drv->motoron, drv->track);
+    }
 
     if (fdd_notfound) {
         fdd_notfound--;
@@ -1046,6 +1102,12 @@ fdd_readsector(void *priv, const int sector, const int track, const int side,
     if (fdd_defer_op(drv)) {
         fdd_log("Seek in progress on drive %d, deferring READ (trk=%d->%d, side=%d, sec=%d)\n",
                 drv->id, drv->track, track, side, sector);
+        if (getenv("FDDDEF")) {
+            static unsigned dd_defer = 0;
+            dd_defer++;
+            pclog("3477: ★读被延迟 #%u C=%d H=%d R=%d (seek_in_progress=%d)\n",
+                  dd_defer, track, side, sector, drv->seek_in_progress);
+        }
         drv->pending = (fdd_pending_op_t) {
             .pending     = 1,
             .op          = FDD_OP_READ,
@@ -1058,10 +1120,25 @@ fdd_readsector(void *priv, const int sector, const int track, const int side,
         return;
     }
 
-    if (drv->readsector != NULL)
+    if (drv->readsector != NULL) {
+        if (getenv("FDDNF")) {
+            static unsigned nf_ok = 0;
+            nf_ok++;
+            pclog("3477: ★read 走 readsector 回调 #%u C=%d H=%d R=%d\n",
+                  nf_ok, track, side, sector);
+        }
         drv->readsector(drv, sector, track, side, density, sector_size);
-    else
+    } else {
         fdd_notfound = 1000;
+        if (getenv("FDDNF")) {
+            static unsigned nf_bad = 0;
+            nf_bad++;
+            pclog("3477: ★read 走 NOTFOUND 分支 #%u C=%d H=%d R=%d | readsector=%p poll=%p seek=%p hole=%p byteperiod=%p drv_trk=%d\n",
+                  nf_bad, track, side, sector,
+                  (void *) drv->readsector, (void *) drv->poll, (void *) drv->seek,
+                  (void *) drv->hole, (void *) drv->byteperiod, drv->track);
+        }
+    }
 }
 
 void

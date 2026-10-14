@@ -3612,6 +3612,18 @@ i3477_sample(void *priv)
 
     /* Heartbeat every 2 s, unconditionally: shows where the ROM rests once the
        early sample budget is exhausted and whether it is still moving. */
+    /* [EXPERIMENT stallpc] Once the disk phase is over the guest rests in a
+       silent poll loop that emits nothing; trace the resting PC at 20 ms
+       granularity after 60 s of emulated time (the sample timer runs at 20 us,
+       so 100000 ticks = 2 s and 3000000 ticks = 60 s). */
+    {
+        static uint32_t tot = 0;
+
+        if ((++tot > 3000000) && ((tot % 1000) == 0))
+            pclog("3477: stall pc=%04X:%04X t=%u\n", (unsigned) (cs >> 4),
+                  cpu_state.pc, tot);
+    }
+
     if (++hb >= 100000) {
         hb = 0;
         pclog("3477: HB PC %04X:%04X\n", CS, cpu_state.pc);
