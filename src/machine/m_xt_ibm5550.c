@@ -1472,11 +1472,34 @@ epoch_vram_write(uint32_t addr, uint8_t val, void *priv)
     if (getenv("EPOCH3477_PLANE")) {
         static long pn = 0;
         static uint32_t pmin = 0xffffffffu, pmax = 0u;
+        static unsigned hist[256], blk[64];
         pn++;
+        blk[(addr >> 8) & 63]++;
         if (addr < pmin) pmin = addr;
         if (addr > pmax) pmax = addr;
-        if ((pn <= 8) || ((pn % 8192) == 0))
-            pclog("3477: PLANEW n=%ld addr=%06X=%02X [%06X..%06X]\n", pn, addr, val, pmin, pmax);
+        hist[val]++;
+        if ((pn <= 8) || ((pn % 8192) == 0)) {
+            int distinct = 0, top_v[4] = {0,0,0,0}, top_n[4] = {0,0,0,0};
+            for (int k = 0; k < 256; k++) {
+                if (!hist[k]) continue;
+                distinct++;
+                for (int t = 0; t < 4; t++)
+                    if (hist[k] > top_n[t]) {
+                        for (int u = 3; u > t; u--) { top_n[u] = top_n[u-1]; top_v[u] = top_v[u-1]; }
+                        top_n[t] = hist[k]; top_v[t] = k;
+                        break;
+                    }
+            }
+            char bl[200]; int blp = 0;
+            bl[0] = 0;
+            for (int b = 0; b < 64; b++)
+                if (blk[b])
+                    blp += sprintf(&bl[blp], "%02X:%u ", b * 256, blk[b]);
+            pclog("3477: PLANEBLK %s\n", bl);
+            pclog("3477: PLANEW n=%ld addr=%06X=%02X [%06X..%06X] distinct=%d top=%02X:%d %02X:%d %02X:%d %02X:%d\n",
+                  pn, addr, val, pmin, pmax, distinct,
+                  top_v[0], top_n[0], top_v[1], top_n[1], top_v[2], top_n[2], top_v[3], top_n[3]);
+        }
     }
     epoch_t *epoch = (epoch_t *) priv;
     // epoch_log("epoch_vw: %x %x\n", addr, val);
