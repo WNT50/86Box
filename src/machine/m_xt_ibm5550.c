@@ -3964,7 +3964,11 @@ machine_xt_ibm3477_init(const machine_t *model)
        columns' first 13 dots, then the right 16 columns' first 13 dots), so the
        machine cuts the 32-column bitmap instead of keeping a second, narrow
        font.  [Cloud server only, DO NOT USE!!!] */
-    if ((epoch->fontcard_rom != NULL) && (epoch->fontcard_pages > 2)) {
+    /* [停用] 机侧不再从卡 ROM 提取字模并注入发生器 VRAM —— 那是权宜之计（crutch）。
+       按客人的实现，字模应由 IBMBIO 自己投递；在验证那条路之前，发生器保持为空，
+       这样"屏上有没有字"才是有效证据。原注入逻辑保留在 git 历史里
+       （a868a2cb8 / 8acca6879 / 6c6d25ef3 / e17d9b4c1），需要时再取回。 */
+    if (0 && (epoch->fontcard_rom != NULL) && (epoch->fontcard_pages > 2)) {
         /* Half-width (ANK) generator: GB2312 row 3.  The position of a code in
            the row is n = code - 0x20 and the row starts at g192 (g192 is the
            full-width '!', verified against the extracted font: g192 = '!',
