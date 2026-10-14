@@ -498,12 +498,14 @@ pic_action(pic_t *dev, uint8_t irq, uint8_t eoi, uint8_t rotate)
 }
 
 /* Automatic non-specific EOI. */
+extern int epoch_is_3477; /* [AB] 3477-S machine state */
+
 static __inline void
 pic_auto_non_specific_eoi(pic_t *dev)
 {
     uint8_t irq;
 
-    if (dev->icw4 & 2) {
+    if ((dev->icw4 & 2) || epoch_is_3477) {
         irq = pic_non_specific_find(dev);
 
         pic_action(dev, irq, 1, dev->auto_eoi_rotate);

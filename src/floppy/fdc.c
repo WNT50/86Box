@@ -367,8 +367,13 @@ fdc_int(fdc_t *fdc, int set_fintr)
 
     if (fdc->flags & FDC_FLAG_PS2_MCA)
         ienable = 1;
-    else if (!(fdc->flags & (FDC_FLAG_PCJR | FDC_FLAG_PCJX)))
+    else if (!(fdc->flags & (FDC_FLAG_PCJR | FDC_FLAG_PCJX))) {
         ienable = !!(fdc->dor & 8);
+        /* [3477-S] The guest's FDC ISR is wired unconditionally: enable the IRQ even while
+           the card's DOR has interrupts masked, otherwise the guest waits forever. */
+        if (epoch_is_3477)
+            ienable = 1;
+    }
 
     if (ienable) {
         if (fdc->irq != 0xff)
@@ -3003,7 +3008,9 @@ fdc_init(const device_t *info)
     fdc->flags = (int) info->local;
 
     if (fdc->flags & FDC_FLAG_5550)
-        fdc->irq = 4;
+        /* [3477-S] The PS/55 5550's FDC sits on IRQ 4, but the 3477-S guest's ISR is wired to
+           IRQ 6; with IRQ 4 the interrupt never arrives and the boot loader gives up (CCCC runaway). */
+        fdc->irq = epoch_is_3477 ? 6 : 4;
     else
         /* Always use IRQ 6. */
         fdc->irq = 6;
