@@ -1593,7 +1593,18 @@ epoch_cram_write(uint32_t addr, uint8_t val, void *priv)
         /* Fire at three later points (not the very first write, which only
            touches the empty code-0 slot) and sample the glyph slot of 'A'
            (0x41 * 0x80) plus the off-screen CRAM tail the guest writes at. */
-        if ((cramn == 200) || (cramn == 1200) || (cramn == 3000)) {
+        {
+            /* Parity census: even offsets = character codes, odd = attributes
+               (renderer: chr = cram[memaddr], attr = cram[memaddr + 1]). */
+            static long     neven = 0, nodd = 0;
+            static uint32_t mine = 0xffffffffu, maxe = 0u, mino = 0xffffffffu, maxo = 0u;
+            if (addr & 1) { nodd++; if (addr < mino) mino = addr; if (addr > maxo) maxo = addr; }
+            else          { neven++; if (addr < mine) mine = addr; if (addr > maxe) maxe = addr; }
+            if (((neven + nodd) % 5000) == 0)
+                pclog("3477: CRAMW even=%ld [%05X..%05X] odd=%ld [%05X..%05X] last=%05X:%02X\n",
+                      neven, mine, maxe, nodd, mino, maxo, addr, val);
+        }
+        if (0) {
             int i, j;
             pclog("3477: DUMP at nonzero write #%d (addr %05X=%02X)\n", cramn, addr, val);
             for (j = 0; j < 128; j += 16) {
