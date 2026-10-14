@@ -39,6 +39,9 @@
 #include <86box/plat_fallthrough.h>
 #include <86box/plat_unused.h>
 #include <86box/fifo.h>
+#include <86box/i80186.h>
+
+unsigned fdc_ns_bytes = 0; /* [EXPERIMENT fdcbyte] 当前扇区已搬字节数（文件级，先声明） */
 
 const uint8_t command_has_drivesel[32] = {
     0, 0,
@@ -357,6 +360,57 @@ fdc_track0(fdc_t *fdc, int drive)
            fdd_track0(fdc->fdd[drive]);
 }
 
+extern int epoch_is_3477; /* [AB] 3477-S machine state */
+
+/* [EXPERIMENT icu3477] Native 80186 on-chip interrupt-controller delivery of the
+   disk completion (see i80186.c).  Enabled with the ICU3477 environment
+   variable; without it the three switch-based impersonations below are used. */
+extern void i80186_icu3477_complete(void);
+extern uint64_t ev_seq; /* [EXPERIMENT evseq] shared event timeline */
+
+/* [EXPERIMENT TCPROBE] Trace every fdc->tc transition and the read/write finish
+   marker, so the question "did the last tc=1 get seen by the callback's read
+   branch before the command was replaced?" has a one-line answer. */
+/* [EXPERIMENT SEEKCHK] On a seek completion, is the drive really at the target track? */
+static void
+sk_ev(fdc_t *fdc, int kind)
+{
+    fdd_drive_t *sdrv;
+
+    if (!getenv("SEEKCHK"))
+        return;
+
+    sdrv = (fdd_drive_t *) fdc->fdd[real_drive(fdc, fdc->drive)];
+    pclog("3477: ☆seekdone kind=%d cmd=%02X p1=%u p2=%u p3=%u p4=%u intr=%d stat=%02X drv_trk=%d motoron=%d\n",
+          kind, fdc->processed_cmd, fdc->params[1], fdc->params[2], fdc->params[3],
+          fdc->params[4], fdc->interrupt, fdc->stat,
+          sdrv ? (int) sdrv->track : -1, sdrv ? (int) sdrv->motoron : -1);
+}
+
+/* [EXPERIMENT TMRPROBE] Track every timer_disable / re-arm so the last one before
+   the stall is identifiable (a disable with no following arm = the phase dies). */
+static void
+tmr_ev(fdc_t *fdc, int kind)
+{
+    if (!getenv("TMRPROBE"))
+        return;
+
+    pclog("3477: ☆tmr %s kind=%d pcmd=%02X C=%u H=%u R=%u intr=%d sect=%d tc=%d dready=%d pc=%04X:%04X\n",
+          (kind == 0) ? "DISABLE" : "arm", kind, fdc->processed_cmd, fdc->params[1],
+          fdc->params[2], fdc->params[3], fdc->interrupt, fdc->sector, fdc->tc,
+          fdc->data_ready, (unsigned) (cs >> 4), cpu_state.pc);
+}
+
+static void
+tcp_ev(fdc_t *fdc, int kind)
+{
+    if (!getenv("TCPROBE"))
+        return;
+    pclog("3477: ☆tc%s cmd=%02X intr=%d p2go=%d dready=%d\n",
+          (kind == 1) ? "SET" : ((kind == 0) ? "CLR" : "FIN"),
+          fdc->processed_cmd, fdc->interrupt, fdc->paramstogo, fdc->data_ready);
+}
+
 static void
 fdc_int(fdc_t *fdc, int set_fintr)
 {
@@ -364,10 +418,22 @@ fdc_int(fdc_t *fdc, int set_fintr)
 
     if (fdc->flags & FDC_FLAG_PS2_MCA)
         ienable = 1;
-    else if (!(fdc->flags & (FDC_FLAG_PCJR | FDC_FLAG_PCJX)))
+    else if (!(fdc->flags & (FDC_FLAG_PCJR | FDC_FLAG_PCJX))) {
         ienable = !!(fdc->dor & 8);
+        /* [3477-S] Force the interrupt enable on the 3477 machine too (see FDC3477IRQ6). */
+        if (epoch_is_3477 || getenv("FDC5550IRQ"))
+            ienable = 1;
+    }
 
     if (ienable) {
+        if (getenv("EVSEQ"))
+            pclog("3477: EV%llu fdcint irq=%d dor=%02X fintr=%d\n", ++ev_seq, fdc->irq, fdc->dor, fdc->fintr);
+
+        if (getenv("ICU3477") && epoch_is_3477)
+            i80186_icu3477_complete(); /* ICU request/in-service bookkeeping */
+
+        /* Delivery stays with the 8259: the guest's specific EOI of type 0x0E
+           proves its vectors come from there (base 0x08 + IRQ6). */
         if (fdc->irq != 0xff)
             picint(1 << fdc->irq);
 
@@ -753,7 +819,7 @@ fdc_seek_complete_interrupt(fdc_t *fdc, int drive)
 
     if ((FDC_FLAG_PCJR | FDC_FLAG_PCJX) & fdc->flags) {
         fdc->fintr     = 1;
-        fdc->interrupt = -4;
+        fdc->interrupt = -4; sk_ev(fdc, 4);
         fdc_callback(fdc);
         return;
     }
@@ -761,7 +827,7 @@ fdc_seek_complete_interrupt(fdc_t *fdc, int drive)
     fdc_log("FDD %c: Seek complete interrupt\n", 0x41 + drive);
 
     fdc->fintr = 1;
-    fdc->interrupt = -3;
+    fdc->interrupt = -3; sk_ev(fdc, 3);
     /*
        ST0 reports the unit the command named, not the drive the pulses
        physically went to. The two only differ when the DOR selects one
@@ -792,7 +858,7 @@ fdc_bad_command(fdc_t *fdc)
 {
     fdc->stat      = 0x10;
     fdc->interrupt = 0xfc;
-    timer_set_delay_u64(&fdc->timer, 100 * TIMER_USEC);
+    { tmr_ev(fdc, 100); timer_set_delay_u64(&fdc->timer, 100 * TIMER_USEC); }
 }
 
 static void
@@ -879,10 +945,10 @@ fdc_soft_reset(fdc_t *fdc)
     fdd_boot_status_reset();
 
     if (fdc->power_down) {
-        timer_set_delay_u64(&fdc->timer, 1000 * TIMER_USEC);
+        { tmr_ev(fdc, 1000); timer_set_delay_u64(&fdc->timer, 1000 * TIMER_USEC); }
         fdc->interrupt = -5;
     } else {
-        timer_set_delay_u64(&fdc->timer, 8 * TIMER_USEC);
+        { tmr_ev(fdc, 8); timer_set_delay_u64(&fdc->timer, 8 * TIMER_USEC); }
         fdc->interrupt = -1;
 
         fdc->perp &= 0xfc;
@@ -916,7 +982,7 @@ fdc_pcjx_dor(fdc_t *fdc, uint8_t val)
     }
 
     if (!(val & 0x80)) {
-        timer_disable(&fdc->timer);
+        { tmr_ev(fdc, 0); timer_disable(&fdc->timer); }
         timer_disable(&fdc->watchdog_timer);
         fdc->watchdog_count = 0;
         if (fdc->irq != 0xff)
@@ -948,6 +1014,10 @@ void
 fdc_write(uint16_t addr, uint8_t val, void *priv)
 {
     fdc_t *fdc = (fdc_t *) priv;
+
+    if (fdc->flags & FDC_FLAG_5550)
+        if (getenv("FDCTRC"))
+            pclog("3477: fdc wr %03X <- %02X\n", addr, val);
 
     int drive;
     int drive_num;
@@ -1003,6 +1073,8 @@ fdc_write(uint16_t addr, uint8_t val, void *priv)
                     return;
                 }
                 if (fdc->flags & FDC_FLAG_5550) {   /* Reset */
+                    if (getenv("FDCTRC"))
+                        pclog("3477: fdc wr 3F2 <- %02X (reset; pc=%04X:%04X)\n", val, CS, cpu_state.pc);
                     fdd_stop(fdc->fdd[fdc->drive]);
                     for (int i = 0; i < 4; i++) {
                         /* Need to restart fdd timer */
@@ -1022,7 +1094,7 @@ fdc_write(uint16_t addr, uint8_t val, void *priv)
                         picintc(1 << fdc->irq);
                     }
                     if ((val & 0x80) && !(fdc->dor & 0x80)) {
-                        timer_set_delay_u64(&fdc->timer, 8 * TIMER_USEC);
+                        { tmr_ev(fdc, 8); timer_set_delay_u64(&fdc->timer, 8 * TIMER_USEC); }
                         fdc->interrupt = -1;
                         ui_sb_update_icon(SB_FLOPPY | fdc->bus, 0);
                         ui_sb_update_icon_write(SB_FLOPPY | fdc->bus, 0);
@@ -1105,7 +1177,7 @@ fdc_write(uint16_t addr, uint8_t val, void *priv)
                     picintc(1 << fdc->irq);
                 if (!(fdc->flags & FDC_FLAG_NO_DSR_RESET)) {
                     if (!(val & 0x80)) {
-                        timer_set_delay_u64(&fdc->timer, 8 * TIMER_USEC);
+                        { tmr_ev(fdc, 8); timer_set_delay_u64(&fdc->timer, 8 * TIMER_USEC); }
                         fdc->interrupt = -6;
                     }
                     if (fdc->power_down || ((val & 0x80) && !(fdc->dsr & 0x80)))
@@ -1116,6 +1188,13 @@ fdc_write(uint16_t addr, uint8_t val, void *priv)
             case 5: /*Command register*/
                 if (fdc->flags & FDC_FLAG_5550)
                     picintc(1 << fdc->irq);
+                /* [3477-S] While the result phase is still pending, a write to the data
+                   register must be dropped: it would otherwise take the `pnum != ptot`
+                   path below, which assigns stat = 0x90 (CB=1, DIO=0) and destroys the
+                   result phase the guest is still reading.  3477-S's BIOS then polls
+                   MSR for DIO (0xD0) forever and ends up in the CCCC runaway loop. */
+                if (epoch_is_3477 && fdc->paramstogo)
+                    return;
                 if (fdc->fifointest) {
                     /* Write FIFO buffer in the test mode (PS/55) */
                     fdc_log("FIFO buffer position = %X\n", ((fifo_t *) fdc->fifo_p)->end);
@@ -1145,7 +1224,7 @@ fdc_write(uint16_t addr, uint8_t val, void *priv)
 
                     fdc->stat &= 0xf;
 
-                    fdc->tc         = 0;
+                    fdc->tc = 0; tcp_ev(fdc, 0);
                     fdc->data_ready = 0;
 
                     fdc->command = val;
@@ -1351,11 +1430,18 @@ fdc_write(uint16_t addr, uint8_t val, void *priv)
                         fdc_log("Got all params %02X\n", fdc->command);
                         for (int i = 0; i < fdc->ptot; i++)
                             fdc_log(" [%d] %02x\n", i, fdc->params[i]);
+                        if (getenv("FDCCMD"))
+                            pclog("3477: FDC cmd %02X C=%u H=%u R=%u N=%u EOT=%u | stat=%02X dready=%d p2go=%d sec=%d intr=%02X rst=%02X dma=%d | fintr=%d pnum=%d\n",
+                                  fdc->command, fdc->params[1], fdc->params[2],
+                                  fdc->params[3], fdc->params[4], fdc->params[5],
+                                  fdc->stat, fdc->data_ready, fdc->paramstogo,
+                                  fdc->sector, fdc->interrupt, fdc->reset_stat, fdc->dma,
+                                  fdc->fintr, fdc->pnum);
                         fifo_reset(fdc->fifo_p);
                         fdc->interrupt  = fdc->processed_cmd;
                         fdc->reset_stat = 0;
                         /* Disable timer if enabled. */
-                        timer_disable(&fdc->timer);
+                        { tmr_ev(fdc, 0); timer_disable(&fdc->timer); }
                         /* Start timer if needed at this point. */
                         switch (fdc->interrupt & 0x1f) {
                             case 0x02: /* Read a track */
@@ -1375,22 +1461,22 @@ fdc_write(uint16_t addr, uint8_t val, void *priv)
                             case 0x07: /* Recalibrate */
                             case 0x0f: /* Seek */
                                 if (fdc->flags & (FDC_FLAG_PCJR | FDC_FLAG_PCJX))
-                                    timer_set_delay_u64(&fdc->timer, 1000 * TIMER_USEC);
+                                    { tmr_ev(fdc, 1000); timer_set_delay_u64(&fdc->timer, 1000 * TIMER_USEC); }
                                 else
-                                    timer_set_delay_u64(&fdc->timer, 256 * TIMER_USEC);
+                                    { tmr_ev(fdc, 256); timer_set_delay_u64(&fdc->timer, 256 * TIMER_USEC); }
                                 break;                                
                             default:
-                                timer_set_delay_u64(&fdc->timer, 256 * TIMER_USEC);
+                                { tmr_ev(fdc, 256); timer_set_delay_u64(&fdc->timer, 256 * TIMER_USEC); }
                                 break;
                         }
                         if ((fdc->flags & FDC_FLAG_PCJX) &&
                             command_has_drivesel[fdc->processed_cmd] &&
                             (fdc->processed_cmd != 0x04) && !fdc_pcjx_drive_enabled(fdc)) {
-                            timer_disable(&fdc->timer);
+                            { tmr_ev(fdc, 0); timer_disable(&fdc->timer); }
                             if ((fdc->processed_cmd == 0x07) || (fdc->processed_cmd == 0x0f)) {
                                 fdc->st0 = 0x70 | (fdc->params[0] & 7);
                                 fdc->fintr = 1;
-                                fdc->interrupt = -4;
+                                fdc->interrupt = -4; sk_ev(fdc, 4);
                                 fdc_callback(fdc);
                             } else {
                                 fdc->rw_track = fdc->params[1];
@@ -1413,6 +1499,20 @@ fdc_write(uint16_t addr, uint8_t val, void *priv)
                                     fdc_noidam(fdc);
                                     return;
                                 }
+                                /* [EXPERIMENT RDARM2] The initial arm point(s) for
+                                   read/write commands: is a read even started for the
+                                   command that stalls? */
+                                if (getenv("RDARM2")) {
+                                    static unsigned long ra2 = 0;
+
+                                    ra2++;
+                                    if (1)   /* log every arm: settle whether the very last command is armed */
+                                        pclog("3477: ☆arm2 #%lu pcmd=%02X C=%u H=%u R=%u N=%u sect=%d intr=%d tc=%d dma=%d\n",
+                                              ra2, fdc->processed_cmd, fdc->params[1], fdc->params[2],
+                                              fdc->params[3], fdc->params[4], fdc->sector,
+                                              fdc->interrupt, fdc->tc, fdc->dma);
+                                }
+
                                 fdd_readsector(fdc->fdd[real_drive(fdc, fdc->drive)],
                                                SECTOR_FIRST, fdc->params[1],
                                                fdc->head, fdc->rate,
@@ -1484,6 +1584,36 @@ fdc_write(uint16_t addr, uint8_t val, void *priv)
                                     fdc_log("Verify-mode read!\n");
                                     fdc->deleted |= 2;
                                 }
+                                /* [EXPERIMENT fdcread] Live state at the moment
+                                   the read-data command actually starts: if the
+                                   drive motor is off the index pulses stop and
+                                   the sector is never found, so the model stays
+                                   silent while the guest times out. */
+                                if (getenv("FDCREAD")) {
+                                    fdd_drive_t *r = (fdd_drive_t *) fdc->fdd[real_drive(fdc, fdc->drive)];
+
+                                    pclog("3477: ★read 启动 C=%u H=%u R=%u N=%u | dor=%02X motoron=%d flags=%02X type=%d rate=%d dma=%d pc=%04X:%04X\n",
+                                          fdc->params[1], fdc->head, fdc->sector,
+                                          fdc->params[4], fdc->dor, r ? (int) r->motoron : -1,
+                                          r ? (int) fdd_get_flags(r) : -1,
+                                          r ? (int) fdd_get_type(r) : -1,
+                                          fdc->rate, fdc->dma,
+                                          (unsigned) (cs >> 4), cpu_state.pc);
+                                }
+                                /* [EXPERIMENT RDARM2] The initial arm point(s) for
+                                   read/write commands: is a read even started for the
+                                   command that stalls? */
+                                if (getenv("RDARM2")) {
+                                    static unsigned long ra2 = 0;
+
+                                    ra2++;
+                                    if (1)   /* log every arm: settle whether the very last command is armed */
+                                        pclog("3477: ☆arm2 #%lu pcmd=%02X C=%u H=%u R=%u N=%u sect=%d intr=%d tc=%d dma=%d\n",
+                                              ra2, fdc->processed_cmd, fdc->params[1], fdc->params[2],
+                                              fdc->params[3], fdc->params[4], fdc->sector,
+                                              fdc->interrupt, fdc->tc, fdc->dma);
+                                }
+
                                 fdd_readsector(fdc->fdd[real_drive(fdc, fdc->drive)],
                                                fdc->sector, fdc->params[1],
                                                fdc->head, fdc->rate,
@@ -1518,10 +1648,10 @@ fdc_write(uint16_t addr, uint8_t val, void *priv)
                                     fdc->pcn[fdc->params[0] & 3] = 0;
                                     if (fdc->flags & (FDC_FLAG_PCJR | FDC_FLAG_PCJX)) {
                                         fdc->fintr     = 1;
-                                        fdc->interrupt = -4;
+                                        fdc->interrupt = -4; sk_ev(fdc, 4);
                                     } else {
-                                        timer_disable(&fdc->timer);
-                                        fdc->interrupt = -3;
+                                        { tmr_ev(fdc, 0); timer_disable(&fdc->timer); }
+                                        fdc->interrupt = -3; sk_ev(fdc, 3);
                                         fdc_callback(fdc);
                                     }
                                     break;
@@ -1585,10 +1715,10 @@ fdc_write(uint16_t addr, uint8_t val, void *priv)
                                         fdc->pcn[fdc->params[0] & 3] = fdc->params[1];
                                     if (fdc->flags & (FDC_FLAG_PCJR | FDC_FLAG_PCJX)) {
                                         fdc->fintr     = 1;
-                                        fdc->interrupt = -4;
+                                        fdc->interrupt = -4; sk_ev(fdc, 4);
                                     } else {
-                                        timer_disable(&fdc->timer);
-                                        fdc->interrupt = -3;
+                                        { tmr_ev(fdc, 0); timer_disable(&fdc->timer); }
+                                        fdc->interrupt = -3; sk_ev(fdc, 3);
                                         fdc_callback(fdc);
                                     }
                                     break;
@@ -1610,7 +1740,7 @@ fdc_write(uint16_t addr, uint8_t val, void *priv)
                                     } else {
                                         fdc->st0 = 0x20 | (fdc->params[0] & 3);
                                         fdc->fintr     = 1;
-                                        fdc->interrupt = -4;
+                                        fdc->interrupt = -4; sk_ev(fdc, 4);
                                         break;
                                     }
                                 } else {
@@ -1620,9 +1750,9 @@ fdc_write(uint16_t addr, uint8_t val, void *priv)
                                         fdc->st0 = 0x20 | (fdc->params[0] & 3);
                                         /* Default to polled completion for 386BSD and 1B/V3 compatibility. */
                                         fdc->fintr     = 1;
-                                        fdc->interrupt = -4;
+                                        fdc->interrupt = -4; sk_ev(fdc, 4);
                                         if (fdc->flags & FDC_FLAG_IRQ_ON_NOOP_SEEK) {
-                                            fdc->interrupt = -3;
+                                            fdc->interrupt = -3; sk_ev(fdc, 3);
                                             fdc_callback(fdc);
                                         }
                                         break;
@@ -1679,6 +1809,10 @@ fdc_read(uint16_t addr, void *priv)
     uint8_t      ret   = 0xff;
     int          drive = 0;
     fdd_drive_t *drv;
+
+    if (fdc->flags & FDC_FLAG_5550)
+        if (getenv("FDCTRC"))
+            pclog("3477: fdc rd %03X\n", addr);
 
     cycles -= ISA_CYCLES(8);
 
@@ -1822,6 +1956,24 @@ fdc_read(uint16_t addr, void *priv)
                 if (fdc->flags & FDC_FLAG_5550)
                     picintc(1 << fdc->irq);
                 ret = fdc->stat;
+                if (fdc->flags & FDC_FLAG_5550)
+                    if (getenv("FDCTRC"))
+                        /* [EXPERIMENT MSRDUMP] Pair the guest-visible MSR with the
+                           internal state: does the guest ever see RQM set while a
+                           byte is waiting (data_ready=1)? */
+                        if (getenv("MSRDUMP")) {
+                            static unsigned long mn = 0;
+
+                            mn++;
+                            if ((mn <= 40) || ((mn % 8192) == 0))
+                                pclog("3477: ☆MSR st=%02X dready=%d p2go=%d pnum=%d intr=%d fintr=%d dma=%d tc=%d (pc=%04X:%04X)\n",
+                                      fdc->stat, fdc->data_ready, fdc->paramstogo, fdc->pnum,
+                                      fdc->interrupt, fdc->fintr, fdc->dma, fdc->tc,
+                                      CS, cpu_state.pc);
+                        }
+
+                        pclog("3477: fdc MSR 3F4 -> %02X (stat %02X, power_down %d, pc=%04X:%04X)\n",
+                              ret, fdc->stat, fdc->power_down, CS, cpu_state.pc);
                 break;
             case 5: /*Data*/
                 if (fdc->flags & FDC_FLAG_5550)
@@ -1845,6 +1997,22 @@ fdc_read(uint16_t addr, void *priv)
                 if (fdc->paramstogo) {
                     fdc->stat &= ~0x80;
                     fdc_log("%i parameters to go\n", fdc->paramstogo);
+
+                    /* [EXPERIMENT RESCNT] Count how many result bytes the model
+                       actually hands over per command; compare with what the
+                       guest expects (READ = 7, SENSE DRIVE STATUS = 1, SEEK = 0). */
+                    if (getenv("RESCNT")) {
+                        static int           lastpc = -99;
+                        static unsigned long rcn    = 0;
+
+                        if ((int) fdc->processed_cmd != lastpc) {
+                            if (lastpc != -99)
+                                pclog("3477: ☆RES 命令 %02X 共交付结果字节 %lu 个\n", lastpc, rcn);
+                            lastpc = (int) fdc->processed_cmd;
+                            rcn    = 0;
+                        }
+                        rcn++;
+                    }
                     fdc->paramstogo--;
                     ret = fdc->res[10 - fdc->paramstogo];
                     if (!fdc->paramstogo)
@@ -1980,7 +2148,7 @@ fdc_poll_readwrite_finish(fdc_t *fdc, int compare)
     if ((fdc->interrupt == 5) || (fdc->interrupt == 9))
         fdd_do_writeback(fdc->fdd[real_drive(fdc, fdc->drive)]);
 
-    fdc->interrupt = -2;
+    fdc->interrupt = -2; tcp_ev(fdc, 2);
 
     fdc_poll_common_finish(fdc, compare, 0);
 }
@@ -1988,7 +2156,7 @@ fdc_poll_readwrite_finish(fdc_t *fdc, int compare)
 static void
 fdc_no_dma_end(fdc_t *fdc, int compare)
 {
-    timer_disable(&fdc->timer);
+    { tmr_ev(fdc, 0); timer_disable(&fdc->timer); }
 
     fdc_poll_common_finish(fdc, compare, 0x80);
 }
@@ -1997,10 +2165,36 @@ static void
 fdc_callback(void *priv)
 {
     fdc_t *fdc        = (fdc_t *) priv;
+
+    /* [EXPERIMENT CBENTRY] Does the data-phase callback still fire after the last
+       command? If the calls stop, the FDC's timer is no longer driving the phase. */
+    if (getenv("CBENTRY")) {
+        static unsigned long cb = 0;
+
+        cb++;
+        if ((cb <= 10) || ((cb % 64) == 0))
+            pclog("3477: ☆cb #%lu pcmd=%02X C=%u H=%u R=%u N=%u intr=%d sect=%d stat=%02X p2go=%d dready=%d tc=%d dma=%d\n",
+                  cb, fdc->processed_cmd, fdc->params[1], fdc->params[2], fdc->params[3],
+                  fdc->params[4], fdc->interrupt, fdc->sector, fdc->stat, fdc->paramstogo,
+                  fdc->data_ready, fdc->tc, fdc->dma);
+    }
     int    compare    = 0;
     int    drive_num  = 0;
     int    old_sector = 0;
     fdc_log("fdc_callback(): %i\n", fdc->interrupt);
+
+    /* [EXPERIMENT FDCDUMP] Bounded state dump: tells us what the FDC is still
+       spinning on when the guest's wait loop (0650:863F) times out. */
+    if (getenv("FDCDUMP")) {
+        static unsigned long dn = 0;
+
+        dn++;
+        if ((dn <= 24) || ((dn % 100000) == 0))
+            pclog("3477: ☆FDCst #%lu intr=%d stat=%02X dready=%d p2go=%d pnum=%d cmd=%02X pcmd=%02X tc=%d fintr=%d dma=%d\n",
+                  dn, fdc->interrupt, fdc->stat, fdc->data_ready, fdc->paramstogo, fdc->pnum,
+                  fdc->command, fdc->processed_cmd, fdc->tc, fdc->fintr, fdc->dma);
+    }
+
     switch (fdc->interrupt) {
         case -3: /* End of command with interrupt */
         case -4: /* Recalibrate/seek completion (PCjr/JX polled status) */
@@ -2033,7 +2227,15 @@ fdc_callback(void *priv)
             memset(fdc->pcn, 0x00, 4 * sizeof(uint16_t));
             return;
         case -1: /* Reset */
-            fdc_int(fdc, 1);
+            /* [AB] The 3477-S IPL writes 3F2=00 to hold the controller in reset and
+               then keeps interrupts disabled for a long stretch; the reset-time
+               request would stay latched in the PIC and be delivered inside a later
+               "expect silence" self-test window (error code 6).  The 5550/5535
+               keep the stock behaviour. */
+            if (epoch_is_3477)
+                picintc(1 << fdc->irq);
+            else
+                fdc_int(fdc, 1);
             fdc->fintr = 0;
             memset(fdc->pcn, 0x00, 4 * sizeof(uint16_t));
             fdc->reset_stat = 4;
@@ -2098,10 +2300,22 @@ fdc_callback(void *priv)
                 compare = 1;
             else
                 compare = 0;
+
+            /* [EXPERIMENT RDLOOP] What is the read/write execution loop spinning
+               on?  Bounded rollup of the search state. */
+            if (getenv("RDLOOP")) {
+                static unsigned long rl = 0;
+
+                rl++;
+                if (1)   /* log every entry into the read/write case: is the last command here? */
+                    pclog("3477: ☆rdloop #%lu pcmd=%02X C=%u H=%u R=%u N=%u intr=%d sect=%d stat=%02X p2go=%d dready=%d tc=%d\n",
+                          rl, fdc->processed_cmd, fdc->interrupt, fdc->sector, fdc->stat,
+                          fdc->paramstogo, fdc->data_ready, fdc->tc, fdc->dma);
+            }
             if ((fdc->interrupt == 6) || (fdc->interrupt == 0xC)) {
                 if (fdc->wrong_am && !(fdc->deleted & 0x20)) {
                     /* Mismatching data address mark and no skip, set TC. */
-                    fdc->tc = 1;
+                    fdc->tc = 1; tcp_ev(fdc, 1);
                 }
             }
             old_sector = fdc->sector;
@@ -2203,6 +2417,19 @@ fdc_callback(void *priv)
                 case 6:
                 case 0xC:
                 case 0x16:
+                    /* [EXPERIMENT RDARM] Is the read even armed for this command?
+                       This is the per-sector arm point; if the last command never
+                       reaches it, the pipeline breaks before the drive is asked. */
+                    if (getenv("RDARM")) {
+                        static unsigned long ra = 0;
+
+                        ra++;
+                        if ((ra <= 15) || ((ra % 64) == 0))
+                            pclog("3477: ☆rdarm #%lu pcmd=%02X C=%u H=%u R=%u sect=%d intr=%d tc=%d\n",
+                                  ra, fdc->processed_cmd, fdc->params[1], fdc->params[2],
+                                  fdc->params[3], fdc->sector, fdc->interrupt, fdc->tc);
+                    }
+
                     fdd_readsector(fdc->fdd[real_drive(fdc, fdc->drive)], fdc->sector,
                                    fdc->rw_track, fdc->head,
                                    fdc->rate, fdc->params[4]);
@@ -2248,24 +2475,24 @@ fdc_callback(void *priv)
             if (fdd_get_turbo(fdc->fdd[drive_num])) {
                 if (fdc->flags & (FDC_FLAG_PCJR | FDC_FLAG_PCJX)) {
                     fdc->fintr     = 1;
-                    fdc->interrupt = -4;
+                    fdc->interrupt = -4; sk_ev(fdc, 4);
                 } else {
-                    fdc->interrupt = -3;
+                    fdc->interrupt = -3; sk_ev(fdc, 3);
                 }
-                timer_set_delay_u64(&fdc->timer, 2048 * TIMER_USEC);
+                { tmr_ev(fdc, 2048); timer_set_delay_u64(&fdc->timer, 2048 * TIMER_USEC); }
             }
             /* Interrupts and callbacks in the fdd callback function (fdc_seek_complete_interrupt) */
             return;
         case 0x0d: /*Format track*/
             if (fdc->format_state == 1) {
                 fdc->format_state = 2;
-                timer_set_delay_u64(&fdc->timer, 8 * TIMER_USEC);
+                { tmr_ev(fdc, 8); timer_set_delay_u64(&fdc->timer, 8 * TIMER_USEC); }
             } else if (fdc->format_state == 2) {
                 fdd_format(fdc->fdd[real_drive(fdc, fdc->drive)], fdc->head,
                            fdc->rate, fdc->params[4]);
                 fdc->format_state = 3;
             } else {
-                fdc->interrupt = -2;
+                fdc->interrupt = -2; tcp_ev(fdc, 2);
                 fdc_int(fdc, 1);
                 if (!(fdc->flags & FDC_FLAG_FINTR))
                     fdc->fintr = 0;
@@ -2304,10 +2531,10 @@ fdc_callback(void *priv)
             if (fdd_get_turbo(fdc->fdd[real_drive(fdc, fdc->rw_drive)])) {
                 if (fdc->flags & (FDC_FLAG_PCJR | FDC_FLAG_PCJX)) {
                     fdc->fintr     = 1;
-                    fdc->interrupt = -4;
-                    timer_set_delay_u64(&fdc->timer, 1024 * TIMER_USEC);
+                    fdc->interrupt = -4; sk_ev(fdc, 4);
+                    { tmr_ev(fdc, 1024); timer_set_delay_u64(&fdc->timer, 1024 * TIMER_USEC); }
                 } else {
-                    fdc->interrupt = -3;
+                    fdc->interrupt = -3; sk_ev(fdc, 3);
                     fdc_callback(fdc);
                 }
             }
@@ -2363,7 +2590,7 @@ fdc_error(fdc_t *fdc, int st5, int st6)
     fdc_log("FDC command %02X: Lower DRQ on error\n", fdc->processed_cmd);
     if (!(fdc->flags & FDC_FLAG_PCJX))
         dma_set_drq(fdc->dma_ch, 0);
-    timer_disable(&fdc->timer);
+    { tmr_ev(fdc, 0); timer_disable(&fdc->timer); }
 
     fdc_int(fdc, 1);
     if (!(fdc->flags & FDC_FLAG_FINTR))
@@ -2424,9 +2651,47 @@ fdc_is_verify(fdc_t *fdc)
     return ((fdc->deleted & 2) && (fdc->processed_cmd == 0x16)) ? 1 : 0;
 }
 
+/* [EXPERIMENT ROUTE] Decide and log the byte-delivery route: on-chip 80186 DMA or
+   the legacy 8237 channel. If epoch_is_3477 is false here, the guest's programmed
+   on-chip DMA never receives the data even though the pushes look perfect. */
+static int
+fdc_route_probe(fdc_t *fdc, uint8_t data)
+{
+    const int onchip = epoch_is_3477 && i80186_dma0_ready();
+
+    if (getenv("ROUTE")) {
+        static unsigned long rn   = 0;
+        static int           last = -1;
+
+        rn++;
+        if ((onchip != last) || ((rn % 4096) == 0)) {
+            pclog("3477: \u2606route onchip=%d epoch3477=%d ready=%d n=%lu pcmd=%02X C=%u H=%u R=%u\n",
+                  onchip, (int) (epoch_is_3477 != 0), i80186_dma0_ready(), rn,
+                  fdc->processed_cmd, fdc->params[1], fdc->params[2], fdc->params[3]);
+            last = onchip;
+        }
+    }
+
+    if (onchip)
+        return i80186_dma0_write(data);
+
+    return dma_channel_write(fdc->dma_ch, data);
+}
+
 int
 fdc_data(fdc_t *fdc, uint8_t data, int last)
 {
+    /* [EXPERIMENT DELIV] Entry of the byte-delivery path: does the drive's
+       callback reach the FDC at all in the failing stretch? */
+    if (getenv("DELIV")) {
+        static unsigned long dv = 0;
+
+        dv++;
+        if ((dv <= 8) || ((dv % 64) == 0))
+            pclog("3477: ☆deliver #%lu pcmd=%02X C=%u H=%u R=%u dready=%d\n",
+                  dv, fdc->processed_cmd, fdc->params[1], fdc->params[2],
+                  fdc->params[3], fdc->data_ready);
+    }
     int result = 0;
 
     if ((fdc->deleted & 2) && (fdc->processed_cmd == 0x16)) {
@@ -2457,8 +2722,20 @@ fdc_data(fdc_t *fdc, uint8_t data, int last)
             }
         }
     } else {
-        if (fdc->tc)
+        if (fdc->tc) {
+            if (getenv("FDCBYTE")) {
+                static unsigned tc_rej = 0;
+                if (tc_rej < 40 || (tc_rej % 200) == 0) {
+                    tc_rej++;
+                    pclog("3477: ★★字节被拒（tc=1）#%u C=%u H=%u R=%u stat=%02X dready=%d cmd=%02X\n",
+                          tc_rej, fdc->params[1], fdc->head, fdc->sector,
+                          fdc->stat, fdc->data_ready, fdc->processed_cmd);
+                } else {
+                    tc_rej++;
+                }
+            }
             return -1;
+        }
 
         if (!fdc->fifo || (fdc->tfifo < 1)) {
             fdc->data_ready = 1;
@@ -2467,12 +2744,54 @@ fdc_data(fdc_t *fdc, uint8_t data, int last)
             dma_set_drq(fdc->dma_ch, 1);
 
             fdc->dat = data;
-            result = dma_channel_write(fdc->dma_ch, data);
+            if (getenv("FDCBYTE")) {
+                fdc_ns_bytes++;
+                if ((fdc_ns_bytes % 128) == 0)
+                    pclog("3477: ★扇区字节累计 %u（C=%u H=%u R=%u）\n",
+                          fdc_ns_bytes, fdc->params[1], fdc->head, fdc->sector);
+            }
+            /* [cloud] 3477-S: the IPL moves the sector with the on-chip DMA
+               channel 0 and never programs the 8237, so hand the byte to that
+               channel instead; 5535/5550 keep the stock 8237 path. */
+            /* [EXPERIMENT dmaroute] Which way did this byte go?  The stalled
+               boot would have bytes silently falling back to the 8237 (which
+               this guest never programs), leaving that transfer unfinished. */
+            if (getenv("DMAROUTE")) {
+                static uint32_t ok = 0, fb = 0;
+
+                if (epoch_is_3477 && i80186_dma0_ready()) {
+                    ok++;
+                    if ((ok % 4096) == 0)
+                        pclog("3477: dma0 就绪路由 %u 次（退回 8237 共 %u 次）\n", ok, fb);
+                } else {
+                    fb++;
+                    if (fb <= 20)
+                        pclog("3477: ★字节退回 8237 #%u (dat=%02X, epoch_is_3477=%d, dma0_ready=%d, pc=%04X:%04X)\n",
+                              fb, data, (int) epoch_is_3477,
+                              epoch_is_3477 ? (int) i80186_dma0_ready() : -1,
+                              (unsigned) (cs >> 4), cpu_state.pc);
+                }
+            }
+            result = fdc_route_probe(fdc, data);
+
+            /* [EXPERIMENT FDCPUSH] Tick every 512 pushed bytes and print the last
+               few positions of each tick, plus a marker when a 512-block is never
+               completed (i.e. the transfer stops one short). */
+            if (getenv("FDCPUSH")) {
+                static unsigned long pushn = 0;
+
+                pushn++;
+                if (((pushn % 512) >= 508) || ((pushn % 512) == 0))
+                    pclog("3477: ★push n=%lu o512=%lu ovr=%d tc=%d C=%u H=%u R=%u EOT=%u pcmd=%02X\n",
+                          pushn, (pushn % 512), (result & DMA_OVER) ? 1 : 0, fdc->tc,
+                          fdc->params[1], fdc->params[2], fdc->params[3], fdc->params[5],
+                          fdc->processed_cmd);
+            }
 
             if (result & DMA_OVER) {
                 fdc_log("FDC command %02X: Lower DRQ on data read from drive without FIFO #1\n", fdc->processed_cmd);
                 dma_set_drq(fdc->dma_ch, 0);
-                fdc->tc = 1;
+                fdc->tc = 1; tcp_ev(fdc, 1);
                 return -1;
             }
             fdc_log("FDC command %02X: Lower DRQ on data read from drive without FIFO #2\n", fdc->processed_cmd);
@@ -2488,12 +2807,15 @@ fdc_data(fdc_t *fdc, uint8_t data, int last)
                 dma_set_drq(fdc->dma_ch, 1);
 
                 while (!fifo_get_empty(fdc->fifo_p)) {
-                    result = dma_channel_write(fdc->dma_ch, fifo_read(fdc->fifo_p));
+                    /* [cloud] 3477-S: see the non-FIFO path above. */
+                    result = ((epoch_is_3477 && i80186_dma0_ready())
+                                  ? i80186_dma0_write(fifo_read(fdc->fifo_p))
+                                  : dma_channel_write(fdc->dma_ch, fifo_read(fdc->fifo_p)));
 
                     if (result & DMA_OVER) {
                         fdc_log("FDC command %02X: Lower DRQ on data read from drive with FIFO #1\n", fdc->processed_cmd);
                         dma_set_drq(fdc->dma_ch, 0);
-                        fdc->tc = 1;
+                        fdc->tc = 1; tcp_ev(fdc, 1);
                         return -1;
                     }
                 }
@@ -2527,6 +2849,13 @@ void
 fdc_sector_finishread(fdc_t *fdc)
 {
     fdc->stat   = 0x10;
+    if (getenv("FDCBYTE")) {
+        static unsigned nsfr = 0;
+        nsfr++;
+        pclog("3477: ★扇区完成 #%u C=%u H=%u R=%u 实搬字节=%u\n",
+              nsfr, fdc->params[1], fdc->head, fdc->sector, fdc_ns_bytes);
+        fdc_ns_bytes = 0;
+    }
     fdc_callback(fdc);
 }
 
@@ -2617,12 +2946,15 @@ fdc_getdata(fdc_t *fdc, int last)
         }
     } else {
         if (!fdc->fifo || (fdc->tfifo < 1)) {
-            data = dma_channel_read(fdc->dma_ch);
+            /* [cloud] 3477-S: mirror of the read path -- the IPL's own DMA
+               channel is the one that has the destination programmed. */
+            data = ((epoch_is_3477 && i80186_dma0_ready()) ? i80186_dma0_read()
+                                                           : dma_channel_read(fdc->dma_ch));
             fdc_log("FDC command %02X: Lower DRQ on data write to drive without FIFO\n", fdc->processed_cmd);
             dma_set_drq(fdc->dma_ch, 0);
 
             if (data & DMA_OVER)
-                fdc->tc = 1;
+                fdc->tc = 1; tcp_ev(fdc, 1);
 
             if (!last) {
                 fdc_log("FDC command %02X: Raise DRQ on data write to drive without FIFO\n", fdc->processed_cmd);
@@ -2643,7 +2975,7 @@ fdc_getdata(fdc_t *fdc, int last)
                         fdc_log("FDC command %02X: Lower DRQ on data write to drive with FIFO #1\n",
                                 fdc->processed_cmd);
                         dma_set_drq(fdc->dma_ch, 0);
-                        fdc->tc = 1;
+                        fdc->tc = 1; tcp_ev(fdc, 1);
                         break;
                     }
                 }
@@ -2892,6 +3224,14 @@ fdc_reset(void *priv)
 
     fdc_ctrl_reset(fdc, !(fdc->flags & FDC_FLAG_PNP));
 
+    /* The 5550's FDC reset port (0x3F2) powers up asserted, so the MSR reads
+       0x00 rather than the uPD765's idle 0x80 until the guest pulses 0x3F2.
+       The 3477-S burn-in requires exactly that order: it reads 0x3F4 and fails
+       unless the value is NOT 0x80, then writes 0x3F2 (releasing the reset)
+       and requires 0x80. */
+    if (fdc->flags & FDC_FLAG_5550)
+        fdc->stat = 0x00;
+
     if (!(fdc->flags & FDC_FLAG_AT))
         fdc->rate = 2;
 
@@ -2934,7 +3274,7 @@ fdc_close(void *priv)
 
     /* Stop timers. */
     timer_disable(&fdc->watchdog_timer);
-    timer_disable(&fdc->timer);
+    { tmr_ev(fdc, 0); timer_disable(&fdc->timer); }
 
     fifo_close(fdc->fifo_p);
 
@@ -2963,9 +3303,14 @@ fdc_init(const device_t *info)
 
     fdc->flags = (int) info->local;
 
-    if (fdc->flags & FDC_FLAG_5550)
+    if (fdc->flags & FDC_FLAG_5550) {
         fdc->irq = 4;
-    else
+        /* [3477-S] The PS/55 5550's FDC sits on IRQ 4, but the 3477-S guest's ISR is
+           wired to IRQ 6 and its boot loader gives up (CCCC runaway) if the interrupt
+           never arrives.  Select IRQ 6 for the 3477 machine by default. */
+        if (epoch_is_3477 || getenv("FDC3477IRQ6"))
+            fdc->irq = 6;
+    } else
         /* Always use IRQ 6. */
         fdc->irq = 6;
 

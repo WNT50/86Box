@@ -14,6 +14,10 @@
  *          Copyright 2023-2025 Miran Grca.
  *          Copyright 2023-2025 EngiNerd.
  */
+/* [AB] temporary: log the KBC exchange so the 3477-S ROS's
+   self-test handshake (0xAA -> 0x55) can be traced. */
+#define ENABLE_KBC_AT_LOG 1
+#define ENABLE_KBC_AT_DEV_LOG 1   /* [PROBE-TEMP] 设备侧日志 */
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -407,8 +411,16 @@ kbc_send_to_ob(atkbc_t *dev, uint8_t val, uint8_t channel, uint8_t stat_hi)
 
             if (dev->mem[0x20] & 0x02)
                 kbc_set_do_irq(dev, channel);
-        } else if (dev->mem[0x20] & 0x01)
-            kbc_set_do_irq(dev, channel);
+        } else {
+            /* [AB] PS/55 键盘是多字节应答设备（复位序列连发 3 个 ID 字节），
+               仍有字节待取时必须置 MFULL，供 3477-S IPL 的“等状态位 5”助手
+               （ROM 0x8AE7）继续取走后续字节；否则该助手恒超时 0xFFFF。 */
+            if ((dev->ports[0] != NULL) && (dev->ports[0]->out_new != -1))
+                dev->status |= STAT_MFULL;
+
+            if (dev->mem[0x20] & 0x01)
+                kbc_set_do_irq(dev, channel);
+        }
     } else if (dev->mem[0x20] & 0x01) {
         /* AT KBC: IRQ 1 is level-triggered because it is tied to OBF. */
         if (dev->irq[0] != 0xffff) {
@@ -425,6 +437,7 @@ kbc_send_to_ob(atkbc_t *dev, uint8_t val, uint8_t channel, uint8_t stat_hi)
 static void
 kbc_delay_to_ob(atkbc_t *dev, uint8_t val, uint8_t channel, uint8_t stat_hi)
 {
+    if (getenv("KBTRC")) pclog("[KBTRC] delay_to_ob val=%02X ch=%d state=%d status=%02X is_asic=%d pending=%d\n", val, channel, dev->state, dev->status, dev->is_asic, dev->pending);
     dev->val = val;
     dev->channel = channel;
     dev->stat_hi = stat_hi;
@@ -543,6 +556,10 @@ at_main_ibf:
                 if ((dev->status & STAT_IFULL) && (dev->status & STAT_CD)) {
                     dev->status &= ~STAT_IFULL;
                     kbc_at_process_cmd(dev);
+                } else if ((dev->status & STAT_IFULL) && dev->wantdata && (dev->state == STATE_KBC_PARAM)) {
+                    /* The host wrote the pending command parameter while OBF is still set: IBF
+                       clearing does not depend on OBF being read out, so take it here too. */
+                    kbc_param_take(dev);
                 }
             } else if (dev->status & STAT_IFULL)
                 kbc_ibf_process(dev);
@@ -561,6 +578,7 @@ at_main_ibf:
         case STATE_KBC_DELAY_OUT:
             /* Keyboard controller command want to output a single byte. */
             kbc_at_log("ATkbc: %02X coming from channel %i with high status %02X\n", dev->val, dev->channel, dev->stat_hi);
+            if (getenv("KBTRC")) pclog("[KBTRC] SERVICED(goto) val=%02X ch=%d stat_hi=%02X\n", dev->val, dev->channel, dev->stat_hi);
             kbc_send_to_ob(dev, dev->val, dev->channel, dev->stat_hi);
             dev->state = STATE_MAIN_IBF;
             dev->pending = 0;
@@ -706,6 +724,7 @@ kbc_at_poll_ps2(atkbc_t *dev)
             break;
         case STATE_KBC_DELAY_OUT:
             /* Keyboard controller command want to output a single byte. */
+            if (getenv("KBTRC")) pclog("[KBTRC] SERVICED(no-goto) val=%02X ch=%d stat_hi=%02X status_before=%02X\n", dev->val, dev->channel, dev->stat_hi, dev->status);
             kbc_at_log("ATkbc: %02X coming from channel %i with high status %02X\n", dev->val, dev->channel, dev->stat_hi);
             kbc_send_to_ob(dev, dev->val, dev->channel, dev->stat_hi);
             dev->state = STATE_MAIN_IBF;

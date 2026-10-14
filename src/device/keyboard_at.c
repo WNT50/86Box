@@ -27,6 +27,9 @@
 #include <86box/mouse.h>
 #include <86box/machine.h>
 
+/* [PROBE-TEMP] 打开 keyboard_at 日志，跑完 git checkout 撤净 */
+#define ENABLE_KEYBOARD_AT_LOG 1
+
 #define FIFO_SIZE      16
 
 #define BAT_COUNT      1000
@@ -79,6 +82,10 @@ static uint8_t     inv_cmd_response                 = 0xfa;
 static int         is_special                       = 0;
 
 static uint16_t    bat_counter                      = 0;
+
+/* [AB] BAT 只需在上电/复位后发一次；状态机每次排空命令队列都会重入
+   execute_bat（kbc_at_dev.c:158 / :181），原实现会因此反复重发 0xAA。 */
+static int         bat_pending                      = 0;
 
 const scancode scancode_set1_at[512] = {
   // clang-format off
@@ -5699,20 +5706,27 @@ keyboard_at_bat(void *priv)
 {
     atkbc_dev_t *dev = (atkbc_dev_t *) priv;
 
-    if (bat_counter == 0x0000) {
-        keyboard_at_set_defaults(dev);
-
-        keyboard_scan = 1;
-
-        keyboard_all_up();
-        keyboard_update_states(0, 0, 0, 0);
-
-        keyboard_set_in_reset(0);
-        kbc_at_dev_queue_add(dev, 0xaa, 0);
-    } else {
-        bat_counter--;
-        dev->state = DEV_STATE_EXECUTE_BAT;
+    if (!bat_pending) {
+        if (bat_counter)
+            bat_counter--;
+        dev->state = DEV_STATE_MAIN_OUT;
+        return;
     }
+
+    bat_pending = 0;
+
+    keyboard_at_set_defaults(dev);
+
+    keyboard_scan = 1;
+
+    keyboard_all_up();
+    keyboard_update_states(0, 0, 0, 0);
+
+    keyboard_set_in_reset(0);
+    /* [AB] BAT 是键盘【发给主机】的数据，必须进 main=1 的数据队列；
+       上游原版写成 main=0（命令队列）⇒ 设备把它当成收到一条命令、
+       回一个 ACK 0xFA，既多出字节又让 BAT 永远到不了主机。 */
+    kbc_at_dev_queue_add(dev, 0xaa, 1);
 }
 
 static void
@@ -5773,6 +5787,17 @@ keyboard_at_write(void *priv)
                 break;
 
             case 0xf3: /* set typematic rate/delay */
+                if ((val & 0x80) && (keyboard_mode == 0x8a)) {
+                    /* PS/55 keyboard (IBM-J 5576): in the PS/55 scan code set
+                       (keyboard_mode 0x8A) bit 7 of the typematic parameter is
+                       part of the command, not an invalid marker.  The 3477-S
+                       ROM sends 0xF3 8A and expects the ACK; NAKing it with a
+                       resend makes the ROM restart its whole keyboard init
+                       sequence forever (observed: ~26 cycles, no boot). */
+                    kbc_at_dev_queue_add(dev, 0xfa, 0); /* ACK */
+                    keyboard_at_log("%s: Set typematic rate/delay [%02X] PS/55: accepted\n", dev->name, val);
+                    break;
+                }
                 if (val & 0x80) {
                     keyboard_at_log("%s: Set typematic rate/delay [%02X] has bit 7 set - invalid\n", dev->name, val);
                     dev->flags |= FLAG_CTRLDAT;      /* Resend = keep waiting for parameter. */
@@ -5954,6 +5979,11 @@ keyboard_at_write(void *priv)
 
             case 0xff: /* reset */
                 keyboard_set_in_reset(1);
+                /* A keyboard reset re-runs the BAT: the device must answer the
+                   0xFA ACK and then send 0xAA (BAT OK), as real AT keyboards do.
+                   bat_pending is consumed by the first BAT at init, so re-arm it
+                   here or every later reset silently produces no 0xAA. */
+                bat_pending = 1;
                 kbc_at_dev_reset(dev, 1);
                 bat_counter = 1000;
                 break;
@@ -6042,6 +6072,7 @@ keyboard_at_init(const device_t *info)
     if (dev->port != NULL) {
         kbc_at_dev_reset(dev, 0);
         bat_counter = 0x0000;
+        bat_pending = 1;
     }
 
     if ((dev->type & FLAG_TYPE_MASK) > KBD_84_KEY)

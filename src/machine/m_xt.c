@@ -38,6 +38,7 @@
 #include <86box/sio.h>
 #include <86box/ibm_5161.h>
 #include <86box/inboard386.h>
+#include <86box/i80186.h>
 #include <86box/io.h>
 #include <86box/isartc.h>
 #include <86box/keyboard.h>
@@ -1283,6 +1284,27 @@ machine_xt_glabios_init(const machine_t *model)
     device_add(&kbc_xt_device);
 
     machine_xt_common_init(model, 0);
+
+    return ret;
+}
+
+int
+machine_xt_186_init(const machine_t *model)
+{
+    int ret;
+
+    ret = bios_load_linear("roms/machines/glabios/GLABIOS_0.4.0_8X.ROM",
+                           0x000fe000, 8192, 0);
+
+    if (bios_only || !ret)
+        return ret;
+
+    device_add(&kbc_xt_device);
+
+    machine_xt_common_init(model, 0);
+
+    /* [Cloud server only, DO NOT USE!!!] Experimental 80186 on-chip peripherals. */
+    device_add(&i80186_device);
 
     return ret;
 }
