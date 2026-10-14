@@ -1584,6 +1584,31 @@ static void
 epoch_cram_write(uint32_t addr, uint8_t val, void *priv)
 {
     epoch_t *epoch = (epoch_t *) priv;
+    /* [PROBE] EPOCH3477_DUMP=1: on the first two non-zero CRAM writes, dump the
+       three candidate glyph sources (CRAM 0xE0000, machine-preloaded 0x38000 /
+       0x30000) so we can see which one carries the 32x32 bitmaps. */
+    if ((getenv("EPOCH3477_DUMP") != NULL) && (val != 0)) {
+        static int cramn = 0;
+        cramn++;
+        /* Fire at three later points (not the very first write, which only
+           touches the empty code-0 slot) and sample the glyph slot of 'A'
+           (0x41 * 0x80) plus the off-screen CRAM tail the guest writes at. */
+        if ((cramn == 200) || (cramn == 1200) || (cramn == 3000)) {
+            int i, j;
+            pclog("3477: DUMP at nonzero write #%d (addr %05X=%02X)\n", cramn, addr, val);
+            for (j = 0; j < 128; j += 16) {
+                char c1[64], c2[64], c3[64];
+                for (i = 0; i < 16; i++) {
+                    sprintf(&c1[i * 3], " %02X", epoch->cram[epoch_cram_index(epoch, 0xE0E00 + j + i)]);
+                    sprintf(&c2[i * 3], " %02X", epoch->vram[0x38000 + 0x2080 + j + i]);
+                    sprintf(&c3[i * 3], " %02X", epoch->vram[0x30000 + 0x2080 + j + i]);
+                }
+                pclog("3477:   CRAM_E00+%03X:%s\n", j, c1);
+                pclog("3477:   V38000_A+%03X:%s\n", j, c2);
+                pclog("3477:   V30000_A+%03X:%s\n", j, c3);
+            }
+        }
+    }
     epoch->cram[epoch_cram_index(epoch, addr)] = val;
     epoch->fullchange = 3;
     // epoch_log("cw %04X:%04X %04X %02X\n", cs >> 4, cpu_state.pc, addr, val);
@@ -2090,6 +2115,13 @@ epoch_misc_out(uint16_t port, uint8_t val, void *priv)
 
     switch (port) {
         case 0x400:
+            /* Display-RAM plane select (3477-S).  The burn-in reads it back
+               and keeps bit 5, which therefore reads set.  The IPL also
+               walks bits 7-5 as a 32 KB font-ROM bank at 0xE8000 - probe
+               gate EPOCH3477_EBTRC=1 (off by default). */
+            if (getenv("EPOCH3477_EBTRC") != NULL)
+                pclog("3477: EBTRC out 0x400 = %02X pc=%04X:%04X\n",
+                    val, cs >> 4, cpu_state.pc);
             epoch->dispbank = val; /* 3477-S display-RAM plane select */
             break;
         case 0x44:
@@ -3009,6 +3041,28 @@ epoch_fontcard_writeb(uint32_t addr, uint8_t val, void *priv)
         epoch_fontcard_set_page(epoch, val);
         return;
     }
+    /* [PROBE] EPOCH3477_DUMP=1: on the first two non-latch window writes,
+       dump the three candidate glyph sources so we can see which one holds
+       the 32x32 bitmaps (CRAM 0xE0000, machine-preloaded 0x38000/0x30000). */
+    if ((getenv("EPOCH3477_DUMP") != NULL) && (val != 0)) {
+        static int dumped = 0;
+        if (dumped < 2) {
+            int i, j;
+            dumped++;
+            pclog("3477: DUMP trigger win[%04X]=%02X\n", addr, val);
+            for (j = 0; j < 128; j += 16) {
+                char c1[64], c2[64], c3[64];
+                for (i = 0; i < 16; i++) {
+                    sprintf(&c1[i * 3], " %02X", epoch->cram[epoch_cram_index(epoch, 0xE0000 + j + i)]);
+                    sprintf(&c2[i * 3], " %02X", epoch->vram[0x38000 + j + i]);
+                    sprintf(&c3[i * 3], " %02X", epoch->vram[0x30000 + j + i]);
+                }
+                pclog("3477:   CRAM+%03X:%s\n", j, c1);
+                pclog("3477:   VRAM38000+%03X:%s\n", j, c2);
+                pclog("3477:   VRAM30000+%03X:%s\n", j, c3);
+            }
+        }
+    }
     epoch->fontcard_win[addr] = val;
 }
 
@@ -3115,11 +3169,13 @@ epoch_fontcard_init(epoch_t *epoch)
     mem_mapping_add(&epoch->fontcard_map, EPOCH_FONTCARD_WIN_ADDR,
                     EPOCH_FONTCARD_WIN_SIZE, epoch_fontcard_readb,
                     epoch_fontcard_readw, NULL,
-                    /* 3477-S proof (IBMBIO.COM +0x7E72, "mov [bx],bl" with bx == bl):
-                       the guest latches the font card page by WRITING F000:0..15,
-                       so this window has to accept writes on the 3477 too. */
-                    epoch_fontcard_writeb,
-                    epoch_fontcard_writew, NULL, NULL,
+                    /* 3477-S disassembly: IBMBIO latches the card page by WRITING
+                       F000:0..15 (mov [bx],bl, bx==bl).  The handlers exist and
+                       match that protocol; they were disabled for this epoch.
+                       EPOCH3477_FCWR=1 re-enables them for A/B probing only
+                       (never in the clean 80186 baseline). */
+                    (!epoch_is_3477 || (getenv("EPOCH3477_FCWR") != NULL)) ? epoch_fontcard_writeb : NULL,
+                    (!epoch_is_3477 || (getenv("EPOCH3477_FCWR") != NULL)) ? epoch_fontcard_writew : NULL, NULL, NULL,
                     MEM_MAPPING_EXTERNAL, epoch);
     /* The 3477's ROM is on the system board behind port 0x3E3, not on the
        optional card, so it has no 0x160 command interface. */
@@ -3136,17 +3192,37 @@ epoch_fontcard_init(epoch_t *epoch)
    return open bus so those tests record a failure.  The 4 KB shown at 0xE0000
    is the windowed view of the first display plane.  [Cloud server only,
    DO NOT USE!!!] */
+/* 3477-S: the E800 window (32 KB, 0xE8000-0xEFFFF) is a banked view of the ROS
+   FONT ROM - port 0x400's bits 7-5 pick the bank, and the IPL walks all 8 of
+   them (0xE0,0xC0,..,0x00) checksumming 32 KB per bank, while its read-back
+   keeps only bit 5 and bits 1-0 select the display plane.  Gated off by
+   default: EPOCH3477_EBANK=1 enables it for A/B probing only.  [Cloud server
+   only, DO NOT USE!!!] */
+static int
+epoch_ebank_enabled(void)
+{
+    static int ebank = -1;
+    if (ebank < 0)
+        ebank = (getenv("EPOCH3477_EBANK") != NULL);
+    return ebank;
+}
 static uint8_t
 epoch_hiram_readb(uint32_t addr, void *priv)
 {
-    return ((epoch_t *) priv)->hiram[(addr - 0xE1000) & 0xFFFF];
+    epoch_t *epoch = (epoch_t *) priv;
+    if (epoch_ebank_enabled() && epoch_is_3477 && (epoch->fontcard_rom != NULL)
+        && (addr >= 0xE8000) && (addr < 0xF0000)) {
+        uint32_t off = (addr - 0xE8000)
+            + ((((uint32_t) epoch->dispbank >> 5) & 7) * 0x8000);
+        return epoch->fontcard_rom[off & (EPOCH_FONTCARD_ROM_SIZE_3477 - 1)];
+    }
+    return epoch->hiram[(addr - 0xE1000) & 0xFFFF];
 }
 static uint16_t
 epoch_hiram_readw(uint32_t addr, void *priv)
 {
-    epoch_t *epoch = (epoch_t *) priv;
-    return (uint16_t) (epoch->hiram[(addr - 0xE1000) & 0xFFFF]
-        | (epoch->hiram[(addr - 0xE1000 + 1) & 0xFFFF] << 8));
+    return (uint16_t) (epoch_hiram_readb(addr, priv)
+        | (epoch_hiram_readb(addr + 1, priv) << 8));
 }
 static void
 epoch_hiram_writeb(uint32_t addr, uint8_t val, void *priv)
@@ -3824,6 +3900,11 @@ machine_xt_ibm3477_init(const machine_t *model)
            (14/10 appeared, exactly as when the font card is absent).  Patching
            rom[] keeps F0000-FFFFF served by bios_read() exactly as before. */
         if ((fp != NULL) && (rom != NULL)) {
+            /* [EXPERIMENT] A/B the ROM bank from the shell: EPOCH3477_TESTMODE=0/1
+               overrides whatever the config resolved.  Probe-only hook, must not
+               reach the clean 80186 baseline. */
+            if (getenv("EPOCH3477_TESTMODE") != NULL)
+                epoch->testmode = atoi(getenv("EPOCH3477_TESTMODE"));
             fseek(fp, epoch->testmode ? 0x8000 : 0x0000, SEEK_SET);
             if (fread(rombank, 1, 0x8000, fp) == 0x8000) {
                 memcpy(&rom[0x8000], rombank, 0x8000);
