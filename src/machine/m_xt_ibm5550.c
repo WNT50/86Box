@@ -3115,8 +3115,11 @@ epoch_fontcard_init(epoch_t *epoch)
     mem_mapping_add(&epoch->fontcard_map, EPOCH_FONTCARD_WIN_ADDR,
                     EPOCH_FONTCARD_WIN_SIZE, epoch_fontcard_readb,
                     epoch_fontcard_readw, NULL,
-                    epoch_is_3477 ? NULL : epoch_fontcard_writeb,
-                    epoch_is_3477 ? NULL : epoch_fontcard_writew, NULL, NULL,
+                    /* 3477-S proof (IBMBIO.COM +0x7E72, "mov [bx],bl" with bx == bl):
+                       the guest latches the font card page by WRITING F000:0..15,
+                       so this window has to accept writes on the 3477 too. */
+                    epoch_fontcard_writeb,
+                    epoch_fontcard_writew, NULL, NULL,
                     MEM_MAPPING_EXTERNAL, epoch);
     /* The 3477's ROM is on the system board behind port 0x3E3, not on the
        optional card, so it has no 0x160 command interface. */
