@@ -503,7 +503,8 @@ pic_auto_non_specific_eoi(pic_t *dev)
 {
     uint8_t irq;
 
-    if ((dev->icw4 & 2) || getenv("PIC3477AEOI")) {
+    extern int epoch_is_3477; /* [3477-S] */
+    if ((dev->icw4 & 2) || epoch_is_3477 || getenv("PIC3477AEOI")) {
         irq = pic_non_specific_find(dev);
 
         pic_action(dev, irq, 1, dev->auto_eoi_rotate);

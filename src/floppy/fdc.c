@@ -420,7 +420,8 @@ fdc_int(fdc_t *fdc, int set_fintr)
         ienable = 1;
     else if (!(fdc->flags & (FDC_FLAG_PCJR | FDC_FLAG_PCJX))) {
         ienable = !!(fdc->dor & 8);
-        if (getenv("FDC5550IRQ"))
+        /* [3477-S] Force the interrupt enable on the 3477 machine too (see FDC3477IRQ6). */
+        if (epoch_is_3477 || getenv("FDC5550IRQ"))
             ienable = 1;
     }
 
@@ -3304,7 +3305,10 @@ fdc_init(const device_t *info)
 
     if (fdc->flags & FDC_FLAG_5550) {
         fdc->irq = 4;
-        if (getenv("FDC3477IRQ6"))
+        /* [3477-S] The PS/55 5550's FDC sits on IRQ 4, but the 3477-S guest's ISR is
+           wired to IRQ 6 and its boot loader gives up (CCCC runaway) if the interrupt
+           never arrives.  Select IRQ 6 for the 3477 machine by default. */
+        if (epoch_is_3477 || getenv("FDC3477IRQ6"))
             fdc->irq = 6;
     } else
         /* Always use IRQ 6. */
