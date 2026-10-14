@@ -1466,6 +1466,18 @@ epoch_poll(void *priv)
 static void
 epoch_vram_write(uint32_t addr, uint8_t val, void *priv)
 {
+    /* [PROBE] EPOCH3477_PLANE=1: census of guest writes into the display
+       planes (0xA0000-0xBFFFF, 0xC1000-0xDFFFF).  A large count means the
+       guest delivers glyph BITMAPS there rather than only codes in CRAM. */
+    if (getenv("EPOCH3477_PLANE")) {
+        static long pn = 0;
+        static uint32_t pmin = 0xffffffffu, pmax = 0u;
+        pn++;
+        if (addr < pmin) pmin = addr;
+        if (addr > pmax) pmax = addr;
+        if ((pn <= 8) || ((pn % 8192) == 0))
+            pclog("3477: PLANEW n=%ld addr=%06X=%02X [%06X..%06X]\n", pn, addr, val, pmin, pmax);
+    }
     epoch_t *epoch = (epoch_t *) priv;
     // epoch_log("epoch_vw: %x %x\n", addr, val);
     addr &= EPOCH_MASK_VRAM;
@@ -3260,6 +3272,14 @@ epoch_hiram_readw(uint32_t addr, void *priv)
 static void
 epoch_hiram_writeb(uint32_t addr, uint8_t val, void *priv)
 {
+    /* [PROBE] EPOCH3477_HIRAM=1: count the guest's writes into the E800-EC00
+       block, which is where IBMBIO is supposed to land the delivered glyphs. */
+    if (getenv("EPOCH3477_HIRAM")) {
+        static long hn = 0;
+        hn++;
+        if ((hn <= 12) || ((hn % 4096) == 0))
+            pclog("3477: HIRAMW n=%ld addr=%05X=%02X\n", hn, addr, val);
+    }
     ((epoch_t *) priv)->hiram[(addr - 0xE1000) & 0xFFFF] = val;
 }
 static void
