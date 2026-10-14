@@ -494,6 +494,39 @@ set_sector(void *priv, UNUSED(int side), UNUSED(uint8_t c), const uint8_t h,
 
     dev->current_sector_pos_side = dev->sector_pos_side[h][r];
     dev->current_sector_pos      = dev->sector_pos[h][r];
+    /* [EXPERIMENT FDDSENT] Sentinel = the FDC asked for a (h,r) the image never filled:
+       pos stays 0 / side stays 0xFF and the read guard then silently returns 0. */
+    if (getenv("FDDSENT") &&
+        (dev->current_sector_pos_side == 0xFF)) {
+        static unsigned long ss = 0;
+
+        ss++;
+        pclog("3477: SENTINEL #%lu c=%u h=%u r=%u n=%u pos=%u side=%u sides=%d trk=%d\n",
+              ss, c, h, r, n, dev->current_sector_pos, dev->current_sector_pos_side,
+              dev->sides, drv->track);
+    }
+
+    /* [EXPERIMENT FDDSTREAM] The table lookup above has no bounds check; log what
+       the FDC asked for and what came back, bounded. */
+    if (getenv("FDDSTREAM")) {
+        static unsigned long sn = 0;
+
+        sn++;
+        if ((sn <= 12) || ((sn % 8) == 0))
+            pclog("3477: ☆set_sector #%lu c=%u h=%u r=%u n=%u pos=%u side=%u sides=%d drv_trk=%d\n",
+                  sn, c, h, r, n, dev->current_sector_pos, dev->current_sector_pos_side,
+                  dev->sides, drv->track);
+    }
+
+    /* [EXPERIMENT imgsec] The FDC only calls this once the sector ID has been
+       matched in the raw bit stream; a read that never reaches this point is
+       one whose sector was never found. */
+    if (getenv("FDDIMG")) {
+        static unsigned is_n = 0;
+        is_n++;
+        pclog("3477: ★★镜像层命中扇区 #%u H=%u R=%u → pos=%u side=%u trk=%d\n",
+              is_n, h, r, dev->current_sector_pos, dev->current_sector_pos_side, drv->track);
+    }
 }
 
 static uint8_t
@@ -501,6 +534,63 @@ poll_read_data(void *priv, UNUSED(int side), const uint16_t pos)
 {
     fdd_drive_t *drv = (fdd_drive_t *) priv;
     const img_t *dev = (img_t *) drv->local;
+
+    /* [EXPERIMENT FDDSTREAM] Is the drive actually streaming data after the last
+       command?  Bounded: the first few calls and then every 8192nd. */
+    if (getenv("FDDSTREAM")) {
+        static unsigned long n = 0;
+
+        n++;
+        if ((n <= 8) || ((n % 8192) == 0))
+            pclog("3477: ★流 pos=%u n=%lu cur_pos=%u side=%u trk=%d\n",
+                  pos, n, (unsigned) dev->current_sector_pos,
+                  (unsigned) dev->current_sector_pos_side, drv->track);
+    }
+
+    /* [EXPERIMENT FDDROLL] Roll up the byte positions the FDC asks the drive
+       for.  If the reader is stuck re-reading the last byte of a sector, the
+       position histogram collapses to one value; a healthy sector sweep walks
+       0..511.  Bounded: one line per 4096 calls. */
+    if (getenv("FDDROLL")) {
+        static unsigned long calls = 0, hi = 0, seen[512];
+
+        calls++;
+        if (pos <= 511)
+            seen[pos]++;
+        if (pos > hi)
+            hi = pos;
+        if ((calls % 4096) == 0) {
+            unsigned long distinct = 0, i;
+
+            for (i = 0; i < 512; i++) {
+                if (seen[i])
+                    distinct++;
+            }
+            pclog("3477: ★rollup calls=4096 pos=%u hi=%u distinct=%lu see511=%lu cur_pos=%u side=%d trk=%d dma=%d\n",
+                  pos, hi, distinct, seen[511], (unsigned) dev->current_sector_pos,
+                  dev->current_sector_pos_side, drv->track, drv->fdc ? 1 : 0);
+            for (i = 0; i < 512; i++)
+                seen[i] = 0;
+            hi    = 0;
+            calls = 0;
+        }
+    }
+
+    /* [EXPERIMENT FDDSTREAM] How often does the bounds check trip?  A drive
+       position that went out of range would stop the read delivering. */
+    if (getenv("FDDSTREAM")) {
+        static unsigned long bn = 0;
+        int bad = (dev->current_sector_pos_side >= dev->sides) ||
+                  ((uint32_t) dev->current_sector_pos + pos >= sizeof(dev->track_data[0]));
+
+        if (bad) {
+            bn++;
+            if ((bn <= 30) || ((bn % 4096) == 0))
+                pclog("3477: ★★边界检查命中 #%lu pos=%u cur_pos=%u side=%u sides=%d trk=%d\n",
+                      bn, pos, (unsigned) dev->current_sector_pos,
+                      (unsigned) dev->current_sector_pos_side, dev->sides, drv->track);
+        }
+    }
 
     if ((dev->current_sector_pos_side >= dev->sides) ||
         ((uint32_t) dev->current_sector_pos + pos >= sizeof(dev->track_data[0])))
@@ -720,6 +810,15 @@ img_seek(void *priv, int track)
                 buf_pos = ((formatted_count == dev->sectors) ? sector : (sr - 1)) * ssize;
                 dev->sector_pos_side[id[1]][id[2]] = side;
                 dev->sector_pos[id[1]][id[2]]      = buf_pos;
+                if (getenv("FDDFILL")) {
+                    static unsigned long fn = 0;
+
+                    fn++;
+                    if ((fn <= 40) || ((fn % 512) == 0))
+                        pclog("3477: fill #%lu h=%u r=%u side=%u pos=%u\n",
+                              fn, (unsigned) id[1], (unsigned) id[2], (unsigned) side,
+                              (unsigned) buf_pos);
+                }
                 current_pos = d86f_prepare_sector(
                     drv, side, current_pos, id,
                     &dev->track_data[side][buf_pos], ssize,
