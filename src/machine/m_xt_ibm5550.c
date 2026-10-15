@@ -93,14 +93,35 @@ extern uint8_t *rom; /* [FIX] the ROM buffer bios_load_linear filled */
    到时解析一次并缓存。加新探针时在这里登记一个 PB_*。 */
 enum {
     PB_OUTB = 0, PB_LCDATA, PB_MODE, PB_PIXEL, PB_WLOG, PB_EBTRC,
-    PB_EBANK, PB_HIRAM, PB_FCWR, PB_PCSAMPLE, PB_C000LOG, PB_A0LOG, PB_N
+    PB_EBANK, PB_HIRAM, PB_FCWR, PB_PCSAMPLE, PB_C000LOG, PB_A0LOG, PB_ROMW, PB_ROMPG, PB_ADR, PB_N
 };
+/* [PROBE] 例程出口取指跟踪：命中触发线性地址后记录其后 N 条取指 pc（拿调用者返回地址） */
+static int      epoch_pctrace_left;
+static uint32_t epoch_pctrace_trig = 0xFF03B;   /* 位脉冲原语 ret（文件 0xE03B → 线性 0xFF03B） */
+static int      epoch_pctrace_n = -1;            /* -1 = 尚未从环境读取 */
 static const char *const pb_name[PB_N] = {
     "EPOCH3477_OUTB", "EPOCH3477_LCDATA", "EPOCH3477_MODE", "EPOCH3477_PIXEL",
     "EPOCH3477_WLOG", "EPOCH3477_EBTRC", "EPOCH3477_EBANK", "EPOCH3477_HIRAM",
-    "EPOCH3477_FCWR", "EPOCH3477_PCSAMPLE", "EPOCH3477_C000LOG", "EPOCH3477_A0LOG"
+    "EPOCH3477_FCWR", "EPOCH3477_PCSAMPLE", "EPOCH3477_C000LOG", "EPOCH3477_A0LOG",
+    "EPOCH3477_ROMW", "EPOCH3477_ROMPG", "EPOCH3477_ADAPTER"
 };
 static int pb_flag[PB_N];
+
+/* 5250 适配器中断应答（EPOCH3477_ADAPTER=1）：命令端口写之后延迟投递一次中断。
+   自检在 FD43:06D2 循环选通 0x1C6，然后 sti 等中断服务程序置位 bh/bl
+   （判据原文 FDC11/FDC1C：未置位则报 0x95/0x96）。IRQ 号线由
+   EPOCH3477_ADAPTER_IRQ 选择（5550 IRQ 表里 IRQ5 空位最可能是它）。 */
+static int        epoch_adr_irq = -1;
+static pc_timer_t epoch_adr_timer;
+static void
+epoch_adr_irq_cb(void *priv)
+{
+    (void) priv;
+    if (epoch_adr_irq >= 0) {
+        pclog("3477: ADAPTER IRQ fired (irq=%d)\n", epoch_adr_irq);
+        picint((uint16_t) (1 << epoch_adr_irq));
+    }
+}
 static inline int
 pb(int id)
 {
@@ -218,6 +239,83 @@ pb(int id)
    the software timer's arm/ack from port 0xA6 to bit 0 of port 0xA0. */
 static int epoch_is_5535 = 0;
 int epoch_is_3477 = 0; /* [AB] non-static: the FDC model needs it */
+/* [3477-S ROM paging — probe EPOCH3477_ROMPG]
+   System ROS = a 32 KB window at F8000-FFFFF fed by the 0x390 page register.
+   Every 32 KB page is a self-contained image: reset vector at page offset
+   0x7FF0 (`EA 00 00 F5 FF` = jmp far 0xFFF5:0 -> linear 0xFFF50 = the page's
+   0x7F50 stub, which programs the 80186 UMCS via 0xFFA0 and then far-jumps
+   into the F800 segment), a 4-entry far-pointer table at 0x7FE0 using F8xx/
+   F9xx/FAxx segments, and its own signature ending the page.
+   Port 0x390 values seen statically: 0x00, 0x02 and 0x80 (0x80 is written by
+   the IPL half's 0x7F40 stub just before that hand-over). */
+static mem_mapping_t epoch_rom_map;
+static uint8_t      *epoch_rom_pagebuf[2];
+static uint8_t      *epoch_rom_sel = NULL;
+static int           epoch_rom_pages = 0;
+static int           epoch_rom_trace = 1 << 30; /* [ROMX] dump the first N page offsets when EPOCH3477_ROMX is set */
+static int           epoch_rom_cur   = -1;
+
+static uint8_t
+epoch_rom_readb(uint32_t addr, void *priv)
+{
+    if (epoch_rom_trace < 64) {
+        pclog("3477: ROMX off=%04X pc=%04X:%04X\n", addr & 0x7fff, cs >> 4, cpu_state.pc);
+        epoch_rom_trace++;
+    }
+    {
+        if (epoch_pctrace_n < 0) {
+            const char *e = getenv("EPOCH3477_PCTRACE");
+            const char *t = getenv("EPOCH3477_PCTRACE_TRIG");
+            epoch_pctrace_n = e ? atoi(e) : 0;
+            if (t)
+                epoch_pctrace_trig = (uint32_t) strtoul(t, NULL, 0);
+        }
+        if (epoch_pctrace_n > 0) {
+            uint32_t lin = ((uint32_t) cs) + cpu_state.pc;   /* cs 为段基（本文件既有用法：cs >> 4 = 段值） */
+            if (epoch_pctrace_left <= 0) {
+                if (lin == epoch_pctrace_trig)
+                    epoch_pctrace_left = epoch_pctrace_n;
+            } else {
+                pclog("3477: PCTRACE %05X\n", lin);
+                epoch_pctrace_left--;
+            }
+        }
+    }
+    return epoch_rom_sel ? epoch_rom_sel[addr & 0x7fff] : 0xff;
+}
+
+static uint16_t
+epoch_rom_readw(uint32_t addr, void *priv)
+{
+    if (!epoch_rom_sel)
+        return 0xffff;
+    return *(uint16_t *) &epoch_rom_sel[addr & 0x7ffe];
+}
+
+static void
+epoch_rompg_switch(uint8_t val)
+{
+    int idx;
+
+    if (epoch_rom_pages == 0)
+        return;
+    /* Bit 7 selects the page (set -> page 1/ROS half, clear -> page 0/IPL
+       half); the 0x00/0x02 writes seen all over both halves are "back to page
+       0".  Bit 1 is an independent control bit (0x82 write site at F888B),
+       not part of the page select. */
+    idx = (val & 0x80) ? 1 : 0;
+    if (idx >= epoch_rom_pages)
+        idx = 0;
+    epoch_rom_cur = idx;
+    epoch_rom_sel = epoch_rom_pagebuf[idx];
+    /* [T1000 方案] 取指走映射的 exec 指针，必须随换页一起重设 */
+    mem_mapping_set_exec(&epoch_rom_map, epoch_rom_sel);
+
+    pclog("3477: ROMPG out 0x390 = %02X -> page %d pc=%04X:%04X\n",
+          val, idx, cs >> 4, cpu_state.pc);
+}
+
+
 
 enum epoch_nvr_ADDR {
     epoch_nvr_SECOND1,
@@ -483,10 +581,12 @@ epoch_out(uint16_t addr, uint16_t val, void *priv)
         case LC_DATA:
             if (epoch->crtioenabled == 0)
                 return;
-            if (!(epoch->crtcaddr == LC_CURSOR_LOC_HIGH || epoch->crtcaddr == LC_CURSOR_LOC_LOWJ))
+            /* [PROBE] EPOCH3477_LCDATA=1: log every (index,value) pair the guest
+               writes through 0x3D0/0x3D1 - that is where the card's mode setup
+               lives. */
+            if (!(epoch->crtcaddr == LC_CURSOR_LOC_HIGH || epoch->crtcaddr == LC_CURSOR_LOC_LOWJ)) {
                 epoch_iolog("%04X:%04X epoch Out addr %03X idx %02X val %02X (%d)\n", cs >> 4, cpu_state.pc, addr, epoch->crtcaddr, val, val);
-              /* [PROBE] EPOCH3477_LCDATA=1: log every (index,value) pair the guest
-                 writes through 0x3D0/0x3D1 - that is where the card's mode setup lives. */
+            }
               if (pb(PB_LCDATA)) {
                   static uint8_t lc_seen[256];
                   static int lc_init = 0;
@@ -1676,7 +1776,7 @@ epoch_cram_writeb(uint32_t addr, uint8_t val, void *priv)
 static void
 epoch_cram_writew(uint32_t addr, uint16_t val, void *priv)
 {
-    static int dbg_n = 0;
+
 
     // epoch_log("epoch_cram_writ   ew: Write to %x, val %x\n", addr, val);
     epoch_t *epoch = (epoch_t *) priv;
@@ -1972,6 +2072,20 @@ epoch_swtimer_write(epoch_t *epoch, uint8_t val)
     }
 }
 
+/* [MODEL] 5250 适配器状态（端口映射由 gdbstub 运行期实测：0x1C0 控制 / 0x1C1 寄存器 /
+   0x1C2 选通 / 0x1C6 数据+两相握手） */
+static uint8_t    epoch_adr_reg;
+static uint8_t    epoch_adr_latch;
+static uint8_t    epoch_adr_phase = 1;
+
+
+static int epoch_adr_bitcnt;
+static int epoch_adr_rst;
+static int epoch_adr_wait;
+static int epoch_adr_resp_bit;
+static uint16_t epoch_adr_shift;
+static uint16_t epoch_adr_payload;
+
 static uint8_t
 epoch_misc_in(uint16_t port, void *priv)
 {
@@ -1979,6 +2093,22 @@ epoch_misc_in(uint16_t port, void *priv)
     uint8_t           ret = 0xff;
 
     switch (port) {
+        case 0x1C1:
+            if (pb(PB_ADR))
+                ret = epoch_adr_reg;
+            break;
+        case 0x1C2:
+        case 0x1C3:
+            if (pb(PB_ADR))
+                ret = 0xff;
+            break;
+        case 0x1C6: { static int adr_in_dbg; if (adr_in_dbg < 400) { pclog("3477: IN1C6 #%d latch=%02X phase=%d reg=%02X bitcnt=%d wait=%d\n", adr_in_dbg, epoch_adr_latch, epoch_adr_phase, epoch_adr_reg, epoch_adr_bitcnt, epoch_adr_wait); } adr_in_dbg++; } 
+            if (pb(PB_ADR)) {
+                /* bit1 = 握手相位；bit4/bit6 = 已写值回显；bit7 = 从设备数据入（暂 0） */
+                ret = (uint8_t) ((epoch_adr_latch & 0x7d) | (epoch_adr_phase ? 0x02 : 0x00));
+            }
+            break;
+
         case 0x400:
             /* Display-RAM plane select (3477-S).  The burn-in reads it back
                and keeps bit 5, which therefore reads set. */
@@ -2007,50 +2137,15 @@ x1xx xxxx: Sense DREQ? (only used in diag test)
                     ret |= 0x40;
             if (epoch->testsw)
                 ret |= 0x02;
-            /* [AB] Test-harness switch: the 3477-S test suite contains a step
-               that waits for the operator to flip the rear-panel test switch.
-               NOTE (measured, do not retry): toggling this bit on a *read
-               counter* or on a *timer* cannot satisfy that wait loop.  86Box
-               detects the tight I/O polling loop and fast-forwards it: the
-               port handler is not called once per repeat (the log shows a
-               single call with a huge '*N repeats*' count) and the refresh
-               timers do not advance either.  So the loop is unsatisfiable in
-               the model and the ROS must be run with the switch reading off
-               (testsw=0, where the wait exits immediately).  This hook is kept
-               for the 5535-M path only and is off by default.
-               that waits for the operator to flip the rear-panel test switch
-               (A0h bit1 transition: F8DE:02F5 waits for 0, F8DE:02FB waits for
-               1).  With TESTSW_AUTO=1 the bit toggles every 20000 reads of A0h
-               so that wait loop gets its transition while ordinary branch
-               logic (a handful of reads) still sees a stable value.  Off by
-               default - it simulates an operator action, it is not a hardware
-               behaviour. */
-            {
-                static int auto_sw = -1;
-                if (auto_sw < 0)
-                    auto_sw = (getenv("TESTSW_AUTO") != NULL);
-                if (auto_sw) {
-                    /* [3477-S] Rear-panel test switch.  The ROM waits for a
-                       0 -> 1 transition *observed inside its own poll loop* at
-                       F8DE:02F5 (loop while bit1 == 1) then F8DE:02FB (loop
-                       while bit1 == 0).  A global read counter is no use - the
-                       ROM has already read A0h thousands of times before it
-                       gets there, so bit1 must be delivered per-visit: hold 0
-                       for the first few polls of that loop, then release to 1,
-                       and reset when the ROM moves on. */
-                    static int  sw_phase = 0;
-                    static long sw_polls = 0;
-                    if ((CS == 0xF8DE) && (cpu_state.pc >= 0x02F5) && (cpu_state.pc <= 0x02FF)) {
-                        if (++sw_polls > 8)
-                            sw_phase = 1;
-                    } else {
-                        sw_polls = 0;
-                        sw_phase = 0;
-                    }
-                    if (sw_phase)
-                        ret |= 0x02;
-                }
-            }
+            /* [3477-S] Rear-panel test switch (0xA0 bit 1) is a STATIC level,
+               not a transition to be awaited: the operator flips it after a
+               system crash and resets, which makes the ROS take the test path
+               at its entry (F8012: `test al,2; jnz`).  The 0->1 "transition"
+               model that used to live here was wrong: the only code that
+               polls bit 1 (F989B/F98A1) sits inside the test program itself
+               (its own switch-verification step) and is never reached on the
+               normal path.  Removed 2026-10-15. */
+
             /* Bit 5 is an undocumented status that reads set. The 5535-M's
                IPL requires it after the timer-2 test and retries that test
                while it is set, so a clear bit turns the test into a hard
@@ -2063,6 +2158,8 @@ x1xx xxxx: Sense DREQ? (only used in diag test)
                pass.  The value is undocumented; the burn-in never reads it. */
             if (epoch_is_3477)
                 ret |= 0x10;
+            /* [FIX] 设备侧状态：bit0 = 自检通过/继续（步驱动器 F800:085F 的 test $1 闸） */
+            ret |= 0x01;
             if (pb(PB_A0LOG))
                 pclog("3477: in 0xA0 = %02X (pc=%04X:%04X)\n", ret, CS, cpu_state.pc);
             break;
@@ -2082,7 +2179,11 @@ x1xx xxxx: No floppy drive
             if (epoch_is_3477) {
                 /* The 3477-S IPL identifies its display as (A2 & 0xA0) == 0x80
                    for the 24-dot panel; the 5550 values (bit 5 set) never match. */
-                ret = epoch->font24 ? 0x88 : 0x22;
+                {
+                    static int f24ovr = -1;
+                    if (f24ovr < 0) { const char *v = getenv("EPOCH3477_FONT24"); f24ovr = v ? atoi(v) : 2; }
+                    ret = ((f24ovr == 2) ? epoch->font24 : f24ovr) ? 0x88 : 0x22;
+                }
                 /* A2h bit7 is the panel/model-configuration bit and stays set
                    even while a memory error is latched.  The floppy-resident
                    IBMBIO picks the 3472/3477 banner with
@@ -2096,6 +2197,8 @@ x1xx xxxx: No floppy drive
                 ret = 0xA8; /* Mono 24 */
             else
                 ret = 0xA2; /* Mono 16 */
+            if (pb(PB_A0LOG))
+                pclog("3477: in 0xA2 = %02X (pc=%04X:%04X) font24=%d\n", ret, CS, cpu_state.pc, ((ret == 0x88) ? 1 : 0));
             break;
 /*
 I/O A3h R: 
@@ -2161,12 +2264,82 @@ xxx1 xxxx: Serial port 2f8h
             break;
     }
     epoch_log("%04X:%04X I/O In %02X: %02X\n", cs >> 4, cpu_state.pc, port, ret);
+    if (pb(PB_ADR) && port >= 0x1B0 && port <= 0x1D6)
+        pclog("3477: ADR in %03X = %02X pc=%04X:%04X\n", port, ret, cs >> 4, cpu_state.pc);
     return ret;
 }
 
 static void
 epoch_misc_out(uint16_t port, uint8_t val, void *priv)
 {
+    if (pb(PB_ADR)) {
+        /* [PROBE] 16 位字发送中的字中握手脉冲（out 1C0=08）：顺手读调用栈拿返回地址 */
+        {
+            static int xfer_dbg;
+            if (port == 0x1C0 && val == 0x08 && xfer_dbg < 6) {
+                uint32_t ssp = (((uint32_t) SS) << 4) + (SP & 0xFFFF);
+                pclog("3477: XFER pc=%04X:%04X ss=%04X sp=%04X w0=%04X w1=%04X w2=%04X\n",
+                      cs >> 4, cpu_state.pc, SS, SP,
+                      (ram[ssp] | (ram[ssp + 1] << 8)),
+                      (ram[ssp + 2] | (ram[ssp + 3] << 8)),
+                      (ram[ssp + 4] | (ram[ssp + 5] << 8)));
+                xfer_dbg++;
+            }
+        }
+        {
+            static int rst_init = 0;
+            if (!rst_init) {
+                const char *r = getenv("EPOCH3477_ADR_RST");
+                epoch_adr_rst = r ? (int) strtoul(r, NULL, 0) : 0;
+                rst_init = 1;
+            }
+            if (epoch_adr_rst && port == epoch_adr_rst) {
+                epoch_adr_bitcnt = 0;
+                epoch_adr_shift   = epoch_adr_payload;
+            }
+        }
+        if (port == 0x1C1) {
+            epoch_adr_reg = (uint8_t) (val | 0x42);   /* [FIX] 设备侧特征位：bit1|bit6 恒置（ROM 握手判据要 0x42） */
+            if ((val & 0x42) == 0x42)
+                epoch_adr_phase = 0;
+        } else if (port == 0x1C2 && (val & 0x04)) {
+            epoch_adr_phase = ((epoch_adr_reg & 0x42) == 0x42) ? 0 : 1;
+        } else if (port == 0x1C6) {
+            /* [MODEL] 位串行从设备：bit6 上升沿推进响应移位寄存器，最高位回读为 bit7 */
+            static int     adr_clk_last;
+            static int     adr_resp_init;
+            static uint8_t adr_resp_shift;
+            static int     adr_rdir;
+                                                                        if (!adr_resp_init) {
+                const char *rv = getenv("EPOCH3477_ADR_RESP");
+                const char *dv = getenv("EPOCH3477_ADR_RDIR");
+                adr_resp_shift = rv ? (uint8_t) strtoul(rv, NULL, 0) : 0;
+                adr_rdir       = dv ? atoi(dv) : 0;
+                {
+                    const char *wv = getenv("EPOCH3477_ADR_WAIT");
+                    const char *pv = getenv("EPOCH3477_ADR_PAYLOAD");
+                    epoch_adr_wait    = wv ? atoi(wv) : 7;
+                    epoch_adr_payload = pv ? (uint16_t) strtoul(pv, NULL, 0) : 0x5400;
+                    epoch_adr_shift   = epoch_adr_payload;
+                }
+                adr_resp_init  = 1;
+            }
+            {
+                int clk = (val & 0x40) ? 1 : 0;
+                (void) clk;
+                {
+                    epoch_adr_bitcnt++;   /* [FIX] 每次 out 0x1C6 都计一拍，不再依赖 bit6 上升沿 */
+                    if (epoch_adr_bitcnt > 600) { epoch_adr_bitcnt = 0; epoch_adr_shift = epoch_adr_payload; }   /* 新帧自动复位 */
+                    if (epoch_adr_bitcnt == epoch_adr_wait)          epoch_adr_resp_bit = 1;
+                    else if (epoch_adr_bitcnt > epoch_adr_wait)    { epoch_adr_resp_bit = (epoch_adr_shift & 0x8000) ? 1 : 0; epoch_adr_shift <<= 1; }
+                    else                                 epoch_adr_resp_bit = 0;
+                }
+                adr_clk_last = clk;
+            }
+            epoch_adr_latch = (uint8_t) ((val & 0x7d) | (epoch_adr_resp_bit ? 0x80 : 0) | (epoch_adr_phase ? 0x02 : 0));
+        }
+    }
+
     epoch_t *epoch = (epoch_t *) priv;
     pit_intf_t *pit_intf = &pit_devs[0];
 
@@ -2175,6 +2348,17 @@ epoch_misc_out(uint16_t port, uint8_t val, void *priv)
     //      cs >> 4, cpu_state.pc, port, val, AX, BX, CX, DX, ES, DI, DS, SI);
     if(port != 0x44)
         epoch_log("%04X:%04X I/O Out %02X: %02X\n", cs >> 4, cpu_state.pc, port, val);
+    /* [PROBE EPOCH3477_ROMW] 3477-S system-ROM window selectors: 0x390 is the
+       one the IPL writes right before jumping from the IPL image into the ROS
+       image (mov al,0x80; mov dx,0x390; out dx,al; ... jmp F800:0092), so its
+       value is what picks which 32 KB page the ROM window shows. */
+    if (pb(PB_ROMW) && (port == 0x390 || port == 0x1B2 || port == 0x2C2 ||
+                       (port >= 0x1B0 && port <= 0x1D6) || (port >= 0x720 && port <= 0x72F)))
+        pclog("3477: ROMW out %03X = %02X pc=%04X:%04X\n",
+              port, val, cs >> 4, cpu_state.pc);
+    if (pb(PB_ADR) && epoch_adr_irq >= 0 &&
+        (port == 0x1C0 || port == 0x1C6 || port == 0x1CA || port == 0x1D0))
+        timer_set_delay_u64(&epoch_adr_timer, TIMER_USEC * 80);
 
     switch (port) {
         case 0x400:
@@ -2198,6 +2382,8 @@ x1xx xxxx: Enable parity update (Disable this -> Write data -> Enable this -> Re
 1xxx xxxx: Enable NMI check
 */
         case 0xA0:
+            if (pb(PB_ROMW))
+                pclog("3477: A0W out A0 = %02X pc=%04X:%04X\n", val, cs >> 4, cpu_state.pc);
             nmi_mask = val & 0x80;
             if (epoch_is_3477) {
                 /* The 3477-S burn-in never writes bit 6: it uses bit 3 as
@@ -2309,6 +2495,8 @@ x1xx xxxx: Enable parity update (Disable this -> Write data -> Enable this -> Re
         /* [3477-S] Write-only memory-window selectors (see epoch_t). */
         case 0x390:
             epoch->map390 = val;
+            if (epoch_is_3477)
+                epoch_rompg_switch(val); /* [ROMPG] no-op unless paging is loaded */
             break;
         case 0x1B2:
             epoch->reg1b2 = val;
@@ -3298,6 +3486,7 @@ epoch_init(UNUSED(const device_t *info))
         epoch->fontcard_isnew = device_get_config_int("font");
     } else {
         epoch->font24 = device_get_config_int("model");
+        { const char *fv = getenv("EPOCH3477_FONT24"); if (fv) epoch->font24 = atoi(fv); }   /* [TEST] 覆盖 A2 显示类型位（0x390 换页门） */
         if (epoch_is_3477) {
             /* The 3477-S is a 24-dot panel, but device_get_config_int()
                returns only the default (0) in this legacy machine init, and
@@ -3389,6 +3578,20 @@ epoch_init(UNUSED(const device_t *info))
                       epoch_misc_in, NULL, NULL, epoch_misc_out, NULL, NULL, epoch);
         io_sethandler(0x1B2, 0x0001,
                       epoch_misc_in, NULL, NULL, epoch_misc_out, NULL, NULL, epoch);
+        if (pb(PB_ADR)) {
+            {
+                const char *e_irq = getenv("EPOCH3477_ADAPTER_IRQ");
+                timer_add(&epoch_adr_timer, epoch_adr_irq_cb, NULL, 0);   /* 0 = 不立即启动，稍后 delay 武装 */
+                epoch_adr_irq = e_irq ? atoi(e_irq) : 5;
+                pclog("3477: ADAPTER IRQ = %d\n", epoch_adr_irq);
+            }
+            /* 只注册 5250 自检实际驱动的端口，避免抢掉启动早期要用的端口 */
+            static const uint16_t adr_ports[] = {0x1B0, 0x1B2, 0x1B6, 0x1C0, 0x1C1, 0x1C2, 0x1C3, 0x1C6, 0x1C7, 0x1C8, 0x1C9, 0x1CA, 0x1CB, 0x1CC, 0x1CD, 0x1CE, 0x1CF, 0x1D0, 0x1D1, 0x1D6};
+            for (int i = 0; i < (int) (sizeof(adr_ports) / sizeof(adr_ports[0])); i++) {
+                io_sethandler(adr_ports[i], 0x0001, epoch_misc_in, NULL, NULL, epoch_misc_out, NULL, NULL, epoch);
+                pclog("3477: ADAPTER port %03X registered\n", adr_ports[i]);
+            }
+        }
         io_sethandler(0x2C2, 0x0001,
                       epoch_misc_in, NULL, NULL, epoch_misc_out, NULL, NULL, epoch);
     }
@@ -3935,8 +4138,59 @@ machine_xt_ibm3477_init(const machine_t *model)
        this window shadowing the font card while the character generator was
        still blank.)  The burn-in is self-contained, so no burn-in failure code
        can be about the lower half.  [Cloud server only, DO NOT USE!!!] */
-    ret = bios_load_linear("roms/machines/ibm3477/3477ipl.bin",
-                           0x000f0000, 65536, 0);
+    if (pb(PB_ROMPG)) {
+        /* [ROMPG] 32 KB paged system ROS in the F8000 window.  Base mappings
+           may not overlap in mem_mapping_add (three rom_init()s at the same
+           address abort the emulator), so the pages live in plain buffers
+           behind ONE external read-handler mapping and the switch is a
+           pointer swap.  F0000-F7FFF is then left to the font card instead of
+           being shadowed by the flat image's lower half. */
+        /* Two pages only: both self-boot from their own 0xFFF50 stub and each
+           carries a 0x390 writer.  card0.bin is NOT a page (no reset vector,
+           no 0x7F40 template, zero 0x390 write sites) - it is a data image. */
+        static const struct { const char *fn; int off; } epg[2] = {
+            { "roms/machines/ibm3477/3477ipl.bin", 0x0000 }, /* page 0: IPL half */
+            { "roms/machines/ibm3477/3477ipl.bin", 0x8000 }, /* page 1: ROS half (== 3477rom.bin) */
+        };
+        int i;
+
+        ret = 0;
+        epoch_rom_pages = 0;
+        for (i = 0; i < 2; i++) {
+            FILE *fp = rom_fopen(epg[i].fn, "rb");
+
+            if (fp == NULL)
+                break;
+            fseek(fp, (long) epg[i].off, SEEK_SET);
+            epoch_rom_pagebuf[i] = malloc(0x8000);
+            if (fread(epoch_rom_pagebuf[i], 1, 0x8000, fp) != 0x8000) {
+                free(epoch_rom_pagebuf[i]);
+                fclose(fp);
+                break;
+            }
+            fclose(fp);
+            epoch_rom_pages = i + 1;
+        }
+        if (epoch_rom_pages) {
+            mem_mapping_add(&epoch_rom_map, 0xf8000, 0x8000,
+                            epoch_rom_readb, epoch_rom_readw, NULL,
+                            NULL, NULL, NULL, NULL,
+                            MEM_MAPPING_EXTERNAL, NULL);
+
+            ret = 1;
+            epoch_rom_cur = -1;
+            {
+            if (getenv("EPOCH3477_ROMX")) epoch_rom_trace = 0;
+            const char *rpp = getenv("EPOCH3477_ROMPG_PAGE");
+            epoch_rompg_switch((uint8_t) (rpp ? atoi(rpp) : 0));
+        } /* [ROMPG] EPOCH3477_ROMPG_PAGE = raw 0x390 value at reset: 0 = page 0 (IPL half, default), 128 = page 1 (ROS half) */ /* reset-visible page = page 0 (IPL half) */
+        }
+        pclog("3477: ROMPG %d pages loaded, mapping %s\n", epoch_rom_pages,
+              epoch_rom_pages ? "at F8000-FFFFF" : "NOT installed");
+    } else {
+        ret = bios_load_linear("roms/machines/ibm3477/3477ipl.bin",
+                               0x000f0000, 65536, 0);
+    }
 
     if (bios_only || !ret)
         return ret;
