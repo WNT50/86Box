@@ -1866,6 +1866,19 @@ epoch_cram_write(uint32_t addr, uint8_t val, void *priv)
             }
         }
     }
+    /* [PROBE 2026-10-15] EPOCH3477_WLOG=1: 记下开头 300 次落在 0xE0000-0xE1FFF
+       的写入（含 val==0 与奇地址），带 PC 与当前 plane —— 用来对账「渲染器读到
+       的文本字符码是否经由本函数写进 CRAM」（写侧普查 distinct=12 只有数字+图案，
+       读侧却读到 "(C)opy right IBM." 的字符码）。 */
+    if (getenv("EPOCH3477_WLOG") && ((addr & 0xfff) >= 0x800) && ((addr & 0xfff) < 0xc00)
+        && (val >= 0x21) && (val <= 0x7e)) {
+        static int wl = 0;
+        if (wl < 400) {
+            wl++;
+            pclog("3477: WLOG #%d addr=%05X val=%02X ('%c') plane=%u pc=%04X:%04X\n",
+                  wl, addr, val, val, epoch->dispbank & 3, cs >> 4, cpu_state.pc);
+        }
+    }
     epoch->cram[epoch_cram_index(epoch, addr)] = val;
     epoch->fullchange = 3;
     // epoch_log("cw %04X:%04X %04X %02X\n", cs >> 4, cpu_state.pc, addr, val);
@@ -1906,7 +1919,10 @@ static void
 epoch_ank_narrow(const uint8_t *src, uint8_t *dst)
 {
     uint32_t rowbits[32];
-    int      c0 = 32, c1 = -1;
+    /* [PROBE 2026-10-15] EPOCH3477_NARROW16=1 复现修复前的行为（只扫 0..15 列），
+       用于 A/B「窄化修复是不是字符显示的必要条件」。默认关（=修复后行为）。 */
+    const int ncol = getenv("EPOCH3477_NARROW16") ? 16 : 32;
+    int      c0 = ncol, c1 = -1;
 
     /* [FIX 2026-10-15] Measure the ink over the whole 32-column cell.  The card
        stores the ASCII set full width with the ink centred (measured in
@@ -1925,7 +1941,7 @@ epoch_ank_narrow(const uint8_t *src, uint8_t *dst)
                            (uint32_t) src[row * 4 + 3];
 
         rowbits[row] = v;
-        for (int col = 0; col < 32; col++) {
+        for (int col = 0; col < ncol; col++) {
             if (v & (0x80000000u >> col)) {
                 if (col < c0)
                     c0 = col;
@@ -1952,7 +1968,7 @@ epoch_ank_narrow(const uint8_t *src, uint8_t *dst)
 
                     if (b <= a)
                         b = a + 1;
-                    for (int col = a; (col < b) && (col < 32); col++) {
+                    for (int col = a; (col < b) && (col < ncol); col++) {
                         if (rowbits[row] & (0x80000000u >> col)) {
                             out |= 1u << (12 - i);
                             break;
@@ -3565,6 +3581,13 @@ epoch_init(UNUSED(const device_t *info))
     // for(int i=0;i<256*1024;i++) /* for debug */
     //     epoch->vram[i] = 0xff;
     epoch->cram              = calloc(1, EPOCH_SIZE_CRAM_ALL);
+    /* [PROBE 2026-10-15] 缓冲区身份：验「渲染器读到的文本字符到底在不在写侧那个
+       cram 里」。跑一次打印各缓冲区基址，看是否与 cram 别名/重叠。 */
+    if (getenv("EPOCH3477_CELL") || getenv("EPOCH3477_WLOG"))
+        pclog("3477: PTROK cram=%p..%p vram=%p..%p hiram=%p (cram_size=%u)\n",
+              (void *) epoch->cram, (void *) (epoch->cram + EPOCH_SIZE_CRAM_ALL - 1),
+              (void *) epoch->vram, (void *) (epoch->vram + EPOCH_SIZE_VRAM - 1),
+              (void *) epoch->hiram, (unsigned) EPOCH_SIZE_CRAM_ALL);
     epoch->hiram             = calloc(1, 0x10000);
     epoch->paritybad         = calloc(1, 0xA0000 >> 3);
     /* Both the 5550 and the 5535-M can carry the kanji font card; the 5550 has
@@ -4244,7 +4267,7 @@ machine_xt_ibm3477_init(const machine_t *model)
        with it filled the diagnostic '0' (CELL probe: chr=0x30 attr=0x08 at
        ma=0x0E70) gains its 131 pixels (PIXEL nz 11440 -> 11571).
        A/B at runtime: compare with the load commented out, or git revert. */
-    if ((epoch->fontcard_rom != NULL) && (epoch->fontcard_pages > 2)) {
+    if (!getenv("EPOCH3477_NOINJ") && (epoch->fontcard_rom != NULL) && (epoch->fontcard_pages > 2)) {
         /* Half-width (ANK) generator: GB2312 row 3.  The position of a code in
            the row is n = code - 0x20 and the row starts at g192 (g192 is the
            full-width '!', verified against the extracted font: g192 = '!',
