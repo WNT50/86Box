@@ -29,6 +29,7 @@
 #include <86box/machine.h>
 #include <86box/io.h>
 #include <86box/dma.h>
+#include <86box/mem.h>
 #include <86box/pic.h>
 #include <86box/timer.h>
 #include <86box/ui.h>
@@ -1860,7 +1861,22 @@ fdc_read(uint16_t addr, void *priv)
                 ret = fdc->stat;
                 if ((fdc->flags & FDC_FLAG_5550) && fdc_3477_trace())
                     pclog("3477: fdc MSR 3F4 -> %02X (stat %02X, power_down %d, pc=%04X:%04X)\n",
-                          ret, fdc->stat, fdc->power_down, CS, cpu_state.pc);
+                      ret, fdc->stat, fdc->power_down, CS, cpu_state.pc);
+                /* [PROBE] 一次性：把客人等待环所在的那段代码抠出来（0650:8780-8850）。
+                   等待点 PC 直方图：48% 落 0650:87CB、13% 在 87DC/8800，需要静态看这是延时环还是超时等待环。 */
+                if (((CS << 4) + cpu_state.pc) == 0xECCB) {
+                    static int dumped = 0;
+                    if (!dumped) {
+                        int i, j;
+                        dumped = 1;
+                        for (j = 0; j < 13; j++) {
+                            pclog("3477: CODE %04X:", 0x8780 + (j * 16));
+                            for (i = 0; i < 16; i++)
+                                pclog(" %02X", mem_readb_phys(0xEC80 + (j * 16) + i));
+                            pclog("\n");
+                        }
+                    }
+                }
                 break;
             case 5: /*Data*/
                 if (fdc->flags & FDC_FLAG_5550)
