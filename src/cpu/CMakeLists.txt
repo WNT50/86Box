@@ -24,6 +24,7 @@ add_library(cpu OBJECT
     808x_marty_86box.c
     vx0.c
     vx0_biu.c
+    8018x.c
     386.c
     386_common.c
     386_dynarec.c
