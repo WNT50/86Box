@@ -976,6 +976,35 @@ epoch_render_text(epoch_t *epoch)
         for (x = 0; x < epoch->hdisp; x += epoch->char_width) {
             chr  = epoch->cram[(epoch->memaddr) & EPOCH_MASK_CRAM];
             attr = epoch->cram[(epoch->memaddr + 1) & EPOCH_MASK_CRAM];
+            /* [PROBE] EPOCH3477_CELL=1: census of text cells the renderer actually
+               consumes (chr/attr/branch) so a black screen can be attributed. */
+            if (getenv("EPOCH3477_CELL")) {
+                static long cn = 0;
+                static unsigned cnt_sbcs, cnt_dbcs, cnt_sp, cnt_invis;
+                static int pal_done = 0;
+                if (!pal_done) {
+                    pal_done = 1;
+                    pclog("3477: CELLPAL egapal[2]=%02X egapal[3]=%02X pal0=%08X pal2=%08X pal3=%08X\n",
+                          epoch->egapal[2], epoch->egapal[3],
+                          epoch->pallook[epoch->egapal[0]], epoch->pallook[epoch->egapal[2]],
+                          epoch->pallook[epoch->egapal[3]]);
+                }
+                cn++;
+                if ((chr != 0x20) && (cn <= 300000)) {
+                    static int nbn = 0;
+                    if (nbn < 60) {
+                        nbn++;
+                        pclog("3477: CELLNB ma=%04X chr=%02X attr=%02X fg=%d bg=%d line=%d\n",
+                              epoch->memaddr & EPOCH_MASK_CRAM, chr, attr, fg, bg, epoch->displine);
+                    }
+                }
+                if (chr == 0x20) cnt_sp++;
+                if (attr & 0x01) cnt_dbcs++; else cnt_sbcs++;
+                if (!(~attr & 0xCC)) cnt_invis++;
+                if ((cn % 20000) == 0)
+                    pclog("3477: CELLSTAT n=%ld sp=%u sbcs=%u dbcs=%u invis=%u\n",
+                          cn, cnt_sp, cnt_sbcs, cnt_dbcs, cnt_invis);
+            }
             // if(chr!=0x20) epoch_log("chr: %x, attr: %x    ", chr, attr);
             if (colormode) /* IO 3E8h, Index 1Dh */
             {                                           /* --Parse attribute byte in color mode-- */
@@ -1323,6 +1352,23 @@ epoch_doblit(int wx, int wy, epoch_t *epoch)
         set_screen_size(xsize, ysize);
         if (video_force_resize_get())
             video_force_resize_set(0);
+    }
+    /* [PROBE] EPOCH3477_PIXEL=1: count non-zero pixels in the frame about to be
+       blitted (every 200 frames + the first 3), so "black screen" is measurable. */
+    if (getenv("EPOCH3477_PIXEL")) {
+        static long fr = 0;
+        fr++;
+        if ((fr <= 3) || ((fr % 200) == 0)) {
+            unsigned long nz = 0, tot = 0;
+            for (int yy = 0; yy < ysize && yy < buffer32->h; yy++) {
+                uint32_t *row = (uint32_t *) buffer32->line[yy];
+                for (int xx = 0; xx < xsize && xx < buffer32->w; xx++) {
+                    tot++;
+                    if (row[xx] & 0x00FFFFFF) nz++;
+                }
+            }
+            pclog("3477: PIXEL frame=%ld size=%dx%d nz=%lu/%lu\n", fr, xsize, ysize, nz, tot);
+        }
     }
     video_blit_memtoscreen(32, 0, xsize, ysize);
     frames++;
