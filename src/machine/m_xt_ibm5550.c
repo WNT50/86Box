@@ -463,6 +463,18 @@ epoch_out(uint16_t addr, uint16_t val, void *priv)
                 return;
             if (!(epoch->crtcaddr == LC_CURSOR_LOC_HIGH || epoch->crtcaddr == LC_CURSOR_LOC_LOWJ))
                 epoch_iolog("%04X:%04X epoch Out addr %03X idx %02X val %02X (%d)\n", cs >> 4, cpu_state.pc, addr, epoch->crtcaddr, val, val);
+              /* [PROBE] EPOCH3477_LCDATA=1: log every (index,value) pair the guest
+                 writes through 0x3D0/0x3D1 - that is where the card's mode setup lives. */
+              if (getenv("EPOCH3477_LCDATA")) {
+                  static uint8_t lc_seen[256];
+                  static int lc_init = 0;
+                  if (!lc_init) { memset(lc_seen, 0xff, sizeof(lc_seen)); lc_init = 1; }
+                  if (lc_seen[epoch->crtcaddr] != (uint8_t) val) {
+                      lc_seen[epoch->crtcaddr] = (uint8_t) val;
+                      pclog("3477: LCDATA idx=%02X val=%02X pc=%04X:%04X\n",
+                            epoch->crtcaddr, val, cs >> 4, cpu_state.pc);
+                  }
+              }
             if (!(epoch->crtc[epoch->crtcaddr] ^ val))
                 return;
             // switch (epoch->crtcaddr) {
@@ -507,6 +519,10 @@ epoch_out(uint16_t addr, uint16_t val, void *priv)
             break;
         case LS_MODE:
             /* Bit 3: Video output enable, Bit 1: Graphic mode (switch 16 / 9 bit word in Font 16 system) */
+    /* [PROBE] EPOCH3477_MODE=1: log every CRTC mode write (text 04 vs APA 09/0A). */
+    if (getenv("EPOCH3477_MODE"))
+        pclog("3477: CRTMODE <- %02X (was %02X) pc=%04X:%04X\n",
+              (unsigned) (val & 0xff), (unsigned) (epoch->crtmode & 0xff), cs >> 4, cpu_state.pc);
             epoch->crtmode = val;
             epoch_recalctimings(epoch);
             // epoch->attrff ^= 1;
@@ -865,6 +881,16 @@ getfont_ps55dbcs_vram(epoch_t *epoch, int32_t code, int32_t line)
         font <<= 8;
         code++;
         font |= epoch->vram[code];
+        /* [PROBE] EPOCH3477_GLYPH24=1: dump the font-24 glyph words actually fetched
+           (base offset in vram + assembled 32-bit row) so on-screen text can be
+           reconstructed outside the emulator. */
+        if (getenv("EPOCH3477_GLYPH24")) {
+            static long gn24 = 0;
+            if (gn24 < 400) {
+                gn24++;
+                pclog("3477: G24 n=%ld base=%05X font=%08X\n", gn24, code - 3, font);
+            }
+        }
     } else { /* Font 16 (2 x 9 x 21) */
         int32_t bit9addr = getaddr_9bitword(code);
         int bitnum = bit9addr & 7;
@@ -1466,6 +1492,28 @@ epoch_poll(void *priv)
 static void
 epoch_vram_write(uint32_t addr, uint8_t val, void *priv)
 {
+    /* [PROBE] EPOCH3477_VDUMP=1: where do the guest plane writes actually land
+       in epoch->vram, and does the text renderer's glyph slot (0x38000+code*0x80)
+       already contain them?  Dumps 3 windows every 8192 byte-writes. */
+        /* [PROBE] EPOCH3477_VD2=1: one-shot structure dump of the guest's plane
+       region: per-128-byte block, how many bytes are non-zero + first 8 bytes. */
+    if (getenv("EPOCH3477_VD2")) {
+        static int done = 0;
+        static long wn2 = 0;
+        if (!done && ((++wn2 % 8192) == 0)) {
+            char b[64]; int blk, kk;
+            done = 1;
+            pclog("3477: VD2 === guest plane region, per 128B block ===\n");
+            for (blk = 0; blk < 55; blk++) {
+                uint8_t *q = ((epoch_t *) priv)->vram + blk * 128;
+                int nz = 0;
+                for (kk = 0; kk < 128; kk++) if (q[kk]) nz++;
+                for (kk = 0; kk < 8; kk++) sprintf(&b[kk * 3], " %02X", q[kk]);
+                b[24] = 0;
+                pclog("3477: VD2 blk%02d nz=%3d %s\n", blk, nz, b);
+            }
+        }
+    }
     /* [PROBE] EPOCH3477_PLANE=1: census of guest writes into the display
        planes (0xA0000-0xBFFFF, 0xC1000-0xDFFFF).  A large count means the
        guest delivers glyph BITMAPS there rather than only codes in CRAM. */
@@ -1494,7 +1542,8 @@ epoch_vram_write(uint32_t addr, uint8_t val, void *priv)
             bl[0] = 0;
             for (int b = 0; b < 64; b++)
                 if (blk[b])
-                    blp += sprintf(&bl[blp], "%02X:%u ", b * 256, blk[b]);
+                    if (blp < ((int) sizeof(bl) - 24))
+                        blp += sprintf(&bl[blp], "%02X:%u ", b * 256, blk[b]);
             pclog("3477: PLANEBLK %s\n", bl);
             pclog("3477: PLANEW n=%ld addr=%06X=%02X [%06X..%06X] distinct=%d top=%02X:%d %02X:%d %02X:%d %02X:%d\n",
                   pn, addr, val, pmin, pmax, distinct,
@@ -3052,6 +3101,20 @@ epoch_fontcard_set_page(epoch_t *epoch, uint32_t page)
 static uint8_t
 epoch_fontcard_readb(uint32_t addr, void *priv)
 {
+    /* [PROBE] EPOCH3477_FCRD=1: census of guest READS of the card window.
+       Heavy reads at regular strides mean the guest (or the controller path)
+       is fetching glyphs from the card itself. */
+    if (getenv("EPOCH3477_FCRD")) {
+        static long rn = 0;
+        static unsigned pg[8];
+        rn++;
+        pg[(addr >> 12) & 7]++;
+        if (rn <= 10)
+            pclog("3477: FCRD n=%ld addr=%05X pc=%04X:%04X\n", rn, addr, cs >> 4, cpu_state.pc);
+        else if ((rn % 4096) == 0)
+            pclog("3477: FCRD n=%ld addr=%05X pages=%u,%u,%u,%u,%u,%u,%u,%u\n", rn, addr,
+                  pg[0],pg[1],pg[2],pg[3],pg[4],pg[5],pg[6],pg[7]);
+    }
     epoch_t *epoch = (epoch_t *) priv;
     uint8_t  ret   = epoch->fontcard_win[addr & (EPOCH_FONTCARD_WIN_SIZE - 1)];
 
@@ -3981,6 +4044,11 @@ machine_xt_ibm3477_init(const machine_t *model)
                reach the clean 80186 baseline. */
             if (getenv("EPOCH3477_TESTMODE") != NULL)
                 epoch->testmode = atoi(getenv("EPOCH3477_TESTMODE"));
+    /* [3477-S] Floppy turbo: the guest's IPL phase is FDC-bound, and this
+       host runs ~9x slower than real time.  EPOCH3477_NOTURBO=1 disables. */
+    if (!getenv("EPOCH3477_NOTURBO")) {
+        fdd_set_turbo(&drives[0], 1);
+    }
             fseek(fp, epoch->testmode ? 0x8000 : 0x0000, SEEK_SET);
             if (fread(rombank, 1, 0x8000, fp) == 0x8000) {
                 memcpy(&rom[0x8000], rombank, 0x8000);
@@ -4011,7 +4079,7 @@ machine_xt_ibm3477_init(const machine_t *model)
        按客人的实现，字模应由 IBMBIO 自己投递；在验证那条路之前，发生器保持为空，
        这样"屏上有没有字"才是有效证据。原注入逻辑保留在 git 历史里
        （a868a2cb8 / 8acca6879 / 6c6d25ef3 / e17d9b4c1），需要时再取回。 */
-    if (0 && (epoch->fontcard_rom != NULL) && (epoch->fontcard_pages > 2)) {
+    if (getenv("EPOCH3477_INJECT") && (epoch->fontcard_rom != NULL) && (epoch->fontcard_pages > 2)) {
         /* Half-width (ANK) generator: GB2312 row 3.  The position of a code in
            the row is n = code - 0x20 and the row starts at g192 (g192 is the
            full-width '!', verified against the extracted font: g192 = '!',

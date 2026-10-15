@@ -1133,8 +1133,8 @@ fdc_write(uint16_t addr, uint8_t val, void *priv)
                    path below, which assigns stat = 0x90 (CB=1, DIO=0) and destroys the
                    result phase the guest is still reading.  3477-S's BIOS then polls
                    MSR for DIO (0xD0) forever and ends up in the CCCC runaway loop. */
-                if (epoch_is_3477 && fdc->paramstogo)
-                    return;
+                if (epoch_is_3477 && fdc->paramstogo && !getenv("EPOCH3477_NOFDCDROP"))
+                    return;   /* [PROBE] EPOCH3477_NOFDCDROP=1 restores the old behaviour */
                 if (fdc->fifointest) {
                     /* Write FIFO buffer in the test mode (PS/55) */
                     fdc_log("FIFO buffer position = %X\n", ((fifo_t *) fdc->fifo_p)->end);
