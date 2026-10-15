@@ -3728,12 +3728,49 @@ i3477_shared_close(void *priv)
     free(dev);
 }
 
+/* [PROBE] EPOCH3477_PCSAMPLE=1 时给 0x53B8/0x53B9（客人磁盘服务的完成标志）挂一个
+   2 字节写监视：HB 直方图显示客人 ~63% 时间耗在等 [0x53B8] bit7 的超时环（0650:863F-8648）里，
+   需要当场抓出「谁在什么时候置位」。只记写，不记读（读是热路径）。 */
+static mem_mapping_t i3477_flagmap;
+static long i3477_flag_reads = 0;
+static uint32_t i3477_flag_last = 0xFFFFFFFF;
+static uint8_t
+i3477_flag_readb(uint32_t addr, void *priv)
+{
+    i3477_flag_reads++;
+    if (i3477_flag_last == 0xFFFFFFFF) i3477_flag_last = ((uint32_t) CS << 16) | cpu_state.pc;
+    return mem_readb_phys(addr);
+}
+static uint16_t
+i3477_flag_readw(uint32_t addr, void *priv)
+{
+    return mem_readw_phys(addr);
+}
+static void
+i3477_flag_writeb(uint32_t addr, uint8_t val, void *priv)
+{
+    static long wn = 0;
+
+    mem_writeb_phys(addr, val);
+    wn++;
+    if ((wn <= 40) || ((val & 0x80) != 0))
+        pclog("3477: FLAGW n=%ld [%04X] <- %02X pc=%04X:%04X\n",
+              wn, addr, val, CS, cpu_state.pc);
+}
+static void
+i3477_flag_writew(uint32_t addr, uint16_t val, void *priv)
+{
+    i3477_flag_writeb(addr, (uint8_t) (val & 0xff), priv);
+    mem_writeb_phys(addr + 1, (uint8_t) (val >> 8));
+}
+
 static void
 i3477_sample(void *priv)
 {
     i3477_shared_t *dev = (i3477_shared_t *) priv;
     static int      n   = 0;
     static int      hb  = 0;
+    static int      hbn = 0;
 
     /* Fast sampling (20us) but only log the first 60 PCs that are NOT the known
        permanent spin in the ROS delay loop, so the code between delays shows up. */
@@ -3747,7 +3784,16 @@ i3477_sample(void *priv)
        early sample budget is exhausted and whether it is still moving. */
     if (++hb >= 100000) {
         hb = 0;
-        pclog("3477: HB PC %04X:%04X\n", CS, cpu_state.pc);
+        hbn++;
+        pclog("3477: HB PC %04X:%04X reads=%ld first=%04X:%04X\n", CS, cpu_state.pc,
+              i3477_flag_reads, (unsigned) (i3477_flag_last >> 16), (unsigned) (i3477_flag_last & 0xFFFF));
+        if (hbn >= 10) {
+            uint8_t fv = mem_readb_phys(0x53B8);
+            if ((fv & 0x80) == 0) {
+                mem_writeb_phys(0x53B8, (uint8_t) (fv | 0x80));
+                pclog("3477: FORCE [53B8] %02X -> %02X (hb=%d)\n", fv, fv | 0x80, hbn);
+            }
+        }
 
         /* What the display controller would draw right now. */
         if (epoch_dbg_cur != NULL) {
@@ -3793,6 +3839,9 @@ i3477_shared_init(const device_t *info)
     if (pb(PB_PCSAMPLE)) {
         timer_add(&dev->sample_timer, i3477_sample, dev, 0);
         timer_set_delay_u64(&dev->sample_timer, 50000ULL * TIMER_USEC);
+        /* 同一开关下顺带装 0x53B8 写监视（2 字节，盖在 RAM 上） */
+        mem_mapping_add(&i3477_flagmap, 0x53B8, 2, i3477_flag_readb, i3477_flag_readw, NULL,
+                        i3477_flag_writeb, i3477_flag_writew, NULL, NULL, MEM_MAPPING_EXTERNAL, dev);
     }
 
     return dev;
