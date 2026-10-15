@@ -982,6 +982,7 @@ epoch_render_text(epoch_t *epoch)
                 static long cn = 0;
                 static unsigned cnt_sbcs, cnt_dbcs, cnt_sp, cnt_invis;
                 static unsigned rchr_hist[256];
+                static int nbn_total = 0;
                 static int pal_done = 0;
                 if (!pal_done) {
                     pal_done = 1;
@@ -991,6 +992,29 @@ epoch_render_text(epoch_t *epoch)
                           epoch->pallook[epoch->egapal[3]]);
                 }
                 cn++;
+                /* [PROBE] EPOCH3477_CELL: 每个非空格字符码第一次出现时打一行（码 / 属性 /
+                   当前 plane / 邻字节），用于回答「渲染器读到的这些码是不是 CPU 真写进
+                   CRAM 的」——写侧普查（CRAMW）只见到 54/AB/20/30 四种值，而读侧
+                   distinct=56，两边必须对齐。 */
+                if ((chr != 0x20) && (nbn_total < 256)) {
+                    static uint8_t seen[256];
+                    if (!seen[chr]) {
+                        seen[chr] = 1;
+                        nbn_total++;
+                        pclog("3477: CELLNEW chr=%02X attr=%02X ma=%04X plane=%u "
+                              "line=%d scanline=%d nb=%02X %02X %02X %02X %02X %02X %02X %02X\n",
+                              chr, attr, epoch->memaddr & EPOCH_MASK_CRAM, epoch->dispbank & 3,
+                              epoch->displine, epoch->scanline,
+                              epoch->cram[(epoch->memaddr - 4) & EPOCH_MASK_CRAM],
+                              epoch->cram[(epoch->memaddr - 3) & EPOCH_MASK_CRAM],
+                              epoch->cram[(epoch->memaddr - 2) & EPOCH_MASK_CRAM],
+                              epoch->cram[(epoch->memaddr - 1) & EPOCH_MASK_CRAM],
+                              attr,
+                              epoch->cram[(epoch->memaddr + 2) & EPOCH_MASK_CRAM],
+                              epoch->cram[(epoch->memaddr + 3) & EPOCH_MASK_CRAM],
+                              epoch->cram[(epoch->memaddr + 4) & EPOCH_MASK_CRAM]);
+                    }
+                }
                 if (chr != 0x20) {
                     rchr_hist[chr]++;
                     static int nbn = 0;
@@ -1808,6 +1832,22 @@ epoch_cram_write(uint32_t addr, uint8_t val, void *priv)
                       ntext, mintx, maxtx, addr, val,
                       distinct, top_c[0], top_n[0], top_c[1], top_n[1],
                       top_c[2], top_n[2], top_c[3], top_n[3]);
+                {
+                    /* [PROBE 2026-10-15] 全部非零写值清单：读侧 distinct（rchr_hist）比
+                       写侧 distinct（chr_hist）多，必须逐码比对才能定位缺的是哪些码、
+                       还是口径问题。原打印只给 top-4，看不到全貌。 */
+                    static char vbuf[2048];
+                    int off = 0, nv = 0;
+                    for (int c = 0; c < 256; c++) {
+                        if (!chr_hist[c]) continue;
+                        if (nv++ >= 48) {
+                            off += snprintf(&vbuf[off], sizeof(vbuf) - (size_t) off, " +more");
+                            break;
+                        }
+                        off += snprintf(&vbuf[off], sizeof(vbuf) - (size_t) off, " %02X(%u)", c, chr_hist[c]);
+                    }
+                    pclog("3477: CRAMVALS n=%d:%s\n", nv, vbuf);
+                }
             }
         }
         if (0) {
