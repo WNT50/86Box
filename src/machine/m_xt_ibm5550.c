@@ -95,6 +95,10 @@ enum {
     PB_OUTB = 0, PB_LCDATA, PB_MODE, PB_PIXEL, PB_WLOG, PB_EBTRC,
     PB_EBANK, PB_HIRAM, PB_FCWR, PB_PCSAMPLE, PB_C000LOG, PB_A0LOG, PB_ROMW, PB_ROMPG, PB_ADR, PB_N
 };
+/* [PROBE] 例程出口取指跟踪：命中触发线性地址后记录其后 N 条取指 pc（拿调用者返回地址） */
+static int      epoch_pctrace_left;
+static uint32_t epoch_pctrace_trig = 0xFF03B;   /* 位脉冲原语 ret（文件 0xE03B → 线性 0xFF03B） */
+static int      epoch_pctrace_n = -1;            /* -1 = 尚未从环境读取 */
 static const char *const pb_name[PB_N] = {
     "EPOCH3477_OUTB", "EPOCH3477_LCDATA", "EPOCH3477_MODE", "EPOCH3477_PIXEL",
     "EPOCH3477_WLOG", "EPOCH3477_EBTRC", "EPOCH3477_EBANK", "EPOCH3477_HIRAM",
@@ -257,6 +261,25 @@ epoch_rom_readb(uint32_t addr, void *priv)
     if (epoch_rom_trace < 64) {
         pclog("3477: ROMX off=%04X pc=%04X:%04X\n", addr & 0x7fff, cs >> 4, cpu_state.pc);
         epoch_rom_trace++;
+    }
+    {
+        if (epoch_pctrace_n < 0) {
+            const char *e = getenv("EPOCH3477_PCTRACE");
+            const char *t = getenv("EPOCH3477_PCTRACE_TRIG");
+            epoch_pctrace_n = e ? atoi(e) : 0;
+            if (t)
+                epoch_pctrace_trig = (uint32_t) strtoul(t, NULL, 0);
+        }
+        if (epoch_pctrace_n > 0) {
+            uint32_t lin = ((uint32_t) cs) + cpu_state.pc;   /* cs 为段基（本文件既有用法：cs >> 4 = 段值） */
+            if (epoch_pctrace_left <= 0) {
+                if (lin == epoch_pctrace_trig)
+                    epoch_pctrace_left = epoch_pctrace_n;
+            } else {
+                pclog("3477: PCTRACE %05X\n", lin);
+                epoch_pctrace_left--;
+            }
+        }
     }
     return epoch_rom_sel ? epoch_rom_sel[addr & 0x7fff] : 0xff;
 }
@@ -2049,6 +2072,20 @@ epoch_swtimer_write(epoch_t *epoch, uint8_t val)
     }
 }
 
+/* [MODEL] 5250 适配器状态（端口映射由 gdbstub 运行期实测：0x1C0 控制 / 0x1C1 寄存器 /
+   0x1C2 选通 / 0x1C6 数据+两相握手） */
+static uint8_t    epoch_adr_reg;
+static uint8_t    epoch_adr_latch;
+static uint8_t    epoch_adr_phase = 1;
+
+
+static int epoch_adr_bitcnt;
+static int epoch_adr_rst;
+static int epoch_adr_wait;
+static int epoch_adr_resp_bit;
+static uint16_t epoch_adr_shift;
+static uint16_t epoch_adr_payload;
+
 static uint8_t
 epoch_misc_in(uint16_t port, void *priv)
 {
@@ -2056,13 +2093,20 @@ epoch_misc_in(uint16_t port, void *priv)
     uint8_t           ret = 0xff;
 
     switch (port) {
-        case 0x1C6:
-            /* 5250 适配器自检轮询点（实测 pc=FD43:06B0 / 06C3）：
-               判据① or 0xAF; inc; jz ⇒ 要求 bit6|bit4 置位；
-               判据② and 0x3; jz    ⇒ 要求 bit0/bit1 清零。
-               返回 0x50（选通已受理），两条判据同时满足。 */
-            if (getenv("EPOCH3477_ADAPTER"))
-                ret = 0x50;
+        case 0x1C1:
+            if (pb(PB_ADR))
+                ret = epoch_adr_reg;
+            break;
+        case 0x1C2:
+        case 0x1C3:
+            if (pb(PB_ADR))
+                ret = 0xff;
+            break;
+        case 0x1C6: { static int adr_in_dbg; if (adr_in_dbg < 400) { pclog("3477: IN1C6 #%d latch=%02X phase=%d reg=%02X bitcnt=%d wait=%d\n", adr_in_dbg, epoch_adr_latch, epoch_adr_phase, epoch_adr_reg, epoch_adr_bitcnt, epoch_adr_wait); } adr_in_dbg++; } 
+            if (pb(PB_ADR)) {
+                /* bit1 = 握手相位；bit4/bit6 = 已写值回显；bit7 = 从设备数据入（暂 0） */
+                ret = (uint8_t) ((epoch_adr_latch & 0x7d) | (epoch_adr_phase ? 0x02 : 0x00));
+            }
             break;
 
         case 0x400:
@@ -2114,6 +2158,8 @@ x1xx xxxx: Sense DREQ? (only used in diag test)
                pass.  The value is undocumented; the burn-in never reads it. */
             if (epoch_is_3477)
                 ret |= 0x10;
+            /* [FIX] 设备侧状态：bit0 = 自检通过/继续（步驱动器 F800:085F 的 test $1 闸） */
+            ret |= 0x01;
             if (pb(PB_A0LOG))
                 pclog("3477: in 0xA0 = %02X (pc=%04X:%04X)\n", ret, CS, cpu_state.pc);
             break;
@@ -2133,7 +2179,11 @@ x1xx xxxx: No floppy drive
             if (epoch_is_3477) {
                 /* The 3477-S IPL identifies its display as (A2 & 0xA0) == 0x80
                    for the 24-dot panel; the 5550 values (bit 5 set) never match. */
-                ret = epoch->font24 ? 0x88 : 0x22;
+                {
+                    static int f24ovr = -1;
+                    if (f24ovr < 0) { const char *v = getenv("EPOCH3477_FONT24"); f24ovr = v ? atoi(v) : 2; }
+                    ret = ((f24ovr == 2) ? epoch->font24 : f24ovr) ? 0x88 : 0x22;
+                }
                 /* A2h bit7 is the panel/model-configuration bit and stays set
                    even while a memory error is latched.  The floppy-resident
                    IBMBIO picks the 3472/3477 banner with
@@ -2147,6 +2197,8 @@ x1xx xxxx: No floppy drive
                 ret = 0xA8; /* Mono 24 */
             else
                 ret = 0xA2; /* Mono 16 */
+            if (pb(PB_A0LOG))
+                pclog("3477: in 0xA2 = %02X (pc=%04X:%04X) font24=%d\n", ret, CS, cpu_state.pc, ((ret == 0x88) ? 1 : 0));
             break;
 /*
 I/O A3h R: 
@@ -2220,6 +2272,74 @@ xxx1 xxxx: Serial port 2f8h
 static void
 epoch_misc_out(uint16_t port, uint8_t val, void *priv)
 {
+    if (pb(PB_ADR)) {
+        /* [PROBE] 16 位字发送中的字中握手脉冲（out 1C0=08）：顺手读调用栈拿返回地址 */
+        {
+            static int xfer_dbg;
+            if (port == 0x1C0 && val == 0x08 && xfer_dbg < 6) {
+                uint32_t ssp = (((uint32_t) SS) << 4) + (SP & 0xFFFF);
+                pclog("3477: XFER pc=%04X:%04X ss=%04X sp=%04X w0=%04X w1=%04X w2=%04X\n",
+                      cs >> 4, cpu_state.pc, SS, SP,
+                      (ram[ssp] | (ram[ssp + 1] << 8)),
+                      (ram[ssp + 2] | (ram[ssp + 3] << 8)),
+                      (ram[ssp + 4] | (ram[ssp + 5] << 8)));
+                xfer_dbg++;
+            }
+        }
+        {
+            static int rst_init = 0;
+            if (!rst_init) {
+                const char *r = getenv("EPOCH3477_ADR_RST");
+                epoch_adr_rst = r ? (int) strtoul(r, NULL, 0) : 0;
+                rst_init = 1;
+            }
+            if (epoch_adr_rst && port == epoch_adr_rst) {
+                epoch_adr_bitcnt = 0;
+                epoch_adr_shift   = epoch_adr_payload;
+            }
+        }
+        if (port == 0x1C1) {
+            epoch_adr_reg = (uint8_t) (val | 0x42);   /* [FIX] 设备侧特征位：bit1|bit6 恒置（ROM 握手判据要 0x42） */
+            if ((val & 0x42) == 0x42)
+                epoch_adr_phase = 0;
+        } else if (port == 0x1C2 && (val & 0x04)) {
+            epoch_adr_phase = ((epoch_adr_reg & 0x42) == 0x42) ? 0 : 1;
+        } else if (port == 0x1C6) {
+            /* [MODEL] 位串行从设备：bit6 上升沿推进响应移位寄存器，最高位回读为 bit7 */
+            static int     adr_clk_last;
+            static int     adr_resp_init;
+            static uint8_t adr_resp_shift;
+            static int     adr_rdir;
+                                                                        if (!adr_resp_init) {
+                const char *rv = getenv("EPOCH3477_ADR_RESP");
+                const char *dv = getenv("EPOCH3477_ADR_RDIR");
+                adr_resp_shift = rv ? (uint8_t) strtoul(rv, NULL, 0) : 0;
+                adr_rdir       = dv ? atoi(dv) : 0;
+                {
+                    const char *wv = getenv("EPOCH3477_ADR_WAIT");
+                    const char *pv = getenv("EPOCH3477_ADR_PAYLOAD");
+                    epoch_adr_wait    = wv ? atoi(wv) : 7;
+                    epoch_adr_payload = pv ? (uint16_t) strtoul(pv, NULL, 0) : 0x5400;
+                    epoch_adr_shift   = epoch_adr_payload;
+                }
+                adr_resp_init  = 1;
+            }
+            {
+                int clk = (val & 0x40) ? 1 : 0;
+                (void) clk;
+                {
+                    epoch_adr_bitcnt++;   /* [FIX] 每次 out 0x1C6 都计一拍，不再依赖 bit6 上升沿 */
+                    if (epoch_adr_bitcnt > 600) { epoch_adr_bitcnt = 0; epoch_adr_shift = epoch_adr_payload; }   /* 新帧自动复位 */
+                    if (epoch_adr_bitcnt == epoch_adr_wait)          epoch_adr_resp_bit = 1;
+                    else if (epoch_adr_bitcnt > epoch_adr_wait)    { epoch_adr_resp_bit = (epoch_adr_shift & 0x8000) ? 1 : 0; epoch_adr_shift <<= 1; }
+                    else                                 epoch_adr_resp_bit = 0;
+                }
+                adr_clk_last = clk;
+            }
+            epoch_adr_latch = (uint8_t) ((val & 0x7d) | (epoch_adr_resp_bit ? 0x80 : 0) | (epoch_adr_phase ? 0x02 : 0));
+        }
+    }
+
     epoch_t *epoch = (epoch_t *) priv;
     pit_intf_t *pit_intf = &pit_devs[0];
 
@@ -2233,7 +2353,7 @@ epoch_misc_out(uint16_t port, uint8_t val, void *priv)
        image (mov al,0x80; mov dx,0x390; out dx,al; ... jmp F800:0092), so its
        value is what picks which 32 KB page the ROM window shows. */
     if (pb(PB_ROMW) && (port == 0x390 || port == 0x1B2 || port == 0x2C2 ||
-                       (port >= 0x1B0 && port <= 0x1D6)))
+                       (port >= 0x1B0 && port <= 0x1D6) || (port >= 0x720 && port <= 0x72F)))
         pclog("3477: ROMW out %03X = %02X pc=%04X:%04X\n",
               port, val, cs >> 4, cpu_state.pc);
     if (pb(PB_ADR) && epoch_adr_irq >= 0 &&
@@ -3366,6 +3486,7 @@ epoch_init(UNUSED(const device_t *info))
         epoch->fontcard_isnew = device_get_config_int("font");
     } else {
         epoch->font24 = device_get_config_int("model");
+        { const char *fv = getenv("EPOCH3477_FONT24"); if (fv) epoch->font24 = atoi(fv); }   /* [TEST] 覆盖 A2 显示类型位（0x390 换页门） */
         if (epoch_is_3477) {
             /* The 3477-S is a 24-dot panel, but device_get_config_int()
                returns only the default (0) in this legacy machine init, and
@@ -3457,7 +3578,7 @@ epoch_init(UNUSED(const device_t *info))
                       epoch_misc_in, NULL, NULL, epoch_misc_out, NULL, NULL, epoch);
         io_sethandler(0x1B2, 0x0001,
                       epoch_misc_in, NULL, NULL, epoch_misc_out, NULL, NULL, epoch);
-        if (getenv("EPOCH3477_ADAPTER")) {
+        if (pb(PB_ADR)) {
             {
                 const char *e_irq = getenv("EPOCH3477_ADAPTER_IRQ");
                 timer_add(&epoch_adr_timer, epoch_adr_irq_cb, NULL, 0);   /* 0 = 不立即启动，稍后 delay 武装 */
@@ -3465,9 +3586,7 @@ epoch_init(UNUSED(const device_t *info))
                 pclog("3477: ADAPTER IRQ = %d\n", epoch_adr_irq);
             }
             /* 只注册 5250 自检实际驱动的端口，避免抢掉启动早期要用的端口 */
-            static const uint16_t adr_ports[] = {
-                0x1B0, 0x1B2, 0x1B6, 0x1C0, 0x1C6, 0x1CA, 0x1D0, 0x1D6
-            };
+            static const uint16_t adr_ports[] = {0x1B0, 0x1B2, 0x1B6, 0x1C0, 0x1C1, 0x1C2, 0x1C3, 0x1C6, 0x1C7, 0x1C8, 0x1C9, 0x1CA, 0x1CB, 0x1CC, 0x1CD, 0x1CE, 0x1CF, 0x1D0, 0x1D1, 0x1D6};
             for (int i = 0; i < (int) (sizeof(adr_ports) / sizeof(adr_ports[0])); i++) {
                 io_sethandler(adr_ports[i], 0x0001, epoch_misc_in, NULL, NULL, epoch_misc_out, NULL, NULL, epoch);
                 pclog("3477: ADAPTER port %03X registered\n", adr_ports[i]);

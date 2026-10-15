@@ -56,7 +56,7 @@ EOF
 KBD=${6:-keyboard_ps55}   # 3477-S 用 PS/55 键盘（有 FLAG_PS2_KBD）；此前默认 keyboard_at 导致 0xF0 被拒
 sed -i "s/^keyboard_type = .*/keyboard_type = $KBD/" "$d/86box.cfg"
 
-setsid bash -c "cd '$d' && exec '$BIN' -C '$d/86box.cfg' -R '$ROMS1' -R '$ROMS2' -L '$d/86box-$TAG.log' ${IMG:+-I A:$IMG} >'$d/stdout-$TAG.log' 2>&1" </dev/null &
+setsid bash -c "cd '$d' && exec stdbuf -o0 '$BIN' -C '$d/86box.cfg' -R '$ROMS1' -R '$ROMS2' -L '$d/86box-$TAG.log' ${IMG:+-I A:$IMG} >'$d/stdout-$TAG.log' 2>&1" </dev/null &
 pid=$!
 echo "跑 $SECS 秒（tag=$TAG, pid=$pid）…"
 sleep "$SECS"
