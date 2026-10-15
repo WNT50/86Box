@@ -23,8 +23,7 @@ TM=0 bash run3477.sh 1500 long3477b 0      # 1500 秒；TM=0 = 系统 ROS（真�
 
 - **时长是第 1 个位置参数**，只给 `timeout` 不管用（脚本内部默认 150 s）。
 - `run3477.sh` 每次用 here-doc **重生成 cfg**，手工改 cfg 会被覆盖；要改就改脚本。
-- **软盘 turbo 在 cfg 里没有对应的键**，只能由机器代码 `fdd_set_turbo(&drives[0], 1)`
-  设置（本分支已在 3477 的 init 路径里打开；`EPOCH3477_NOTURBO=1` 可关）。
+- **软盘 turbo 默认 OFF**。3477-S 的 ROS 在 turbo 开启时识别不到软驱；需要显式 `EPOCH3477_TURBO=1` 或 `TURBO=1` 才打开。
 - 无声卡的环境要加 `ALSOFT_DRIVERS=null SDL_AUDIODRIVER=dummy`，否则
   OpenAL/ALSA 初始化失败后会触发一次 abort 把跑批打断。
 

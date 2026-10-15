@@ -11,6 +11,8 @@ TAG=${2:-base}
 TM=${3:-1}
 SW=${4:-0}
 IMG=${5:-}
+# turbo 默认 OFF；可用 TURBO=1 或 EPOCH3477_TURBO=1 显式打开
+TURBO=${TURBO:-${EPOCH3477_TURBO:-0}}
 mkdir -p "$d"
 
 pgrep -f "Xvfb :99" >/dev/null || { Xvfb :99 -screen 0 1280x800x24 >/dev/null 2>&1 & sleep 2; }
@@ -48,7 +50,7 @@ tablet_type = none
 
 [Floppy and CD-ROM drives]
 fdd_01_type = 35_2hd
-fdd_01_turbo = ${TURBO:-1}
+fdd_01_turbo = ${TURBO:-0}
 fdd_02_type = none
 EOF
 KBD=${6:-keyboard_ps55}   # 3477-S 用 PS/55 键盘（有 FLAG_PS2_KBD）；此前默认 keyboard_at 导致 0xF0 被拒

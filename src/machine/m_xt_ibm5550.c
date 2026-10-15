@@ -4090,11 +4090,11 @@ machine_xt_ibm3477_init(const machine_t *model)
                reach the clean 80186 baseline. */
             if (getenv("EPOCH3477_TESTMODE") != NULL)
                 epoch->testmode = atoi(getenv("EPOCH3477_TESTMODE"));
-    /* [3477-S] Floppy turbo: the guest's IPL phase is FDC-bound, and this
-       host runs ~9x slower than real time.  EPOCH3477_NOTURBO=1 disables. */
-    if (!getenv("EPOCH3477_NOTURBO")) {
-        fdd_set_turbo(&drives[0], 1);
-    }
+    /* [3477-S] Floppy turbo: EPOCH3477_TURBO=1 enables.  Default is OFF because
+       the 3477-S ROS does not recognise the drive when turbo is active. */
+            if (getenv("EPOCH3477_TURBO")) {
+                fdd_set_turbo(&drives[0], 1);
+            }
             fseek(fp, epoch->testmode ? 0x8000 : 0x0000, SEEK_SET);
             if (fread(rombank, 1, 0x8000, fp) == 0x8000) {
                 memcpy(&rom[0x8000], rombank, 0x8000);
