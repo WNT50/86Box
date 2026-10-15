@@ -2,10 +2,10 @@
 # 3477-S 复现跑批（我的独立 worktree；不碰用户分支）
 # 用法: run3477.sh [秒数] [标签] [testmode] [testsw] [软盘镜像]
 export DISPLAY=:99
-BIN=/home/ubuntu/86box-work/src-3477/build/regular/src/86Box
+BIN=/home/ubuntu/documents/86box/src-3477/build/regular/src/86Box
 ROMS1=/home/ubuntu/86Box-roms
-ROMS2=/home/ubuntu/86box-work/roms-3477
-d=/home/ubuntu/86box-work/run3477
+ROMS2=/home/ubuntu/documents/86box/roms-3477
+d=/home/ubuntu/documents/86box/run3477
 SECS=${1:-150}
 TAG=${2:-base}
 TM=${3:-1}

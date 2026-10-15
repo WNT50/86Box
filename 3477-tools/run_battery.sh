@@ -10,7 +10,7 @@
 # 不报的：日志行数、D0/90 次数、平面写 0~8 这类抖动。
 # 软盘 turbo 默认开（run3477.sh 生成的 cfg 带 fdd_01_turbo=1，TURBO=0 可关）。
 set -u
-S=/home/ubuntu/86box-work
+S=/home/ubuntu/documents/86box
 OUT=$S/battery
 KNOWN_MODES="04 10 94"
 mkdir -p "$OUT"

@@ -6,7 +6,7 @@
 """
 import re, sys, itertools, collections
 
-path = sys.argv[1] if len(sys.argv) > 1 else "/home/ubuntu/86box-work/run3477/86box-g24.log"
+path = sys.argv[1] if len(sys.argv) > 1 else "/home/ubuntu/documents/86box/run3477/86box-g24.log"
 limit = int(sys.argv[2]) if len(sys.argv) > 2 else 6
 
 pat = re.compile(r"G24 n=(\d+) base=([0-9A-F]+) font=([0-9A-F]{8})")

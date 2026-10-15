@@ -981,6 +981,7 @@ epoch_render_text(epoch_t *epoch)
             if (getenv("EPOCH3477_CELL")) {
                 static long cn = 0;
                 static unsigned cnt_sbcs, cnt_dbcs, cnt_sp, cnt_invis;
+                static unsigned rchr_hist[256];
                 static int pal_done = 0;
                 if (!pal_done) {
                     pal_done = 1;
@@ -990,20 +991,34 @@ epoch_render_text(epoch_t *epoch)
                           epoch->pallook[epoch->egapal[3]]);
                 }
                 cn++;
-                if ((chr != 0x20) && (cn <= 300000)) {
+                if (chr != 0x20) {
+                    rchr_hist[chr]++;
                     static int nbn = 0;
-                    if (nbn < 60) {
+                    if (nbn < 10) {
                         nbn++;
-                        pclog("3477: CELLNB ma=%04X chr=%02X attr=%02X fg=%d bg=%d line=%d\n",
-                              epoch->memaddr & EPOCH_MASK_CRAM, chr, attr, fg, bg, epoch->displine);
+                        pclog("3477: CELLNB ma=%04X chr=%02X attr=%02X fg=%d bg=%d line=%d scanline=%d\n",
+                              epoch->memaddr & EPOCH_MASK_CRAM, chr, attr, fg, bg, epoch->displine, epoch->scanline);
                     }
                 }
                 if (chr == 0x20) cnt_sp++;
                 if (attr & 0x01) cnt_dbcs++; else cnt_sbcs++;
                 if (!(~attr & 0xCC)) cnt_invis++;
-                if ((cn % 20000) == 0)
-                    pclog("3477: CELLSTAT n=%ld sp=%u sbcs=%u dbcs=%u invis=%u\n",
-                          cn, cnt_sp, cnt_sbcs, cnt_dbcs, cnt_invis);
+                if ((cn % 20000) == 0) {
+                    int distinct = 0, top_c[4] = {0,0,0,0}, top_n[4] = {0,0,0,0};
+                    for (int c = 0; c < 256; c++) {
+                        if (!rchr_hist[c]) continue;
+                        distinct++;
+                        for (int t = 0; t < 4; t++)
+                            if (rchr_hist[c] > top_n[t]) {
+                                for (int u = 3; u > t; u--) { top_n[u] = top_n[u-1]; top_c[u] = top_c[u-1]; }
+                                top_n[t] = rchr_hist[c]; top_c[t] = c;
+                                break;
+                            }
+                    }
+                    pclog("3477: CELLSTAT n=%ld sp=%u sbcs=%u dbcs=%u invis=%u distinct=%d top=%02X(%u) %02X(%u) %02X(%u) %02X(%u)\n",
+                          cn, cnt_sp, cnt_sbcs, cnt_dbcs, cnt_invis,
+                          distinct, top_c[0], top_n[0], top_c[1], top_n[1], top_c[2], top_n[2], top_c[3], top_n[3]);
+                }
             }
             // if(chr!=0x20) epoch_log("chr: %x, attr: %x    ", chr, attr);
             if (colormode) /* IO 3E8h, Index 1Dh */
@@ -1538,6 +1553,27 @@ epoch_poll(void *priv)
 static void
 epoch_vram_write(uint32_t addr, uint8_t val, void *priv)
 {
+    /* [PROBE] EPOCH3477_VPAGE=1: 4 KB 页直方图 —— 客人往显示区写字节时落到了
+       哪些页（内部偏移 0..0x3FFFF）。用于回答「字形发生器区（0x30000/0x38000）
+       是否由客人自己投递」：若 0x30..0x3F 页计数恒为 0，则客人从不写发生器。 */
+    if (getenv("EPOCH3477_VPAGE")) {
+        static long vp_n = 0;
+        static unsigned vp_hist[64];
+        uint32_t a = addr & EPOCH_MASK_VRAM;
+        vp_hist[(a >> 12) & 63]++;
+        vp_n++;
+        if ((vp_n <= 4) || ((vp_n % 8192) == 0)) {
+            char b[512];
+            int  bl = 0;
+            for (int pg = 0; pg < 64; pg++) {
+                if (!vp_hist[pg]) continue;
+                bl += snprintf(&b[bl], sizeof(b) - bl - 1, " %02X:%u", pg, vp_hist[pg]);
+                if (bl >= (int) sizeof(b) - 40) break;
+            }
+            b[bl] = 0;
+            pclog("3477: VPAGE n=%ld nonzero-pages:%s\n", vp_n, b);
+        }
+    }
     /* [PROBE] EPOCH3477_VDUMP=1: where do the guest plane writes actually land
        in epoch->vram, and does the text renderer's glyph slot (0x38000+code*0x80)
        already contain them?  Dumps 3 windows every 8192 byte-writes. */
@@ -1740,6 +1776,8 @@ epoch_cram_write(uint32_t addr, uint8_t val, void *priv)
             static long     neven = 0, nodd = 0, ntext = 0;
             static uint32_t mine = 0xffffffffu, maxe = 0u, mino = 0xffffffffu, maxo = 0u;
             static uint32_t mintx = 0xffffffffu, maxtx = 0u;
+            /* 字符码分布直方图（偶地址、非空格），用于判断 ROS 在 CRAM 里写了什么字符 */
+            static unsigned chr_hist[256];
             if (addr & 1) { nodd++; if (addr < mino) mino = addr; if (addr > maxo) maxo = addr; }
             else {
                 neven++;
@@ -1748,13 +1786,29 @@ epoch_cram_write(uint32_t addr, uint8_t val, void *priv)
                 if (val != 0x20) {
                     ntext++;
                     if (addr < mintx) mintx = addr; if (addr > maxtx) maxtx = addr;
+                    chr_hist[val]++;
                 }
             }
-            if (((neven + nodd) % 5000) == 0)
+            if (((neven + nodd) % 5000) == 0) {
+                int distinct = 0, top_c[4] = {0,0,0,0}, top_n[4] = {0,0,0,0};
+                for (int c = 0; c < 256; c++) {
+                    if (!chr_hist[c]) continue;
+                    distinct++;
+                    for (int t = 0; t < 4; t++)
+                        if (chr_hist[c] > top_n[t]) {
+                            for (int u = 3; u > t; u--) { top_n[u] = top_n[u-1]; top_c[u] = top_c[u-1]; }
+                            top_n[t] = chr_hist[c]; top_c[t] = c;
+                            break;
+                        }
+                }
                 pclog("3477: CRAMW even=%ld [%05X..%05X] odd=%ld [%05X..%05X] "
-                      "nonblank=%ld [%05X..%05X] last=%05X:%02X\n",
+                      "nonblank=%ld [%05X..%05X] last=%05X:%02X "
+                      "distinct=%d top=%02X(%u) %02X(%u) %02X(%u) %02X(%u)\n",
                       neven, mine, maxe, nodd, mino, maxo,
-                      ntext, mintx, maxtx, addr, val);
+                      ntext, mintx, maxtx, addr, val,
+                      distinct, top_c[0], top_n[0], top_c[1], top_n[1],
+                      top_c[2], top_n[2], top_c[3], top_n[3]);
+            }
         }
         if (0) {
             int i, j;
@@ -1812,8 +1866,18 @@ static void
 epoch_ank_narrow(const uint8_t *src, uint8_t *dst)
 {
     uint32_t rowbits[32];
-    int      c0 = 16, c1 = -1;
+    int      c0 = 32, c1 = -1;
 
+    /* [FIX 2026-10-15] Measure the ink over the whole 32-column cell.  The card
+       stores the ASCII set full width with the ink centred (measured in
+       font.bin: g192 '!' cols 11-16, g207 '0' cols 5-23, g224 'A' cols 3-25,
+       g226 'C' cols 4-23, g251 '/' cols 1-27), i.e. up to 27 columns wide, and
+       the text cell is only 13 dots - so the >13 branch below must re-sample
+       the ink proportionally.  Scanning only columns 0-15 made c1 stop at 15
+       for every glyph wider than the cell, so w came out <= 13 and the
+       proportional branch was never taken: the left half of each character was
+       drawn centred and the right half (which lives in columns 16-31) was
+       dropped.  Verified by rendering the stored words as ASCII art. */
     for (uint32_t row = 0; row < 32; row++) {
         const uint32_t v = ((uint32_t) src[row * 4 + 0] << 24) |
                            ((uint32_t) src[row * 4 + 1] << 16) |
@@ -1821,7 +1885,7 @@ epoch_ank_narrow(const uint8_t *src, uint8_t *dst)
                            (uint32_t) src[row * 4 + 3];
 
         rowbits[row] = v;
-        for (int col = 0; col < 16; col++) {
+        for (int col = 0; col < 32; col++) {
             if (v & (0x80000000u >> col)) {
                 if (col < c0)
                     c0 = col;
@@ -1848,7 +1912,7 @@ epoch_ank_narrow(const uint8_t *src, uint8_t *dst)
 
                     if (b <= a)
                         b = a + 1;
-                    for (int col = a; (col < b) && (col < 16); col++) {
+                    for (int col = a; (col < b) && (col < 32); col++) {
                         if (rowbits[row] & (0x80000000u >> col)) {
                             out |= 1u << (12 - i);
                             break;
@@ -4121,11 +4185,26 @@ machine_xt_ibm3477_init(const machine_t *model)
        columns' first 13 dots, then the right 16 columns' first 13 dots), so the
        machine cuts the 32-column bitmap instead of keeping a second, narrow
        font.  [Cloud server only, DO NOT USE!!!] */
-    /* [停用] 机侧不再从卡 ROM 提取字模并注入发生器 VRAM —— 那是权宜之计（crutch）。
-       按客人的实现，字模应由 IBMBIO 自己投递；在验证那条路之前，发生器保持为空，
-       这样"屏上有没有字"才是有效证据。原注入逻辑保留在 git 历史里
-       （a868a2cb8 / 8acca6879 / 6c6d25ef3 / e17d9b4c1），需要时再取回。 */
-    if (getenv("EPOCH3477_INJECT") && (epoch->fontcard_rom != NULL) && (epoch->fontcard_pages > 2)) {
+    /* [FIX 2026-10-15] The FONT ROM is this machine's glyph source, not a
+       crutch.  The 3477-S ROS never delivers glyphs to the generators: a
+       backward slice of every "mov ds/es,imm" in 3477s_full.dis yields the
+       segment bases 0x0000/0x00xx/0x1000/0x4000/0x8000/0xA000(8)/0xC000(33)/
+       0xE000(29)/0xE100/0xE200(12)/0xE400(16)/0xE800/0xF000(14)/0xF800/0xFFF*,
+       with no 0xD000/0xD800 at all - and 0xD0000/0xD8000 (the guests's view of
+       EPOCH_VRAM_SBEX/SBCS through the 0xC1000-0xDFFFF window) is only
+       reachable from a >= 0xD000 base.  Its only FONT ROM access is the
+       burn-in checksum walk (000F04A0: out 0x400 <- 0xE0..0x00 stepping -0x20,
+       ds = 0xE800, 16384 lodsw/add, 8 x 32 KB banks), which reads and never
+       writes.  The only CRAM writers are the diagnostic status character
+       (000F0599/000F05AA and the shared 000F093B/000F094C helper, es = 0xE000,
+       di = 0xECC/0xE70).  Measured: probe EPOCH3477_VPAGE (4 KB page histogram
+       in epoch_vram_write) shows a 150 s system-ROS run touching only pages
+       0x00/0x01 of the plane (00:5248 01:2944 at n=8192) - pages 0x30..0x3F
+       stay at zero.  So the generator must be filled from the machine side, and
+       with it filled the diagnostic '0' (CELL probe: chr=0x30 attr=0x08 at
+       ma=0x0E70) gains its 131 pixels (PIXEL nz 11440 -> 11571).
+       A/B at runtime: compare with the load commented out, or git revert. */
+    if ((epoch->fontcard_rom != NULL) && (epoch->fontcard_pages > 2)) {
         /* Half-width (ANK) generator: GB2312 row 3.  The position of a code in
            the row is n = code - 0x20 and the row starts at g192 (g192 is the
            full-width '!', verified against the extracted font: g192 = '!',
@@ -4164,7 +4243,8 @@ machine_xt_ibm3477_init(const machine_t *model)
                 epoch_ank_narrow(src, dst);
             }
         }
-        pclog("3477: ANK <- GB2312 row 3 (narrowed to 13 dots); alternate generator <- card page 2\n");
+        pclog("3477: ANK generator <- FONT ROM GB2312 row 3 (narrowed to 13 dots); "
+              "alternate generator <- FONT ROM page 2 (machine-side, guest never writes it)\n");
     } else
         pclog("3477: font ROM not installed, ANK generators left empty\n");
 
