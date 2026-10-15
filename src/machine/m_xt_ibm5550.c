@@ -87,6 +87,28 @@ extern uint8_t *rom; /* [FIX] the ROM buffer bios_load_linear filled */
 #define EPOCH_CONFIG_MONO16 0 /* Model 5551-Axx (Font 16, monochrome) */
 #define EPOCH_CONFIG_MONO24 1 /* Model 5551-Bxx (Font 24, monochrome) */
 
+/* ---- 探针开关（一次性解析，之后按位判断）------------------------------------
+   getenv() 每次调用都要线性扫描 environ：本机显示/IO 热路径（每个文本单元、每个
+   像素、每次 I/O 写）原先每次都调用它，实测把仿真拖慢一倍以上。这里只在首次用
+   到时解析一次并缓存。加新探针时在这里登记一个 PB_*。 */
+enum {
+    PB_OUTB = 0, PB_LCDATA, PB_MODE, PB_PIXEL, PB_WLOG, PB_EBTRC,
+    PB_EBANK, PB_HIRAM, PB_FCWR, PB_PCSAMPLE, PB_C000LOG, PB_A0LOG, PB_N
+};
+static const char *const pb_name[PB_N] = {
+    "EPOCH3477_OUTB", "EPOCH3477_LCDATA", "EPOCH3477_MODE", "EPOCH3477_PIXEL",
+    "EPOCH3477_WLOG", "EPOCH3477_EBTRC", "EPOCH3477_EBANK", "EPOCH3477_HIRAM",
+    "EPOCH3477_FCWR", "EPOCH3477_PCSAMPLE", "EPOCH3477_C000LOG", "EPOCH3477_A0LOG"
+};
+static int pb_flag[PB_N];
+static inline int
+pb(int id)
+{
+    if (pb_flag[id] == 0)
+        pb_flag[id] = (getenv(pb_name[id]) != NULL) ? 1 : -1;
+    return pb_flag[id] > 0;
+}
+
 /* Optional kanji font card: a page ROM behind a 32KB or 48KB RAM window
    at F0000h. Only installed when its ROM image is present, so a machine
    without the card behaves exactly as before. */
@@ -465,7 +487,7 @@ epoch_out(uint16_t addr, uint16_t val, void *priv)
                 epoch_iolog("%04X:%04X epoch Out addr %03X idx %02X val %02X (%d)\n", cs >> 4, cpu_state.pc, addr, epoch->crtcaddr, val, val);
               /* [PROBE] EPOCH3477_LCDATA=1: log every (index,value) pair the guest
                  writes through 0x3D0/0x3D1 - that is where the card's mode setup lives. */
-              if (getenv("EPOCH3477_LCDATA")) {
+              if (pb(PB_LCDATA)) {
                   static uint8_t lc_seen[256];
                   static int lc_init = 0;
                   if (!lc_init) { memset(lc_seen, 0xff, sizeof(lc_seen)); lc_init = 1; }
@@ -520,7 +542,7 @@ epoch_out(uint16_t addr, uint16_t val, void *priv)
         case LS_MODE:
             /* Bit 3: Video output enable, Bit 1: Graphic mode (switch 16 / 9 bit word in Font 16 system) */
     /* [PROBE] EPOCH3477_MODE=1: log every CRTC mode write (text 04 vs APA 09/0A). */
-    if (getenv("EPOCH3477_MODE"))
+    if (pb(PB_MODE))
         pclog("3477: CRTMODE <- %02X (was %02X) pc=%04X:%04X\n",
               (unsigned) (val & 0xff), (unsigned) (epoch->crtmode & 0xff), cs >> 4, cpu_state.pc);
             epoch->crtmode = val;
@@ -706,7 +728,8 @@ epoch_outb(uint16_t addr, uint8_t val, void *priv)
     epoch_t *epoch = (epoch_t *) priv;
 
     epoch_dbg_cur = epoch;
-    pclog("3477: outb %03X <- %02X\n", addr, val);
+    if (pb(PB_OUTB))
+        pclog("3477: outb %03X <- %02X\n", addr, val);
     // epoch_iolog("%04X:%04X epoch Outb addr %03X val %02X es:di=%x:%x ds:si=%x:%x\n", cs >> 4, cpu_state.pc, addr, val, ES, DI, DS, SI);
     epoch->inflipflop = 0;
     switch (addr) {
@@ -881,17 +904,7 @@ getfont_ps55dbcs_vram(epoch_t *epoch, int32_t code, int32_t line)
         font <<= 8;
         code++;
         font |= epoch->vram[code];
-        /* [PROBE] EPOCH3477_GLYPH24=1: dump the font-24 glyph words actually fetched
-           (base offset in vram + assembled 32-bit row) so on-screen text can be
-           reconstructed outside the emulator. */
-        if (getenv("EPOCH3477_GLYPH24")) {
-            static long gn24 = 0;
-            if (gn24 < 400) {
-                gn24++;
-                pclog("3477: G24 n=%ld base=%05X font=%08X\n", gn24, code - 3, font);
-            }
-        }
-    } else { /* Font 16 (2 x 9 x 21) */
+            } else { /* Font 16 (2 x 9 x 21) */
         int32_t bit9addr = getaddr_9bitword(code);
         int bitnum = bit9addr & 7;
         bit9addr >>= 3;
@@ -976,75 +989,7 @@ epoch_render_text(epoch_t *epoch)
         for (x = 0; x < epoch->hdisp; x += epoch->char_width) {
             chr  = epoch->cram[(epoch->memaddr) & EPOCH_MASK_CRAM];
             attr = epoch->cram[(epoch->memaddr + 1) & EPOCH_MASK_CRAM];
-            /* [PROBE] EPOCH3477_CELL=1: census of text cells the renderer actually
-               consumes (chr/attr/branch) so a black screen can be attributed. */
-            if (getenv("EPOCH3477_CELL")) {
-                static long cn = 0;
-                static unsigned cnt_sbcs, cnt_dbcs, cnt_sp, cnt_invis;
-                static unsigned rchr_hist[256];
-                static int nbn_total = 0;
-                static int pal_done = 0;
-                if (!pal_done) {
-                    pal_done = 1;
-                    pclog("3477: CELLPAL egapal[2]=%02X egapal[3]=%02X pal0=%08X pal2=%08X pal3=%08X\n",
-                          epoch->egapal[2], epoch->egapal[3],
-                          epoch->pallook[epoch->egapal[0]], epoch->pallook[epoch->egapal[2]],
-                          epoch->pallook[epoch->egapal[3]]);
-                }
-                cn++;
-                /* [PROBE] EPOCH3477_CELL: 每个非空格字符码第一次出现时打一行（码 / 属性 /
-                   当前 plane / 邻字节），用于回答「渲染器读到的这些码是不是 CPU 真写进
-                   CRAM 的」——写侧普查（CRAMW）只见到 54/AB/20/30 四种值，而读侧
-                   distinct=56，两边必须对齐。 */
-                if ((chr != 0x20) && (nbn_total < 256)) {
-                    static uint8_t seen[256];
-                    if (!seen[chr]) {
-                        seen[chr] = 1;
-                        nbn_total++;
-                        pclog("3477: CELLNEW chr=%02X attr=%02X ma=%04X plane=%u "
-                              "line=%d scanline=%d nb=%02X %02X %02X %02X %02X %02X %02X %02X\n",
-                              chr, attr, epoch->memaddr & EPOCH_MASK_CRAM, epoch->dispbank & 3,
-                              epoch->displine, epoch->scanline,
-                              epoch->cram[(epoch->memaddr - 4) & EPOCH_MASK_CRAM],
-                              epoch->cram[(epoch->memaddr - 3) & EPOCH_MASK_CRAM],
-                              epoch->cram[(epoch->memaddr - 2) & EPOCH_MASK_CRAM],
-                              epoch->cram[(epoch->memaddr - 1) & EPOCH_MASK_CRAM],
-                              attr,
-                              epoch->cram[(epoch->memaddr + 2) & EPOCH_MASK_CRAM],
-                              epoch->cram[(epoch->memaddr + 3) & EPOCH_MASK_CRAM],
-                              epoch->cram[(epoch->memaddr + 4) & EPOCH_MASK_CRAM]);
-                    }
-                }
-                if (chr != 0x20) {
-                    rchr_hist[chr]++;
-                    static int nbn = 0;
-                    if (nbn < 10) {
-                        nbn++;
-                        pclog("3477: CELLNB ma=%04X chr=%02X attr=%02X fg=%d bg=%d line=%d scanline=%d\n",
-                              epoch->memaddr & EPOCH_MASK_CRAM, chr, attr, fg, bg, epoch->displine, epoch->scanline);
-                    }
-                }
-                if (chr == 0x20) cnt_sp++;
-                if (attr & 0x01) cnt_dbcs++; else cnt_sbcs++;
-                if (!(~attr & 0xCC)) cnt_invis++;
-                if ((cn % 20000) == 0) {
-                    int distinct = 0, top_c[4] = {0,0,0,0}, top_n[4] = {0,0,0,0};
-                    for (int c = 0; c < 256; c++) {
-                        if (!rchr_hist[c]) continue;
-                        distinct++;
-                        for (int t = 0; t < 4; t++)
-                            if (rchr_hist[c] > top_n[t]) {
-                                for (int u = 3; u > t; u--) { top_n[u] = top_n[u-1]; top_c[u] = top_c[u-1]; }
-                                top_n[t] = rchr_hist[c]; top_c[t] = c;
-                                break;
-                            }
-                    }
-                    pclog("3477: CELLSTAT n=%ld sp=%u sbcs=%u dbcs=%u invis=%u distinct=%d top=%02X(%u) %02X(%u) %02X(%u) %02X(%u)\n",
-                          cn, cnt_sp, cnt_sbcs, cnt_dbcs, cnt_invis,
-                          distinct, top_c[0], top_n[0], top_c[1], top_n[1], top_c[2], top_n[2], top_c[3], top_n[3]);
-                }
-            }
-            // if(chr!=0x20) epoch_log("chr: %x, attr: %x    ", chr, attr);
+                        // if(chr!=0x20) epoch_log("chr: %x, attr: %x    ", chr, attr);
             if (colormode) /* IO 3E8h, Index 1Dh */
             {                                           /* --Parse attribute byte in color mode-- */
                 bg = 0;                                 /* bg color is always black (the only way to change background color is programming PAL) */
@@ -1122,18 +1067,7 @@ epoch_render_text(epoch_t *epoch)
                            columns are the top 13 bits of the first word. */
                         const uint32_t fbase = fontbase + chr * 0x80 + epoch->scanline * 4;
                         const uint16_t lo = (uint16_t) ((epoch->vram[fbase + 0] << 8) | epoch->vram[fbase + 1]);
-                        if (getenv("EPOCH3477_GLYPH") && (chr != 0x20) && (epoch->scanline == 8)) {
-                            static int gn = 0;
-                            if (gn < 6) {
-                                gn++;
-                                pclog("3477: GLYPH chr=%02X base=%05X fbase=%05X b=%02X %02X %02X %02X %02X %02X %02X %02X\n",
-                                    chr, fontbase, fbase,
-                                    epoch->vram[fbase + 0], epoch->vram[fbase + 1], epoch->vram[fbase + 2],
-                                    epoch->vram[fbase + 3], epoch->vram[fbase + 4], epoch->vram[fbase + 5],
-                                    epoch->vram[fbase + 6], epoch->vram[fbase + 7]);
-                            }
-                        }
-                        uint32_t       mid = (uint32_t) (lo >> 3);
+                                                uint32_t       mid = (uint32_t) (lo >> 3);
 
                         for (uint32_t n = 0; n < 13; n++) {
                             p[n] = epoch->pallook[epoch->egapal[(mid & 0x1000) ? fg : bg]];
@@ -1394,7 +1328,7 @@ epoch_doblit(int wx, int wy, epoch_t *epoch)
     }
     /* [PROBE] EPOCH3477_PIXEL=1: count non-zero pixels in the frame about to be
        blitted (every 200 frames + the first 3), so "black screen" is measurable. */
-    if (getenv("EPOCH3477_PIXEL")) {
+    if (pb(PB_PIXEL)) {
         static long fr = 0;
         fr++;
         if ((fr <= 3) || ((fr % 200) == 0)) {
@@ -1577,86 +1511,10 @@ epoch_poll(void *priv)
 static void
 epoch_vram_write(uint32_t addr, uint8_t val, void *priv)
 {
-    /* [PROBE] EPOCH3477_VPAGE=1: 4 KB 页直方图 —— 客人往显示区写字节时落到了
-       哪些页（内部偏移 0..0x3FFFF）。用于回答「字形发生器区（0x30000/0x38000）
-       是否由客人自己投递」：若 0x30..0x3F 页计数恒为 0，则客人从不写发生器。 */
-    if (getenv("EPOCH3477_VPAGE")) {
-        static long vp_n = 0;
-        static unsigned vp_hist[64];
-        uint32_t a = addr & EPOCH_MASK_VRAM;
-        vp_hist[(a >> 12) & 63]++;
-        vp_n++;
-        if ((vp_n <= 4) || ((vp_n % 8192) == 0)) {
-            char b[512];
-            int  bl = 0;
-            for (int pg = 0; pg < 64; pg++) {
-                if (!vp_hist[pg]) continue;
-                bl += snprintf(&b[bl], sizeof(b) - bl - 1, " %02X:%u", pg, vp_hist[pg]);
-                if (bl >= (int) sizeof(b) - 40) break;
-            }
-            b[bl] = 0;
-            pclog("3477: VPAGE n=%ld nonzero-pages:%s\n", vp_n, b);
-        }
-    }
-    /* [PROBE] EPOCH3477_VDUMP=1: where do the guest plane writes actually land
+        /* [PROBE] EPOCH3477_VDUMP=1: where do the guest plane writes actually land
        in epoch->vram, and does the text renderer's glyph slot (0x38000+code*0x80)
        already contain them?  Dumps 3 windows every 8192 byte-writes. */
-        /* [PROBE] EPOCH3477_VD2=1: one-shot structure dump of the guest's plane
-       region: per-128-byte block, how many bytes are non-zero + first 8 bytes. */
-    if (getenv("EPOCH3477_VD2")) {
-        static int done = 0;
-        static long wn2 = 0;
-        if (!done && ((++wn2 % 8192) == 0)) {
-            char b[64]; int blk, kk;
-            done = 1;
-            pclog("3477: VD2 === guest plane region, per 128B block ===\n");
-            for (blk = 0; blk < 55; blk++) {
-                uint8_t *q = ((epoch_t *) priv)->vram + blk * 128;
-                int nz = 0;
-                for (kk = 0; kk < 128; kk++) if (q[kk]) nz++;
-                for (kk = 0; kk < 8; kk++) sprintf(&b[kk * 3], " %02X", q[kk]);
-                b[24] = 0;
-                pclog("3477: VD2 blk%02d nz=%3d %s\n", blk, nz, b);
-            }
-        }
-    }
-    /* [PROBE] EPOCH3477_PLANE=1: census of guest writes into the display
-       planes (0xA0000-0xBFFFF, 0xC1000-0xDFFFF).  A large count means the
-       guest delivers glyph BITMAPS there rather than only codes in CRAM. */
-    if (getenv("EPOCH3477_PLANE")) {
-        static long pn = 0;
-        static uint32_t pmin = 0xffffffffu, pmax = 0u;
-        static unsigned hist[256], blk[64];
-        pn++;
-        blk[(addr >> 8) & 63]++;
-        if (addr < pmin) pmin = addr;
-        if (addr > pmax) pmax = addr;
-        hist[val]++;
-        if ((pn <= 8) || ((pn % 8192) == 0)) {
-            int distinct = 0, top_v[4] = {0,0,0,0}, top_n[4] = {0,0,0,0};
-            for (int k = 0; k < 256; k++) {
-                if (!hist[k]) continue;
-                distinct++;
-                for (int t = 0; t < 4; t++)
-                    if (hist[k] > top_n[t]) {
-                        for (int u = 3; u > t; u--) { top_n[u] = top_n[u-1]; top_v[u] = top_v[u-1]; }
-                        top_n[t] = hist[k]; top_v[t] = k;
-                        break;
-                    }
-            }
-            char bl[200]; int blp = 0;
-            bl[0] = 0;
-            for (int b = 0; b < 64; b++)
-                if (blk[b])
-                    if (blp < ((int) sizeof(bl) - 24))
-                        blp += sprintf(&bl[blp], "%02X:%u ", b * 256, blk[b]);
-            pclog("3477: PLANEBLK %s\n", bl);
-            pclog("3477: PLANEW n=%ld addr=%06X=%02X [%06X..%06X] distinct=%d top=%02X:%d %02X:%d %02X:%d %02X:%d\n",
-                  pn, addr, val, pmin, pmax, distinct,
-                  top_v[0], top_n[0], top_v[1], top_n[1], top_v[2], top_n[2], top_v[3], top_n[3]);
-        }
-    }
-    epoch_t *epoch = (epoch_t *) priv;
+                epoch_t *epoch = (epoch_t *) priv;
     // epoch_log("epoch_vw: %x %x\n", addr, val);
     addr &= EPOCH_MASK_VRAM;
     epoch->vram[addr] = val;
@@ -1785,95 +1643,19 @@ static void
 epoch_cram_write(uint32_t addr, uint8_t val, void *priv)
 {
     epoch_t *epoch = (epoch_t *) priv;
-    /* [PROBE] EPOCH3477_DUMP=1: on the first two non-zero CRAM writes, dump the
-       three candidate glyph sources (CRAM 0xE0000, machine-preloaded 0x38000 /
-       0x30000) so we can see which one carries the 32x32 bitmaps. */
-    if ((getenv("EPOCH3477_DUMP") != NULL) && (val != 0)) {
-        static int cramn = 0;
-        cramn++;
-        /* Fire at three later points (not the very first write, which only
-           touches the empty code-0 slot) and sample the glyph slot of 'A'
-           (0x41 * 0x80) plus the off-screen CRAM tail the guest writes at. */
-        {
-            /* Parity census: even offsets = character codes, odd = attributes
-               (renderer: chr = cram[memaddr], attr = cram[memaddr + 1]). */
-            static long     neven = 0, nodd = 0, ntext = 0;
-            static uint32_t mine = 0xffffffffu, maxe = 0u, mino = 0xffffffffu, maxo = 0u;
-            static uint32_t mintx = 0xffffffffu, maxtx = 0u;
-            /* 字符码分布直方图（偶地址、非空格），用于判断 ROS 在 CRAM 里写了什么字符 */
-            static unsigned chr_hist[256];
-            if (addr & 1) { nodd++; if (addr < mino) mino = addr; if (addr > maxo) maxo = addr; }
-            else {
-                neven++;
-                if (addr < mine) mine = addr; if (addr > maxe) maxe = addr;
-                /* Non-space character codes tell us whether real text landed. */
-                if (val != 0x20) {
-                    ntext++;
-                    if (addr < mintx) mintx = addr; if (addr > maxtx) maxtx = addr;
-                    chr_hist[val]++;
-                }
-            }
-            if (((neven + nodd) % 5000) == 0) {
-                int distinct = 0, top_c[4] = {0,0,0,0}, top_n[4] = {0,0,0,0};
-                for (int c = 0; c < 256; c++) {
-                    if (!chr_hist[c]) continue;
-                    distinct++;
-                    for (int t = 0; t < 4; t++)
-                        if (chr_hist[c] > top_n[t]) {
-                            for (int u = 3; u > t; u--) { top_n[u] = top_n[u-1]; top_c[u] = top_c[u-1]; }
-                            top_n[t] = chr_hist[c]; top_c[t] = c;
-                            break;
-                        }
-                }
-                pclog("3477: CRAMW even=%ld [%05X..%05X] odd=%ld [%05X..%05X] "
-                      "nonblank=%ld [%05X..%05X] last=%05X:%02X "
-                      "distinct=%d top=%02X(%u) %02X(%u) %02X(%u) %02X(%u)\n",
-                      neven, mine, maxe, nodd, mino, maxo,
-                      ntext, mintx, maxtx, addr, val,
-                      distinct, top_c[0], top_n[0], top_c[1], top_n[1],
-                      top_c[2], top_n[2], top_c[3], top_n[3]);
-                {
-                    /* [PROBE 2026-10-15] 全部非零写值清单：读侧 distinct（rchr_hist）比
-                       写侧 distinct（chr_hist）多，必须逐码比对才能定位缺的是哪些码、
-                       还是口径问题。原打印只给 top-4，看不到全貌。 */
-                    static char vbuf[2048];
-                    int off = 0, nv = 0;
-                    for (int c = 0; c < 256; c++) {
-                        if (!chr_hist[c]) continue;
-                        if (nv++ >= 48) {
-                            off += snprintf(&vbuf[off], sizeof(vbuf) - (size_t) off, " +more");
-                            break;
-                        }
-                        off += snprintf(&vbuf[off], sizeof(vbuf) - (size_t) off, " %02X(%u)", c, chr_hist[c]);
-                    }
-                    pclog("3477: CRAMVALS n=%d:%s\n", nv, vbuf);
-                }
-            }
-        }
-        if (0) {
-            int i, j;
-            pclog("3477: DUMP at nonzero write #%d (addr %05X=%02X)\n", cramn, addr, val);
-            for (j = 0; j < 128; j += 16) {
-                char c1[64], c2[64], c3[64];
-                for (i = 0; i < 16; i++) {
-                    sprintf(&c1[i * 3], " %02X", epoch->cram[epoch_cram_index(epoch, 0xE0E00 + j + i)]);
-                    sprintf(&c2[i * 3], " %02X", epoch->vram[0x38000 + 0x2080 + j + i]);
-                    sprintf(&c3[i * 3], " %02X", epoch->vram[0x30000 + 0x2080 + j + i]);
-                }
-                pclog("3477:   CRAM_E00+%03X:%s\n", j, c1);
-                pclog("3477:   V38000_A+%03X:%s\n", j, c2);
-                pclog("3477:   V30000_A+%03X:%s\n", j, c3);
-            }
-        }
-    }
-    /* [PROBE 2026-10-15] EPOCH3477_WLOG=1: 记下开头 300 次落在 0xE0000-0xE1FFF
+        /* [PROBE 2026-10-15] EPOCH3477_WLOG=1: 记下开头 300 次落在 0xE0000-0xE1FFF
        的写入（含 val==0 与奇地址），带 PC 与当前 plane —— 用来对账「渲染器读到
        的文本字符码是否经由本函数写进 CRAM」（写侧普查 distinct=12 只有数字+图案，
        读侧却读到 "(C)opy right IBM." 的字符码）。 */
-    if (getenv("EPOCH3477_WLOG") && ((addr & 0xfff) >= 0x800) && ((addr & 0xfff) < 0xc00)
-        && (val >= 0x21) && (val <= 0x7e)) {
+    if (pb(PB_WLOG) && ((epoch->dispbank & 3) == 0)
+        && ((addr & 0xfff) >= 0x800) && ((addr & 0xfff) < 0xc00)
+        && (val >= 0x21) && (val <= 0x7e)
+        && (val != 0x54) && ((val < 0x30) || (val > 0x39))) {
         static int wl = 0;
         if (wl < 400) {
+            if (wl == 0)
+                pclog("3477: WLOG start cram=%p vram=%p\n",
+                      (void *) epoch->cram, (void *) epoch->vram);
             wl++;
             pclog("3477: WLOG #%d addr=%05X val=%02X ('%c') plane=%u pc=%04X:%04X\n",
                   wl, addr, val, val, epoch->dispbank & 3, cs >> 4, cpu_state.pc);
@@ -1919,10 +1701,7 @@ static void
 epoch_ank_narrow(const uint8_t *src, uint8_t *dst)
 {
     uint32_t rowbits[32];
-    /* [PROBE 2026-10-15] EPOCH3477_NARROW16=1 复现修复前的行为（只扫 0..15 列），
-       用于 A/B「窄化修复是不是字符显示的必要条件」。默认关（=修复后行为）。 */
-    const int ncol = getenv("EPOCH3477_NARROW16") ? 16 : 32;
-    int      c0 = ncol, c1 = -1;
+    int      c0 = 32, c1 = -1;
 
     /* [FIX 2026-10-15] Measure the ink over the whole 32-column cell.  The card
        stores the ASCII set full width with the ink centred (measured in
@@ -1941,7 +1720,7 @@ epoch_ank_narrow(const uint8_t *src, uint8_t *dst)
                            (uint32_t) src[row * 4 + 3];
 
         rowbits[row] = v;
-        for (int col = 0; col < ncol; col++) {
+        for (int col = 0; col < 32; col++) {
             if (v & (0x80000000u >> col)) {
                 if (col < c0)
                     c0 = col;
@@ -1968,7 +1747,7 @@ epoch_ank_narrow(const uint8_t *src, uint8_t *dst)
 
                     if (b <= a)
                         b = a + 1;
-                    for (int col = a; (col < b) && (col < ncol); col++) {
+                    for (int col = a; (col < b) && (col < 32); col++) {
                         if (rowbits[row] & (0x80000000u >> col)) {
                             out |= 1u << (12 - i);
                             break;
@@ -2284,7 +2063,8 @@ x1xx xxxx: Sense DREQ? (only used in diag test)
                pass.  The value is undocumented; the burn-in never reads it. */
             if (epoch_is_3477)
                 ret |= 0x10;
-            pclog("3477: in 0xA0 = %02X (pc=%04X:%04X)\n", ret, CS, cpu_state.pc);
+            if (pb(PB_A0LOG))
+                pclog("3477: in 0xA0 = %02X (pc=%04X:%04X)\n", ret, CS, cpu_state.pc);
             break;
         case 0xA1: /* High address where memory error occured */
             ret = epoch->parityerroraddr;
@@ -2402,7 +2182,7 @@ epoch_misc_out(uint16_t port, uint8_t val, void *priv)
                and keeps bit 5, which therefore reads set.  The IPL also
                walks bits 7-5 as a 32 KB font-ROM bank at 0xE8000 - probe
                gate EPOCH3477_EBTRC=1 (off by default). */
-            if (getenv("EPOCH3477_EBTRC") != NULL)
+            if (pb(PB_EBTRC))
                 pclog("3477: EBTRC out 0x400 = %02X pc=%04X:%04X\n",
                     val, cs >> 4, cpu_state.pc);
             epoch->dispbank = val; /* 3477-S display-RAM plane select */
@@ -3267,20 +3047,6 @@ epoch_fontcard_set_page(epoch_t *epoch, uint32_t page)
 static uint8_t
 epoch_fontcard_readb(uint32_t addr, void *priv)
 {
-    /* [PROBE] EPOCH3477_FCRD=1: census of guest READS of the card window.
-       Heavy reads at regular strides mean the guest (or the controller path)
-       is fetching glyphs from the card itself. */
-    if (getenv("EPOCH3477_FCRD")) {
-        static long rn = 0;
-        static unsigned pg[8];
-        rn++;
-        pg[(addr >> 12) & 7]++;
-        if (rn <= 10)
-            pclog("3477: FCRD n=%ld addr=%05X pc=%04X:%04X\n", rn, addr, cs >> 4, cpu_state.pc);
-        else if ((rn % 4096) == 0)
-            pclog("3477: FCRD n=%ld addr=%05X pages=%u,%u,%u,%u,%u,%u,%u,%u\n", rn, addr,
-                  pg[0],pg[1],pg[2],pg[3],pg[4],pg[5],pg[6],pg[7]);
-    }
     epoch_t *epoch = (epoch_t *) priv;
     uint8_t  ret   = epoch->fontcard_win[addr & (EPOCH_FONTCARD_WIN_SIZE - 1)];
 
@@ -3338,29 +3104,7 @@ epoch_fontcard_writeb(uint32_t addr, uint8_t val, void *priv)
         epoch_fontcard_set_page(epoch, val);
         return;
     }
-    /* [PROBE] EPOCH3477_DUMP=1: on the first two non-latch window writes,
-       dump the three candidate glyph sources so we can see which one holds
-       the 32x32 bitmaps (CRAM 0xE0000, machine-preloaded 0x38000/0x30000). */
-    if ((getenv("EPOCH3477_DUMP") != NULL) && (val != 0)) {
-        static int dumped = 0;
-        if (dumped < 2) {
-            int i, j;
-            dumped++;
-            pclog("3477: DUMP trigger win[%04X]=%02X\n", addr, val);
-            for (j = 0; j < 128; j += 16) {
-                char c1[64], c2[64], c3[64];
-                for (i = 0; i < 16; i++) {
-                    sprintf(&c1[i * 3], " %02X", epoch->cram[epoch_cram_index(epoch, 0xE0000 + j + i)]);
-                    sprintf(&c2[i * 3], " %02X", epoch->vram[0x38000 + j + i]);
-                    sprintf(&c3[i * 3], " %02X", epoch->vram[0x30000 + j + i]);
-                }
-                pclog("3477:   CRAM+%03X:%s\n", j, c1);
-                pclog("3477:   VRAM38000+%03X:%s\n", j, c2);
-                pclog("3477:   VRAM30000+%03X:%s\n", j, c3);
-            }
-        }
-    }
-    epoch->fontcard_win[addr] = val;
+        epoch->fontcard_win[addr] = val;
 }
 
 static void
@@ -3471,8 +3215,8 @@ epoch_fontcard_init(epoch_t *epoch)
                        match that protocol; they were disabled for this epoch.
                        EPOCH3477_FCWR=1 re-enables them for A/B probing only
                        (never in the clean 80186 baseline). */
-                    (!epoch_is_3477 || (getenv("EPOCH3477_FCWR") != NULL)) ? epoch_fontcard_writeb : NULL,
-                    (!epoch_is_3477 || (getenv("EPOCH3477_FCWR") != NULL)) ? epoch_fontcard_writew : NULL, NULL, NULL,
+                    (!epoch_is_3477 || (pb(PB_FCWR))) ? epoch_fontcard_writeb : NULL,
+                    (!epoch_is_3477 || (pb(PB_FCWR))) ? epoch_fontcard_writew : NULL, NULL, NULL,
                     MEM_MAPPING_EXTERNAL, epoch);
     /* The 3477's ROM is on the system board behind port 0x3E3, not on the
        optional card, so it has no 0x160 command interface. */
@@ -3500,7 +3244,7 @@ epoch_ebank_enabled(void)
 {
     static int ebank = -1;
     if (ebank < 0)
-        ebank = (getenv("EPOCH3477_EBANK") != NULL);
+        ebank = (pb(PB_EBANK));
     return ebank;
 }
 static uint8_t
@@ -3526,7 +3270,7 @@ epoch_hiram_writeb(uint32_t addr, uint8_t val, void *priv)
 {
     /* [PROBE] EPOCH3477_HIRAM=1: count the guest's writes into the E800-EC00
        block, which is where IBMBIO is supposed to land the delivered glyphs. */
-    if (getenv("EPOCH3477_HIRAM")) {
+    if (pb(PB_HIRAM)) {
         static long hn = 0;
         hn++;
         if ((hn <= 12) || ((hn % 4096) == 0))
@@ -3581,14 +3325,7 @@ epoch_init(UNUSED(const device_t *info))
     // for(int i=0;i<256*1024;i++) /* for debug */
     //     epoch->vram[i] = 0xff;
     epoch->cram              = calloc(1, EPOCH_SIZE_CRAM_ALL);
-    /* [PROBE 2026-10-15] 缓冲区身份：验「渲染器读到的文本字符到底在不在写侧那个
-       cram 里」。跑一次打印各缓冲区基址，看是否与 cram 别名/重叠。 */
-    if (getenv("EPOCH3477_CELL") || getenv("EPOCH3477_WLOG"))
-        pclog("3477: PTROK cram=%p..%p vram=%p..%p hiram=%p (cram_size=%u)\n",
-              (void *) epoch->cram, (void *) (epoch->cram + EPOCH_SIZE_CRAM_ALL - 1),
-              (void *) epoch->vram, (void *) (epoch->vram + EPOCH_SIZE_VRAM - 1),
-              (void *) epoch->hiram, (unsigned) EPOCH_SIZE_CRAM_ALL);
-    epoch->hiram             = calloc(1, 0x10000);
+        epoch->hiram             = calloc(1, 0x10000);
     epoch->paritybad         = calloc(1, 0xA0000 >> 3);
     /* Both the 5550 and the 5535-M can carry the kanji font card; the 5550 has
        a switch for it, the 5535-M always has one. The 3477-S has its ROS FONT
@@ -3896,7 +3633,8 @@ i3477_ram_readb(uint32_t addr, void *priv)
 {
     uint8_t v = ((i3477_shared_t *) priv)->ram[addr & 0xfff];
 
-    pclog("3477: rdb C000:%04X = %02X\n", addr & 0xfff, v);
+    if (pb(PB_C000LOG))
+        pclog("3477: rdb C000:%04X = %02X\n", addr & 0xfff, v);
     return v;
 }
 
@@ -3906,7 +3644,8 @@ i3477_ram_readw(uint32_t addr, void *priv)
     i3477_shared_t *dev = (i3477_shared_t *) priv;
     uint16_t        v   = (uint16_t) (dev->ram[addr & 0xfff] | (dev->ram[(addr + 1) & 0xfff] << 8));
 
-    pclog("3477: rdw C000:%04X = %04X\n", addr & 0xfff, v);
+    if (pb(PB_C000LOG))
+        pclog("3477: rdw C000:%04X = %04X\n", addr & 0xfff, v);
     return v;
 }
 
@@ -3915,9 +3654,10 @@ i3477_ram_writeb(uint32_t addr, uint8_t val, void *priv)
 {
     uint16_t off = addr & 0xfff;
 
-    if ((off >= 0x1D) && (off <= 0x45)) /* the burn-in's failure-code log */
-        pclog("3477: wrb C000:%04X = %02X bp=%04X (pc=%04X:%04X)\n", off, val, BP, CS, cpu_state.pc);
-    else
+    if ((off >= 0x1D) && (off <= 0x45)) { /* the burn-in's failure-code log */
+        if (pb(PB_C000LOG))
+            pclog("3477: wrb C000:%04X = %02X bp=%04X (pc=%04X:%04X)\n", off, val, BP, CS, cpu_state.pc);
+    } else if (pb(PB_C000LOG))
         pclog("3477: wrb C000:%04X = %02X\n", off, val);
     ((i3477_shared_t *) priv)->ram[addr & 0xfff] = val;
 }
@@ -3929,7 +3669,8 @@ i3477_ram_writew(uint32_t addr, uint16_t val, void *priv)
 {
     i3477_shared_t *dev = (i3477_shared_t *) priv;
 
-    pclog("3477: wrw C000:%04X = %04X\n", addr & 0xfff, val);
+    if (pb(PB_C000LOG))
+        pclog("3477: wrw C000:%04X = %04X\n", addr & 0xfff, val);
     dev->ram[addr & 0xfff]         = val & 0xff;
     dev->ram[(addr + 1) & 0xfff]   = val >> 8;
 }
@@ -3937,7 +3678,8 @@ i3477_ram_writew(uint32_t addr, uint16_t val, void *priv)
 static void
 i3477_doorbell_out(uint16_t port, uint8_t val, void *priv)
 {
-    pclog("3477: doorbell %03X <- %02X (pc=%04X:%04X)\n", port, val, CS, cpu_state.pc);
+    if (pb(PB_C000LOG))
+        pclog("3477: doorbell %03X <- %02X (pc=%04X:%04X)\n", port, val, CS, cpu_state.pc);
 }
 
 /* A log's trailing byte is A5h minus the 8-bit sum of its whole range; the ROM
@@ -4046,8 +3788,12 @@ i3477_shared_init(const device_t *info)
                     i3477_ram_writeb, i3477_ram_writew, NULL, NULL, MEM_MAPPING_EXTERNAL, dev);
     io_sethandler(0x0362, 2, NULL, NULL, NULL, i3477_doorbell_out, NULL, NULL, dev);
 
-    timer_add(&dev->sample_timer, i3477_sample, dev, 0);
-    timer_set_delay_u64(&dev->sample_timer, 50000ULL * TIMER_USEC);
+    /* 20 µs 的 PC 采样定时器是纯探针（每秒 5 万次回调）：要在 EPOCH3477_PCSAMPLE=1
+       时才武装，否则连 timer 都不建。 */
+    if (pb(PB_PCSAMPLE)) {
+        timer_add(&dev->sample_timer, i3477_sample, dev, 0);
+        timer_set_delay_u64(&dev->sample_timer, 50000ULL * TIMER_USEC);
+    }
 
     return dev;
 }
@@ -4267,7 +4013,7 @@ machine_xt_ibm3477_init(const machine_t *model)
        with it filled the diagnostic '0' (CELL probe: chr=0x30 attr=0x08 at
        ma=0x0E70) gains its 131 pixels (PIXEL nz 11440 -> 11571).
        A/B at runtime: compare with the load commented out, or git revert. */
-    if (!getenv("EPOCH3477_NOINJ") && (epoch->fontcard_rom != NULL) && (epoch->fontcard_pages > 2)) {
+    if ((epoch->fontcard_rom != NULL) && (epoch->fontcard_pages > 2)) {
         /* Half-width (ANK) generator: GB2312 row 3.  The position of a code in
            the row is n = code - 0x20 and the row starts at g192 (g192 is the
            full-width '!', verified against the extracted font: g192 = '!',

@@ -282,10 +282,23 @@ i80186_read_word(i80186_t *dev, uint16_t off)
     return dev->regs[off / 2];
 }
 
+/* 3477-S：80186 片上外设（DMA/PIT/片选）的写跟踪。客人引导期频繁重编程这些寄存器，
+   原来无条件每次写一行日志。默认关，EPOCH3477_I80186LOG=1 打开。 */
+static int
+i80186_log(void)
+{
+    static int on = -1;
+
+    if (on < 0)
+        on = (getenv("EPOCH3477_I80186LOG") != NULL) ? 1 : 0;
+    return on;
+}
+
 static void
 i80186_write_word(i80186_t *dev, uint16_t off, uint16_t val)
 {
-    pclog("3477: i80186 wr %04X <- %04X (pc=%04X:%04X)\n", off, val, CS, cpu_state.pc);
+    if (i80186_log())
+        pclog("3477: i80186 wr %04X <- %04X (pc=%04X:%04X)\n", off, val, CS, cpu_state.pc);
 
     if (off == I80186_RELOC_OFF) {
         /* Manual 270788-001 section 5.1 / Figure 53: bits 11:0 are address

@@ -486,8 +486,8 @@ side_flags(void *priv)
 }
 
 static void
-set_sector(void *priv, UNUSED(int side), UNUSED(uint8_t c), const uint8_t h,
-           const uint8_t r, UNUSED(uint8_t n))
+set_sector(void *priv, UNUSED(int side), const uint8_t c, const uint8_t h,
+           const uint8_t r, const uint8_t n)
 {
     fdd_drive_t *drv = (fdd_drive_t *) priv;
     img_t *      dev = (img_t *) drv->local;
@@ -496,8 +496,11 @@ set_sector(void *priv, UNUSED(int side), UNUSED(uint8_t c), const uint8_t h,
     dev->current_sector_pos      = dev->sector_pos[h][r];
     /* [EXPERIMENT FDDSENT] Sentinel = the FDC asked for a (h,r) the image never filled:
        pos stays 0 / side stays 0xFF and the read guard then silently returns 0. */
-    if (getenv("FDDSENT") &&
-        (dev->current_sector_pos_side == 0xFF)) {
+    static int sent_on = -1;
+    if (sent_on < 0)
+        sent_on = (getenv("FDDSENT") != NULL) ? 1 : 0;
+    if (sent_on && (dev->current_sector_pos_side == 0xFF)) {
+        (void) c; (void) h; (void) r; (void) n;
         static unsigned long ss = 0;
 
         ss++;
@@ -567,7 +570,7 @@ poll_read_data(void *priv, UNUSED(int side), const uint16_t pos)
                     distinct++;
             }
             pclog("3477: ★rollup calls=4096 pos=%u hi=%u distinct=%lu see511=%lu cur_pos=%u side=%d trk=%d dma=%d\n",
-                  pos, hi, distinct, seen[511], (unsigned) dev->current_sector_pos,
+                  (unsigned) pos, (unsigned) hi, distinct, seen[511], (unsigned) dev->current_sector_pos,
                   dev->current_sector_pos_side, drv->track, drv->fdc ? 1 : 0);
             for (i = 0; i < 512; i++)
                 seen[i] = 0;

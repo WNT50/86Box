@@ -952,12 +952,25 @@ fdc_pcjx_dor(fdc_t *fdc, uint8_t val)
     fdc->dor = val;
 }
 
+/* [3477-S] FDC 端口跟踪原先无条件（只看 FDC_FLAG_5550）每读写一行：客人自检把
+   0x3F4 当紧循环轮询，实测 60 秒 47k 行 / 32 KB 的纯日志开销。现默认关，需要时
+   用 EPOCH3477_FDCLOG=1 打开。 */
+static int
+fdc_3477_trace(void)
+{
+    static int on = -1;
+
+    if (on < 0)
+        on = (getenv("EPOCH3477_FDCLOG") != NULL) ? 1 : 0;
+    return on;
+}
+
 void
 fdc_write(uint16_t addr, uint8_t val, void *priv)
 {
     fdc_t *fdc = (fdc_t *) priv;
 
-    if (fdc->flags & FDC_FLAG_5550)
+    if ((fdc->flags & FDC_FLAG_5550) && fdc_3477_trace())
         pclog("3477: fdc wr %03X <- %02X\n", addr, val);
 
     int drive;
@@ -1014,7 +1027,8 @@ fdc_write(uint16_t addr, uint8_t val, void *priv)
                     return;
                 }
                 if (fdc->flags & FDC_FLAG_5550) {   /* Reset */
-                    pclog("3477: fdc wr 3F2 <- %02X (reset; pc=%04X:%04X)\n", val, CS, cpu_state.pc);
+                    if (fdc_3477_trace())
+                        pclog("3477: fdc wr 3F2 <- %02X (reset; pc=%04X:%04X)\n", val, CS, cpu_state.pc);
                     fdd_stop(fdc->fdd[fdc->drive]);
                     for (int i = 0; i < 4; i++) {
                         /* Need to restart fdd timer */
@@ -1699,7 +1713,7 @@ fdc_read(uint16_t addr, void *priv)
     int          drive = 0;
     fdd_drive_t *drv;
 
-    if (fdc->flags & FDC_FLAG_5550)
+    if ((fdc->flags & FDC_FLAG_5550) && fdc_3477_trace())
         pclog("3477: fdc rd %03X\n", addr);
 
     cycles -= ISA_CYCLES(8);
@@ -1844,7 +1858,7 @@ fdc_read(uint16_t addr, void *priv)
                 if (fdc->flags & FDC_FLAG_5550)
                     picintc(1 << fdc->irq);
                 ret = fdc->stat;
-                if (fdc->flags & FDC_FLAG_5550)
+                if ((fdc->flags & FDC_FLAG_5550) && fdc_3477_trace())
                     pclog("3477: fdc MSR 3F4 -> %02X (stat %02X, power_down %d, pc=%04X:%04X)\n",
                           ret, fdc->stat, fdc->power_down, CS, cpu_state.pc);
                 break;
