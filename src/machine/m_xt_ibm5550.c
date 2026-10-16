@@ -2246,7 +2246,8 @@ epoch_misc_in(uint16_t port, void *priv)
                 /* [AB] 读侧原本用 0x7d 掩掉了 bit7，而写侧辛苦算出的 resp_bit 正落在 bit7
                    （"从设备数据入"）⇒ 客人轮询 0x1C6 等应答时永远等不到。adrrb=1 放行 bit7。 */
                 ret = (uint8_t) ((epoch_adr_latch & 0x7d) | (epoch_adr_phase ? 0x02 : 0x00)
-                                 | (adrrb ? (epoch_adr_latch & 0x80) : 0));
+                                 | (adrrb ? (epoch_adr_latch & 0x80) : 0)
+                                 | (getenv("EPOCH3477_ADRB0") ? 0x01 : 0));
             }
             break;
 
@@ -2479,6 +2480,7 @@ epoch_misc_out(uint16_t port, uint8_t val, void *priv)
             }
             {
                 int clk = (val & 0x40) ? 1 : 0;
+{ const char *v = getenv("EPOCH3477_ADRPH"); if (v && atoi(v)) epoch_adr_phase ^= 1; }
                 (void) clk;
                 {
                     epoch_adr_bitcnt++;   /* [FIX] 每次 out 0x1C6 都计一拍，不再依赖 bit6 上升沿 */
