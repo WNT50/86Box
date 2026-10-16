@@ -19,7 +19,9 @@
 #include <86box/device.h>
 
 struct i8018x_pcb_t;
-
+/* The controller a machine has brought up, NULL when there is none; the CPU
+   core asks through this instead of waiting to be handed one. */
+extern struct i8018x_pcb_t *i8018x_pcb_current;
 extern const device_t i8018x_pcb_device;
 
 extern int  i8018x_pcb_icu_pending(void);
