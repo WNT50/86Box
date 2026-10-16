@@ -851,7 +851,12 @@ epoch_in(uint16_t addr, void *priv)
                and satisfy the poll.  Inverting for 0x94 as well let sweep #1
                satisfy the poll immediately, leaving AH = 0 and the IPL
                reporting failure code 0x0B at the handoff doorbell. */
-            if (epoch_is_3477 && ((epoch->crtmode == 0x04) || (epoch->crtmode == 0x10))) {
+            static int flipx = -1;
+            if (flipx < 0) { const char *v = getenv("EPOCH3477_FLIPX"); flipx = v ? atoi(v) : 0; }
+            /* [AB] flipx=1 时把驱动实际用的模式(0x14/0x15/0x05)也纳入翻转：IPL 扫频只用 0x94->0x04，
+               不碰它的判据；用来判「驱动切模式后是否在等 0x3DA 翻转」。默认 0 = 现状。 */
+            if (epoch_is_3477 && ((epoch->crtmode == 0x04) || (epoch->crtmode == 0x10) ||
+                                  (flipx && ((epoch->crtmode == 0x14) || (epoch->crtmode == 0x15) || (epoch->crtmode == 0x05))))) {
                 epoch->cgastat ^= 0x30;
                 epoch->cgastat ^= 0x08;
             }
