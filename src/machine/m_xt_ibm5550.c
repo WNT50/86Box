@@ -2234,6 +2234,7 @@ epoch_misc_in(uint16_t port, void *priv)
             { static int rdbg; if (rdbg < 60) pclog("3477: ADRREAD 1C1 -> %02X pc=%04X:%04X\n", ret, CS >> 4, cpu_state.pc); rdbg++; }
             if (epoch_adr_reg42 < 0) { const char *v = getenv("EPOCH3477_ADR_REG42"); epoch_adr_reg42 = v ? atoi(v) : 0; }
             if (epoch_adr_reg42) ret |= 0x42;
+            { static int fx = -1; if (fx < 0) fx = getenv("EPOCH3477_ADRFIX") ? 1 : 0; if (fx) ret = 0x48; }
             break;
         case 0x1C2:
         case 0x1C3:
@@ -2500,6 +2501,7 @@ epoch_misc_out(uint16_t port, uint8_t val, void *priv)
         } else if (port == 0x1C2 && (val & 0x04)) {
             /* [AB] 客人从不写 0x1C1 ⇒ epoch_adr_reg 恒 0 ⇒ 原式每次选通都把相位复位成 1，
            而 0x7FF 助手的协议是「两次读之间相位翻转」(1→选通→0)。ADRSTB=1 改为选通即翻转。 */
+        { static int fx2 = -1; if (fx2 < 0) fx2 = getenv("EPOCH3477_ADRFIX") ? 1 : 0; if (fx2) epoch_adr_phase = 0; }
         if (getenv("EPOCH3477_ADRSTB")) epoch_adr_phase ^= 1;
         else epoch_adr_phase = ((epoch_adr_reg & 0x42) == 0x42) ? 0 : 1;
         } else if (port == 0x1C6) {
@@ -4447,6 +4449,8 @@ machine_xt_ibm3477_init(const machine_t *model)
 
     /* The 80186's integrated peripherals / chip-select block (the ROM programs
        UMCS via out 0xFFA0 at reset). [Cloud server only, DO NOT USE!!!] */
+    { const char *fx = getenv("EPOCH3477_ADRFIX");
+      if (fx && atoi(fx)) { int i; for (i = 0; i < 256; i++) ram[0xE4000 + i] = (uint8_t) i; } }
     device_add(&i80186_device);
 
     /* The 5250 adapter's self-test (FD43:0A0E via the module entry at
