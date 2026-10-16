@@ -358,7 +358,7 @@ i80186_icu_log(void *priv, uint16_t port, uint16_t val, int is_wr, int is_byte)
     static int n728w, n728r, n722w;
     if (!i80186_iculog) return;
     if (off == 0x28) {
-        if (is_wr) { if (n728w++ < 40) pclog("3477: PCB MASK <- %04X (%s)\n", val, is_byte ? "b" : "w"); }
+        if (is_wr) { if (n728w++ < 40) pclog("3477: PCB MASK <- %04X (%s) base=%04X port=%04X\n", val, is_byte ? "b" : "w", dev->base, port); }
         else       { if (n728r++ < 40) pclog("3477: PCB MASK -> %04X (%s)\n", val, is_byte ? "b" : "w"); }
     } else if (off == 0x22) {
         if (is_wr && n722w++ < 40) pclog("3477: PCB EOI <- %04X (%s)\n", val, is_byte ? "b" : "w");
