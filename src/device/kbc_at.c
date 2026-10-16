@@ -2438,8 +2438,14 @@ kbc_at_process_cmd(void *priv)
 
             case 0xa9: /* Test auxiliary port */
                 kbc_at_log("ATkbc: test auxiliary port\n");
-                if (dev->misc_flags & FLAG_PS2)
-                    kbc_delay_to_ob(dev, 0x00, 0, 0x00); /* no error, this is testing the channel 2 interface */
+                if (dev->misc_flags & FLAG_PS2) {
+                    static int epoch_aux_ch1 = -1;
+                    if (epoch_aux_ch1 < 0) {
+                        const char *v = getenv("EPOCH3477_AUX_CH1");
+                        epoch_aux_ch1 = v ? atoi(v) : 0;
+                    }
+                    kbc_delay_to_ob(dev, 0x00, epoch_aux_ch1 ? 1 : 0, 0x00); /* no error, this is testing the channel 2 interface */
+                }
                 break;
 
             case 0xaa: /* self-test */
@@ -2715,6 +2721,9 @@ kbc_at_process_cmd(void *priv)
 static void
 kbc_at_port_1_write(uint16_t port, uint8_t val, void *priv)
 {
+    if (getenv("EPOCH3477_KBCW"))
+        pclog("3477: KBCW %s port=%02X val=%02X pc=%04X:%04X status=%02X state=%d wantdata=%d\n",
+              "kbc_at_port_1_write", port, val, CS, cpu_state.pc, ((atkbc_t *) priv)->status, ((atkbc_t *) priv)->state, ((atkbc_t *) priv)->wantdata);
     atkbc_t *dev = (atkbc_t *) priv;
     uint8_t kbc_ven = dev->flags & KBC_VEN_MASK;
     uint8_t fast_a20 = (kbc_ven != KBC_VEN_SIEMENS);
@@ -2752,6 +2761,9 @@ kbc_at_port_1_write(uint16_t port, uint8_t val, void *priv)
 static void
 kbc_at_port_2_write(uint16_t port, uint8_t val, void *priv)
 {
+    if (getenv("EPOCH3477_KBCW"))
+        pclog("3477: KBCW %s port=%02X val=%02X pc=%04X:%04X status=%02X state=%d wantdata=%d\n",
+              "kbc_at_port_2_write", port, val, CS, cpu_state.pc, ((atkbc_t *) priv)->status, ((atkbc_t *) priv)->state, ((atkbc_t *) priv)->wantdata);
     atkbc_t *dev = (atkbc_t *) priv;
     uint8_t kbc_ven = dev->flags & KBC_VEN_MASK;
     uint8_t fast_a20 = (kbc_ven != KBC_VEN_SIEMENS);
