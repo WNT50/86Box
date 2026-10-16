@@ -2229,11 +2229,11 @@ epoch_misc_in(uint16_t port, void *priv)
                 if (!adr_dump_done && getenv("EPOCH3477_ADRDUMP")) {
                     int k;
                     adr_dump_done = 1;
-                    for (k = 0; k < 4; k++) {
+                    for (k = 0; k < 20; k++) {
                         int i;
-                        pclog("3477: DUMP3659 base=%04X ", 0x0A00 + k * 0x40);
+                        pclog("3477: DUMP3659 base=%04X ", 0x0600 + k * 0x40);
                         for (i = 0; i < 0x40; i++)
-                            pclog("%02X", ram[((uint32_t) 0x3659 << 4) + 0x0A00 + k * 0x40 + i]);
+                            pclog("%02X", ram[((uint32_t) 0x3659 << 4) + 0x0600 + k * 0x40 + i]);
                         pclog("\n");
                     }
                 }
