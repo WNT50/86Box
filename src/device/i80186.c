@@ -174,6 +174,12 @@ i80186_dma0_read(void)
 
 static uint16_t i80186_inw(uint16_t port, void *priv);
 static void     i80186_outw(uint16_t port, uint16_t val, void *priv);
+/* [PROBE/AB] EPOCH3477_ICUB=1 时给 PCB 窗口补字节访问：客人对 ICU MASK 0x728 用
+   in al,dx / out dx,al 做读-改-写，只注册字 handler 会让字节读写落到开口总线
+   （读回 0xFFFF ⇒ bit5 恒 1 ⇒ 客人永远以为 INT1 被屏蔽）。*/
+static uint8_t  i80186_inb(uint16_t port, void *priv);
+static void     i80186_outb(uint16_t port, uint8_t val, void *priv);
+static int      i80186_icub = 0;
 
 /* The three timers count at one fourth of the CPU clock (270788-001 section
    6.2). 86Box drives tsc at three times the nominal CPU clock on XT-class
@@ -314,7 +320,7 @@ i80186_write_word(i80186_t *dev, uint16_t off, uint16_t val)
         if (!(val & 0x1000u) && (new_base != dev->base)) {
             io_removehandler(dev->base, I80186_PCB_SIZE, NULL, i80186_inw, NULL, NULL, i80186_outw, NULL, dev);
             dev->base = new_base;
-            io_sethandler(dev->base, I80186_PCB_SIZE, NULL, i80186_inw, NULL, NULL, i80186_outw, NULL, dev);
+            io_sethandler(dev->base, I80186_PCB_SIZE, i80186_icub ? i80186_inb : NULL, i80186_inw, NULL, i80186_icub ? i80186_outb : NULL, i80186_outw, NULL, dev);
         }
         return;
     }
@@ -341,6 +347,22 @@ i80186_write_word(i80186_t *dev, uint16_t off, uint16_t val)
        does `in 0x2E / and 0xFFFE / out 0x2E` before its timer test. */
     if ((off == I80186_ICU_REQ) && !(val & 0x0001u))
         dev->tmr_req = 0;
+}
+
+static uint8_t
+i80186_inb(uint16_t port, void *priv)
+{
+    uint16_t w = i80186_inw(port & 0xFFFEu, priv);
+    return (port & 1u) ? (uint8_t) (w >> 8) : (uint8_t) (w & 0x00FFu);
+}
+
+static void
+i80186_outb(uint16_t port, uint8_t val, void *priv)
+{
+    uint16_t w = i80186_inw(port & 0xFFFEu, priv);
+    if (port & 1u) w = (w & 0x00FFu) | ((uint16_t) val << 8);
+    else           w = (w & 0xFF00u) | (uint16_t) val;
+    i80186_outw(port & 0xFFFEu, w, priv);
 }
 
 static uint16_t
@@ -381,7 +403,7 @@ i80186_reset(void *priv)
     dev->regs[I80186_RELOC_OFF / 2] = dev->reloc;
     dev->base                       = I80186_PCB_BASE_DEFAULT;
 
-    io_sethandler(dev->base, I80186_PCB_SIZE, NULL, i80186_inw, NULL, NULL, i80186_outw, NULL, dev);
+    io_sethandler(dev->base, I80186_PCB_SIZE, i80186_icub ? i80186_inb : NULL, i80186_inw, NULL, i80186_icub ? i80186_outb : NULL, i80186_outw, NULL, dev);
     dev->handler_set = 1;
 }
 
@@ -402,6 +424,8 @@ i80186_close(void *priv)
 static void *
 i80186_init(const device_t *info)
 {
+    { const char *v = getenv("EPOCH3477_ICUB"); i80186_icub = v ? atoi(v) : 0; }
+
     i80186_t *dev = (i80186_t *) calloc(1, sizeof(i80186_t));
 
     i80186_reset(dev);
