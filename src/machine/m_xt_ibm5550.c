@@ -2246,12 +2246,18 @@ epoch_misc_in(uint16_t port, void *priv)
                 static int adr_dump_done;
                 if (!adr_dump_done && getenv("EPOCH3477_ADRDUMP")) {
                     int k;
+                    const char *ev_seg = getenv("EPOCH3477_ADRDUMP_SEG");
+                    const char *ev_base = getenv("EPOCH3477_ADRDUMP_BASE");
+                    const char *ev_n = getenv("EPOCH3477_ADRDUMP_N");
+                    uint32_t dseg = ev_seg ? (strtoul(ev_seg, NULL, 0) << 4) : ((uint32_t) 0x3659 << 4);
+                    uint32_t dbase = ev_base ? strtoul(ev_base, NULL, 0) : 0x0600;
+                    int dcount = ev_n ? atoi(ev_n) : 20;
                     adr_dump_done = 1;
-                    for (k = 0; k < 20; k++) {
+                    for (k = 0; k < dcount; k++) {
                         int i;
-                        pclog("3477: DUMP3659 base=%04X ", 0x0600 + k * 0x40);
+                        pclog("3477: DUMPSEG base=%04X ", dbase + k * 0x40);
                         for (i = 0; i < 0x40; i++)
-                            pclog("%02X", ram[((uint32_t) 0x3659 << 4) + 0x0600 + k * 0x40 + i]);
+                            pclog("%02X", ram[dseg + dbase + k * 0x40 + i]);
                         pclog("\n");
                     }
                 }
