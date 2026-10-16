@@ -2467,7 +2467,10 @@ epoch_misc_out(uint16_t port, uint8_t val, void *priv)
             if ((val & 0x42) == 0x42)
                 epoch_adr_phase = 0;
         } else if (port == 0x1C2 && (val & 0x04)) {
-            epoch_adr_phase = ((epoch_adr_reg & 0x42) == 0x42) ? 0 : 1;
+            /* [AB] 客人从不写 0x1C1 ⇒ epoch_adr_reg 恒 0 ⇒ 原式每次选通都把相位复位成 1，
+           而 0x7FF 助手的协议是「两次读之间相位翻转」(1→选通→0)。ADRSTB=1 改为选通即翻转。 */
+        if (getenv("EPOCH3477_ADRSTB")) epoch_adr_phase ^= 1;
+        else epoch_adr_phase = ((epoch_adr_reg & 0x42) == 0x42) ? 0 : 1;
         } else if (port == 0x1C6) {
             /* [MODEL] 位串行从设备：bit6 上升沿推进响应移位寄存器，最高位回读为 bit7 */
             static int     adr_clk_last;
