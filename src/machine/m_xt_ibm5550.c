@@ -2077,6 +2077,13 @@ if (pb(PB_DEAD)) kr_dump();
 }
 /* [PROBE] 磁盘服务状态块 0x53B8-0x53BF（中性：只读值，不注入）。
    0650:87D1 写 0x80 = 等 RQM 超时；0650:87E0 写 0x20 = 无 DIO；0x53B8 bit7 = 完成标志。 */
+
+if ((pb(PB_ROMW)) && (((addr >= 0x7cd0) && (addr <= 0x7cd7)) || ((addr >= 0xddec) && (addr <= 0xddef)))) {
+    static int mf;
+    if (mf < 200)
+        pclog("3477: MODFLAG %04X = %02X pc=%04X:%04X\n", addr, val, CS, cpu_state.pc);
+    mf++;
+}
 if ((pb(PB_ROMW)) && (addr >= 0x5ab0) && (addr <= 0x5aef)) {   /* ISR 信箱+结果缓冲(0x5ABA-0x5AC0)+状态位 [0x53E4](0x5AE4)：ss=0x0070 */
 static int fst;
 if (fst < 400)
