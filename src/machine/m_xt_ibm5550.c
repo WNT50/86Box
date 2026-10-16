@@ -66,6 +66,66 @@ extern uint8_t *rom; /* [FIX] the ROM buffer bios_load_linear filled */
 #include <86box/pit.h>
 #include <86box/mouse.h>
 
+/* [PROBE] A0 写访问环形缓冲：判断进故障程序前 0x28/0xA9 是否真被写过 */
+static uint16_t kr_ring[16];
+static unsigned kr_n;
+static void
+kr_dump(void)
+{
+    unsigned i, k = (kr_n < 16) ? kr_n : 16;
+    char b[220]; int o = 0;
+
+    o += snprintf(b + o, sizeof(b) - o, "3477: KRRING n=%u:", kr_n);
+    for (i = k; i > 0; i--)
+        o += snprintf(b + o, sizeof(b) - o, " %02X", (uint8_t) (kr_ring[(kr_n - i) & 15] & 0xFF));
+    pclog("%s\n", b);
+}
+
+static void
+kr_ivt(void)
+{
+    unsigned v;
+
+    pclog("3477: KRIVT cs=%04X ip=%04X\n", CS, cpu_state.pc);
+    /* 自证：崩溃处理程序刚写过 0:0x14A-0x14F，应读到 00 00 00 F8 03 00 */
+    /* 找调用帧：处理程序自身已压 7 字(14B)，若由 call far 进入，其后就是 调用者 IP:CS */
+    {
+        char b[220]; int o = 0;
+        uint32_t ssb = (uint32_t) SS << 4;
+        unsigned sp  = SP;
+
+        o += snprintf(b + o, sizeof(b) - o, "3477: KRSTK ss=%04X sp=%04X:", SS, sp);
+        for (unsigned i = 0; i < 24; i++)
+            o += snprintf(b + o, sizeof(b) - o, " %02X",
+                          mem_readb_phys(ssb + ((sp + 14 + i) & 0xFFFF)));
+        pclog("%s\n", b);
+    }
+    for (unsigned base = 0; base < 2; base++) {
+        uint32_t a0 = base ? 0x140u : 0x000u;
+        char b[120]; int o = 0;
+
+        o += snprintf(b + o, sizeof(b) - o, "3477: KRRAW %03X phys:", a0);
+        for (unsigned i = 0; i < 16; i++)
+            o += snprintf(b + o, sizeof(b) - o, " %02X", mem_readb_phys(a0 + i));
+        pclog("%s\n", b);
+    }
+    {
+        char b[120]; int o = 0;
+
+        /* 用了非零的已知内容做自证：ROM 窗口首字节（应从 ROM 文件读得到） */
+        o += snprintf(b + o, sizeof(b) - o, "3477: KRRAW ROM@F8000:");
+        for (unsigned i = 0; i < 8; i++)
+            o += snprintf(b + o, sizeof(b) - o, " %02X", mem_readb_phys(0xF8000u + i));
+        pclog("%s\n", b);
+    }
+    for (v = 0; v < 32; v++) {
+        uint16_t off = (uint16_t) (mem_readb_phys((v << 2) + 0) | (mem_readb_phys((v << 2) + 1) << 8));
+        uint16_t seg = (uint16_t) (mem_readb_phys((v << 2) + 2) | (mem_readb_phys((v << 2) + 3) << 8));
+
+        if (off || seg)
+            pclog("3477: KRIVT v=%02X -> %04X:%04X\n", v, seg, off);
+    }
+}
 #define EPOCH_VRAM_SBCS        0x38000
 #define EPOCH_VRAM_SBEX        0x30000
 #define EPOCH_INVALIDACCESS8       0xffu
@@ -2007,8 +2067,10 @@ static void
 epoch_parity_writeb(uint32_t addr, uint8_t val, void *priv)
 {
     /* [PROBE] ROM 自检完成的证据：F9216-F921D 会把设备 ID 两字节写到绝对 0x14C/0x14D */
-    if ((addr >= 0x148) && (addr <= 0x14f))
-        pclog("3477: RAMW %04X = %02X pc=%04X:%04X\n", addr, val, CS, cpu_state.pc);
+if ((addr >= 0x148) && (addr <= 0x14f)) {
+pclog("3477: RAMW %04X = %02X pc=%04X:%04X\n", addr, val, CS, cpu_state.pc);
+if (pb(PB_DEAD)) kr_dump();
+}
     epoch_t *epoch = (epoch_t *) priv;
     // epoch_log("%04X:%04X mw %0X\n", cs >> 4, cpu_state.pc, addr);
     epoch_parity_mark(epoch, addr, (epoch->parityenabled == 0) || epoch->parityforce);
@@ -2025,8 +2087,14 @@ epoch_parity_writeb(uint32_t addr, uint8_t val, void *priv)
 static void
 epoch_parity_writew(uint32_t addr, uint16_t val, void *priv)
 {
-    if ((addr >= 0x148) && (addr <= 0x14f))
-        pclog("3477: RAMW16 %04X = %04X pc=%04X:%04X\n", addr, val, CS, cpu_state.pc);
+if ((addr >= 0x148) && (addr <= 0x14f)) {
+pclog("3477: RAMW16 %04X = %04X pc=%04X:%04X\n", addr, val, CS, cpu_state.pc);
+if (pb(PB_DEAD)) {
+    kr_dump();
+    if (addr == 0x14a)
+        kr_ivt();
+}
+}
     epoch_t *epoch = (epoch_t *) priv;
     epoch_parity_mark(epoch, addr, (epoch->parityenabled == 0) || epoch->parityforce);
     epoch_parity_mark(epoch, addr + 1, (epoch->parityenabled == 0) || epoch->parityforce);
@@ -2192,7 +2260,6 @@ x1xx xxxx: Sense DREQ? (only used in diag test)
         if (a0b1 >= 1) ret |= 0x02;
         if (a0b1 >= 2) ret |= 0x01;
     }
-ret |= 0x01;
             if (pb(PB_A0LOG))
                 pclog("3477: in 0xA0 = %02X (pc=%04X:%04X)\n", ret, CS, cpu_state.pc);
             break;
@@ -2415,6 +2482,7 @@ x1xx xxxx: Enable parity update (Disable this -> Write data -> Enable this -> Re
 1xxx xxxx: Enable NMI check
 */
         case 0xA0:
+            if (pb(PB_DEAD)) kr_ring[kr_n++ & 15] = (uint16_t) val;
             if (pb(PB_ROMW))
                 pclog("3477: A0W out A0 = %02X pc=%04X:%04X\n", val, cs >> 4, cpu_state.pc);
             if (pb(PB_DEAD)) {
