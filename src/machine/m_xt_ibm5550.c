@@ -4251,7 +4251,7 @@ machine_xt_ibm3477_init(const machine_t *model)
             fclose(fp);
             epoch_rom_pages = i + 1;
         }
-        if (epoch_rom_pages) {
+        if (epoch_rom_pages && pb(PB_ROMPG)) {   /* 默认只加载 IPL，不加载测试 ROM（与 ibm3477 一致）*/
             mem_mapping_add(&epoch_rom_map, 0xf8000, 0x8000,
                             epoch_rom_readb, epoch_rom_readw, NULL,
                             NULL, NULL, NULL, NULL,
