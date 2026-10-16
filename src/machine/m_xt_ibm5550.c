@@ -1632,6 +1632,8 @@ epoch_vram_read(uint32_t addr, void *priv)
    updating enabled latches a parity error.  The 5535-M's 0x47 test (F8246)
    depends on it: it walks 0xAC000-0xFB000 and then requires port 0xA0 bit 0
    to be set, to test the error latch and its clear through port 0xA2. */
+
+
 static void
 epoch_parity_device_write(epoch_t *epoch)
 {
@@ -1647,8 +1649,9 @@ epoch_parity_device_write(epoch_t *epoch)
        F800:0796 (in A0h, test bit 0, loop back while clear).  Gating the latch
        on !crtioenabled would make that walk unsatisfiable on the 3477-S, so
        allow it there as well. */
-    if (epoch->parityenabled && (!epoch->crtioenabled || epoch_is_3477))
+    if (epoch->parityenabled && (!epoch->crtioenabled || epoch_is_3477)) {
         epoch->parityerror = 1;
+    }
 }
 
 /* The video RAM is only decoded for word accesses (the ROM's video code uses
@@ -2158,8 +2161,15 @@ x1xx xxxx: Sense DREQ? (only used in diag test)
                pass.  The value is undocumented; the burn-in never reads it. */
             if (epoch_is_3477)
                 ret |= 0x10;
-            /* [FIX] 设备侧状态：bit0 = 自检通过/继续（步驱动器 F800:085F 的 test $1 闸） */
-            ret |= 0x01;
+            /* [FIX] 设备侧状态：bit0 = 自检通过/继续（步驱动器 F800:085F 的 test $1 闸）
+               [A0] 实验门控：EPOCH3477_A0B1=1 只置 bit1，=2 两位都置（默认 0 保持原行为：
+               3477-S 的 IPL 第一次读 A0h 时 bit0 必须为 0，否则走 F8DE 校验错上报分支） */
+            if (getenv("EPOCH3477_A0B1")) {
+                int a0b1 = atoi(getenv("EPOCH3477_A0B1"));
+                ret &= (uint8_t) ~0x01;
+                if (a0b1 >= 1) ret |= 0x02;
+                if (a0b1 >= 2) ret |= 0x01;
+            }
             if (pb(PB_A0LOG))
                 pclog("3477: in 0xA0 = %02X (pc=%04X:%04X)\n", ret, CS, cpu_state.pc);
             break;
