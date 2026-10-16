@@ -2238,6 +2238,16 @@ epoch_misc_in(uint16_t port, void *priv)
                     }
                 }
             }
+            { /* [PROBE] 5250 驱动状态字节随读取次数变化（动态看它卡在哪个状态） */
+                static int adr_st_dbg;
+                if (adr_st_dbg < 24 && getenv("EPOCH3477_ADRST")) {
+                    const uint32_t b = ((uint32_t) 0x3659 << 4);
+                    pclog("3477: ADRST #%d 2a=%02X 2b=%02X 2d=%02X 30=%02X 31=%02X 32=%02X 33=%02X 34=%02X\n",
+                          adr_st_dbg, ram[b + 0x2a], ram[b + 0x2b], ram[b + 0x2d], ram[b + 0x30],
+                          ram[b + 0x31], ram[b + 0x32], ram[b + 0x33], ram[b + 0x34]);
+                }
+                adr_st_dbg++;
+            }
             { static int adr_in_dbg; if (adr_in_dbg < 400) { pclog("3477: IN1C6 #%d latch=%02X phase=%d reg=%02X bitcnt=%d wait=%d\n", adr_in_dbg, epoch_adr_latch, epoch_adr_phase, epoch_adr_reg, epoch_adr_bitcnt, epoch_adr_wait); } adr_in_dbg++; } 
             if (pb(PB_ADR)) {
                 /* bit1 = 握手相位；bit4/bit6 = 已写值回显；bit7 = 从设备数据入（暂 0） */
