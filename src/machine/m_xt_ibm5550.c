@@ -2107,6 +2107,14 @@ if (pb(PB_DEAD)) {
         kr_ivt();
 }
 }
+/* [PROBE] 同一区（0x53B8-0x53BF）的字写：ISR 把栈切到 0x0070:0x53B8 后，推栈/信箱都是字写。 */
+if ((pb(PB_ROMW)) && (addr >= 0x53b8) && (addr <= 0x53be)) {
+    static int fsw;
+
+    if (fsw < 400)
+        pclog("3477: FSTATW %04X = %04X pc=%04X:%04X\n", addr, val, CS, cpu_state.pc);
+    fsw++;
+}
     epoch_t *epoch = (epoch_t *) priv;
     epoch_parity_mark(epoch, addr, (epoch->parityenabled == 0) || epoch->parityforce);
     epoch_parity_mark(epoch, addr + 1, (epoch->parityenabled == 0) || epoch->parityforce);
