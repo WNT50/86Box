@@ -2187,6 +2187,8 @@ epoch_swtimer_write(epoch_t *epoch, uint8_t val)
 /* [MODEL] 5250 适配器状态（端口映射由 gdbstub 运行期实测：0x1C0 控制 / 0x1C1 寄存器 /
    0x1C2 选通 / 0x1C6 数据+两相握手） */
 static uint8_t    epoch_adr_reg;
+static int epoch_adr_reg42 = -1;
+
 static uint8_t    epoch_adr_latch;
 static uint8_t    epoch_adr_phase = 1;
 
@@ -2217,6 +2219,9 @@ epoch_misc_in(uint16_t port, void *priv)
         case 0x1C1:
             if (pb(PB_ADR))
                 ret = epoch_adr_reg;
+            { static int rdbg; if (rdbg < 60) pclog("3477: ADRREAD 1C1 -> %02X pc=%04X:%04X\n", ret, CS >> 4, cpu_state.pc); rdbg++; }
+            if (epoch_adr_reg42 < 0) { const char *v = getenv("EPOCH3477_ADR_REG42"); epoch_adr_reg42 = v ? atoi(v) : 0; }
+            if (epoch_adr_reg42) ret |= 0x42;
             break;
         case 0x1C2:
         case 0x1C3:
@@ -2224,6 +2229,7 @@ epoch_misc_in(uint16_t port, void *priv)
                 ret = 0xff;
             break;
         case 0x1C6:
+            { static int rdbg6; if (rdbg6 < 60) pclog("3477: ADRREAD 1C6 -> (computed) pc=%04X:%04X\n", CS >> 4, cpu_state.pc); rdbg6++; }
             { /* [PROBE] 把客人 RAM 里 0x3659 段的握手环代码 dump 出来（每 256B 一段） */
                 static int adr_dump_done;
                 if (!adr_dump_done && getenv("EPOCH3477_ADRDUMP")) {
