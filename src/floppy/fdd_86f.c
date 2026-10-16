@@ -748,6 +748,15 @@ d86f_hole(void *priv)
 void
 d86f_set_track_pos(void *priv, const uint32_t track_pos)
 {
+    /* [EXPERIMENT POSPROBE] Is the track position still advancing at the stall? */
+    if (getenv("POSPROBE")) {
+        static unsigned long ps = 0;
+
+        ps++;
+        if ((ps <= 16) || ((ps % 4096) == 0))
+            pclog("3477: ☆setpos #%lu pos=%u\n", ps, (unsigned) track_pos);
+    }
+
     fdd_drive_t *drv = (fdd_drive_t *) priv;
     d86f_t *     dev = (d86f_t *) drv->d86f_priv;
 
@@ -758,6 +767,15 @@ d86f_set_track_pos(void *priv, const uint32_t track_pos)
 uint32_t
 d86f_get_track_pos(void *priv)
 {
+    /* [EXPERIMENT POSPROBE] Getter call rate (is the bit-stream still being polled?). */
+    if (getenv("POSPROBE")) {
+        static unsigned long pg = 0;
+
+        pg++;
+        if ((pg <= 8) || ((pg % 65536) == 0))
+            pclog("3477: ☆getpos #%lu\n", pg);
+    }
+
     fdd_drive_t * drv = (fdd_drive_t *) priv;
     const d86f_t *dev = (d86f_t *) drv->d86f_priv;
 
@@ -799,8 +817,19 @@ d86f_byteperiod(void *priv)
 
     uint64_t     ret = 32ULL * TIMER_USEC;
 
+    /* [EXPERIMENT d86fbp] Which branch paces the bytes, and what rate does the
+       track claim?  A fixed 32 us period for HD media is 2x too slow. */
+    int bp_probe = getenv("D86FBP") ? 1 : 0;
+
     if (!fdd_get_turbo(drv) || (dev->version != 0x0063) ||
         (dev->state == STATE_SECTOR_NOT_FOUND)) {
+        if (bp_probe) {
+            static unsigned bp_n = 0;
+            if ((bp_n++ % 50000) == 0)
+                pclog("3477: ★D86F节拍 走速率分支 turbo=%d ver=%04X state=%d trkflags=%02X bitrate=%d\n",
+                      fdd_get_turbo(drv), dev->version, dev->state,
+                      d86f_track_flags(drv) & 0x0f, fdc_get_bit_rate(drv->fdc));
+        }
         const double dusec = (double) TIMER_USEC;
         double       p     = 2.0;
 
@@ -831,6 +860,12 @@ d86f_byteperiod(void *priv)
         }
 
         ret = (uint64_t) (p * dusec);
+    } else if (bp_probe) {
+        static unsigned bp_n2 = 0;
+        if ((bp_n2++ % 50000) == 0)
+            pclog("3477: ★D86F节拍 走固定 32us 分支 turbo=%d ver=%04X state=%d trkflags=%02X bitrate=%d\n",
+                  fdd_get_turbo(drv), dev->version, dev->state,
+                  d86f_track_flags(drv) & 0x0f, fdc_get_bit_rate(drv->fdc));
     }
 
     return ret;
@@ -1494,6 +1529,13 @@ d86f_write_find_address_mark_mfm(void *priv, const int side, find_t *find)
 void
 d86f_read_sector_id(void *priv, const int side, const int match)
 {
+    if (getenv("RDID")) {
+        static unsigned long ri = 0;
+
+        ri++;
+        if ((ri <= 10) || ((ri % 64) == 0))
+            pclog("3477: \u2606rdid #%lu side=%d match=%d\n", ri, side, match);
+    }
     fdd_drive_t *drv = (fdd_drive_t *) priv;
     d86f_t *     dev = (d86f_t *) drv->d86f_priv;
 
@@ -1546,7 +1588,31 @@ d86f_read_sector_id(void *priv, const int side, const int match)
                     dev->id_find.sync_marks = dev->id_find.bits_obtained =
                     dev->id_find.bytes_obtained = 0;
                     dev->id_found |= 1;
+    /* [EXPERIMENT IDCMP] Log both ID words: the search only reaches set_sector when
+       the found sector ID equals the requested one, so a mismatch explains the stall. */
+    if (getenv("IDCMP")) {
+        static unsigned long ic      = 0;
+        static unsigned int  lastreq = 0;
+
+        ic++;
+        if ((ic <= 8) || (dev->req_sector.dword != lastreq) ||
+            (dev->last_sector.dword == dev->req_sector.dword) ||
+            ((ic % 8192) == 0))
+            pclog("3477: \u2606idcmp #%lu req=%08X last=%08X eq=%d match=%d crc=%04X/%04X side=%d state=%d\n",
+                  ic, (unsigned) dev->req_sector.dword, (unsigned) dev->last_sector.dword,
+                  (int) (dev->last_sector.dword == dev->req_sector.dword), match,
+                  (unsigned) dev->calc_crc.word, (unsigned) dev->track_crc.word, side,
+                  (int) dev->state);
+        lastreq = dev->req_sector.dword;
+    }
                     if ((dev->last_sector.dword == dev->req_sector.dword) || !match) {
+if (getenv("SETSEC")) {
+                static unsigned long ss = 0;
+
+                ss++;
+                if ((ss <= 12) || ((ss % 64) == 0))
+                    pclog("3477: \u2606setssec #%lu at=%d drv=%d side=%d\n", ss, __LINE__, drv->id, side);
+            }
                         drv->d86f_handler.set_sector(drv, side,
                                                      dev->last_sector.id.c,
                                                      dev->last_sector.id.h,
@@ -2161,6 +2227,13 @@ d86f_format_track(void *priv, const int side, int do_write)
                 d86f_calccrc(dev, fdc->format_sector_id.byte_array[dev->datac]);
             } else {
                 if (dev->datac == 3) {
+if (getenv("SETSEC")) {
+                static unsigned long ss = 0;
+
+                ss++;
+                if ((ss <= 12) || ((ss % 64) == 0))
+                    pclog("3477: \u2606setssec #%lu at=%d drv=%d side=%d\n", ss, __LINE__, drv->id, side);
+            }
                     drv->d86f_handler.set_sector(drv, side,
                                                  fdc->format_sector_id.id.c,
                                                  fdc->format_sector_id.id.h,
@@ -2424,6 +2497,13 @@ d86f_turbo_format(void *priv, const int side, int nop)
                        sizeof(d86f_format_id_t));
                 dev->format_id_count++;
             }
+if (getenv("SETSEC")) {
+                static unsigned long ss = 0;
+
+                ss++;
+                if ((ss <= 12) || ((ss % 64) == 0))
+                    pclog("3477: \u2606setssec #%lu at=%d drv=%d side=%d\n", ss, __LINE__, drv->id, side);
+            }
             drv->d86f_handler.set_sector(drv, side,
                                          fdc->format_sector_id.id.c, fdc->format_sector_id.id.h,
                                          fdc->format_sector_id.id.r, fdc->format_sector_id.id.n);
@@ -2517,6 +2597,13 @@ d86f_turbo_poll(void *priv, const int side)
             dev->last_sector.id.h = fdc_get_read_track_sector(drv->fdc).id.h;
             dev->last_sector.id.r = fdc_get_read_track_sector(drv->fdc).id.r;
             dev->last_sector.id.n = fdc_get_read_track_sector(drv->fdc).id.n;
+if (getenv("SETSEC")) {
+                static unsigned long ss = 0;
+
+                ss++;
+                if ((ss <= 12) || ((ss % 64) == 0))
+                    pclog("3477: \u2606setssec #%lu at=%d drv=%d side=%d\n", ss, __LINE__, drv->id, side);
+            }
             drv->d86f_handler.set_sector(drv, side,
                                          dev->last_sector.id.c,
                                          dev->last_sector.id.h,
@@ -2567,6 +2654,13 @@ d86f_turbo_poll(void *priv, const int side)
             dev->last_sector.id.h = dev->req_sector.id.h;
             dev->last_sector.id.r = dev->req_sector.id.r;
             dev->last_sector.id.n = dev->req_sector.id.n;
+if (getenv("SETSEC")) {
+                static unsigned long ss = 0;
+
+                ss++;
+                if ((ss <= 12) || ((ss % 64) == 0))
+                    pclog("3477: \u2606setssec #%lu at=%d drv=%d side=%d\n", ss, __LINE__, drv->id, side);
+            }
             drv->d86f_handler.set_sector(drv, side,
                                          dev->last_sector.id.c,
                                          dev->last_sector.id.h,
@@ -2647,14 +2741,41 @@ d86f_poll(void *priv)
 
     const int mfm = fdc_is_mfm(drv->fdc);
 
+    /* [EXPERIMENT D86FST] Log every driver state transition: the failing read stalls
+       inside d86f_poll, so the state it settles into names the dead branch. */
+    if (getenv("D86FST")) {
+        static int           st_last = -1;
+        static unsigned long st_n    = 0;
+
+        st_n++;
+        if ((st_n % 65536) == 1)
+            pclog("3477: ☆per byte_period=%llu bitcell_period=%llu ratio=%llu\n",
+                  (unsigned long long) d86f_byteperiod(drv),
+                  (unsigned long long) d86f_get_bitcell_period(drv),
+                  (unsigned long long) (d86f_byteperiod(drv) / d86f_get_bitcell_period(drv)));
+        if ((int) dev->state != st_last) {
+            pclog("3477: ☆st %d -> %d n=%lu turbo=%d mfm=%d side=%d\n",
+                  st_last, (int) dev->state, st_n, fdd_get_turbo(drv), mfm, side);
+            st_last = (int) dev->state;
+        }
+    }
+
     if ((dev->state & 0xF8) == 0xE8) {
         if (!d86f_can_format(drv))
             dev->state = STATE_SECTOR_NOT_FOUND;
     }
 
     if ((dev->state != STATE_IDLE) && (dev->state != STATE_SECTOR_NOT_FOUND) &&
-        ((dev->state & 0xF8) != 0xE8) && !d86f_can_read_address(drv))
+        ((dev->state & 0xF8) != 0xE8) && !d86f_can_read_address(drv)) {
+        /* [EXPERIMENT CANRD] This is the branch that kills the read: name the operand
+           that fails, so the stall stops being a guess. */
+        if (getenv("CANRD"))
+            pclog("3477: CANRD state=%d can=%d fmt_sec=%d fmt_n=%d trk=%d hd=%d\n",
+                  (int) dev->state, d86f_can_read_address(drv),
+                  (int) fdc_get_format_sectors(drv->fdc), (int) fdc_get_format_n(drv->fdc),
+                  drv->track, fdd_get_head(drv));
         dev->state = STATE_SECTOR_NOT_FOUND;
+    }
 
     /*
        Do normal poll if DENSEL is wrong, because Windows 95 is very strict about

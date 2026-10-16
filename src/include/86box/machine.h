@@ -1750,6 +1750,7 @@ extern int             machine_xt_dtk_init(const machine_t *);
 extern int             machine_xt_pcspirit_init(const machine_t *);
 extern int             machine_genxt_init(const machine_t *);
 extern int             machine_xt_glabios_init(const machine_t *);
+extern int             machine_xt_186_init(const machine_t *);
 extern int             machine_xt_top88_init(const machine_t *);
 extern int             machine_xt_super16t_init(const machine_t *);
 extern int             machine_xt_super16te_init(const machine_t *);

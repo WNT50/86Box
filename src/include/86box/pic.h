@@ -81,6 +81,9 @@ extern void pic_set_line_pinned(int irq, int pinned);
 extern void pic_kbd_latch(int enable);
 extern void pic_mouse_latch(int enable);
 extern void pic_init(void);
+/* [Cloud server only, DO NOT USE!!!] XT-convention 8259 setup (8086 mode, given
+   vector base) for a machine whose ROM expects the BIOS to have done it. */
+extern void pic_xt_bios_init(uint8_t base);
 extern void pic_init_pcjr(void);
 extern void pic_init_ibm5140(void (*wake)(void));
 extern uint8_t pic_ibm5140_diag_read(uint8_t selector);
