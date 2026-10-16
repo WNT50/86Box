@@ -2075,6 +2075,14 @@ if ((addr >= 0x148) && (addr <= 0x14f)) {
 pclog("3477: RAMW %04X = %02X pc=%04X:%04X\n", addr, val, CS, cpu_state.pc);
 if (pb(PB_DEAD)) kr_dump();
 }
+/* [PROBE] 磁盘服务状态块 0x53B8-0x53BF（中性：只读值，不注入）。
+   0650:87D1 写 0x80 = 等 RQM 超时；0650:87E0 写 0x20 = 无 DIO；0x53B8 bit7 = 完成标志。 */
+if ((pb(PB_ROMW)) && (addr >= 0x53b8) && (addr <= 0x53bf)) {
+static int fst;
+if (fst < 400)
+pclog("3477: FSTAT %04X = %02X pc=%04X:%04X\n", addr, val, CS, cpu_state.pc);
+fst++;
+}
     epoch_t *epoch = (epoch_t *) priv;
     // epoch_log("%04X:%04X mw %0X\n", cs >> 4, cpu_state.pc, addr);
     epoch_parity_mark(epoch, addr, (epoch->parityenabled == 0) || epoch->parityforce);
