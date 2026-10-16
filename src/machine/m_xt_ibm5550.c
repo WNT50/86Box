@@ -2491,10 +2491,11 @@ x1xx xxxx: Enable parity update (Disable this -> Write data -> Enable this -> Re
                 pclog("3477: A0W out A0 = %02X pc=%04X:%04X\n", val, cs >> 4, cpu_state.pc);
             if (pb(PB_DEAD)) {
                 static long dn;
-                if (dn++ < 300)
                 uint32_t dl = (uint32_t) (cs + cpu_state.pc);
-                pclog("3477: DEAD A0W v=%02X page=%d lin=%06X off=%05X\n",
-                      val, epoch_rom_cur, dl, (dl - 0xF8000u) & 0xFFFFFu);
+
+                if (dn++ < 300)
+                    pclog("3477: DEAD A0W v=%02X page=%d lin=%06X off=%05X\n",
+                          val, epoch_rom_cur, dl, (dl - 0xF8000u) & 0xFFFFFu);
             }
             nmi_mask = val & 0x80;
             if (epoch_is_3477) {
