@@ -183,6 +183,13 @@ epoch_adr_irq_cb(void *priv)
     (void) priv;
     if (epoch_adr_irq >= 0) {
         pclog("3477: ADAPTER IRQ fired (irq=%d)\n", epoch_adr_irq);
+        { static int ivt_done;
+          if (!ivt_done && getenv("EPOCH3477_IVTDBG")) {
+              int v; ivt_done = 1;
+              for (v = 0x08; v <= 0x12; v++)
+                  pclog("3477: IVT %02X -> %04X:%04X\n", v,
+                        (ram[v*4+3] << 8) | ram[v*4+2], (ram[v*4+1] << 8) | ram[v*4]);
+          } }
         picint((uint16_t) (1 << epoch_adr_irq));
     }
 }
@@ -2108,6 +2115,11 @@ epoch_parity_writew(uint32_t addr, uint16_t val, void *priv)
 {
 if ((addr >= 0x148) && (addr <= 0x14f)) {
 pclog("3477: RAMW16 %04X = %04X pc=%04X:%04X\n", addr, val, CS, cpu_state.pc);
+if (getenv("EPOCH3477_IVTDBG") && addr >= 0x30 && addr <= 0x33) {
+    static int ivtw;
+    if (ivtw < 24) pclog("3477: IVTW %04X = %02X pc=%04X:%04X\n", addr, val, CS >> 4, cpu_state.pc);
+    ivtw++;
+}
 if (pb(PB_DEAD)) {
     kr_dump();
     if (addr == 0x14a)
