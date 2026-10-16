@@ -13,6 +13,14 @@ SW=${4:-0}
 IMG=${5:-}
 # turbo 默认 OFF；可用 TURBO=1 或 EPOCH3477_TURBO=1 显式打开
 TURBO=${TURBO:-${EPOCH3477_TURBO:-0}}
+
+# ★ 探针集必须显式声明。终端会话的 export 跨调用存活，曾把 EPOCH3477_FDCLOG /
+#   EPOCH3477_PCSAMPLE 泄漏进别的跑批，造成"同构建不同行为"的假结论（FDCLOG 那轮
+#   日志量差 20 倍、PCSAMPLE 那轮根本没进 RAM 段）。只有列在 PROBES 里的探针保留。
+PROBES="${PROBES:-}"
+for _v in $(env | sed -n 's/^\(EPOCH3477_[A-Z0-9_]*\)=.*/\1/p'); do
+    case " $PROBES " in *" $_v "*) ;; *) unset "$_v" ;; esac
+done
 mkdir -p "$d"
 
 pgrep -f "Xvfb :99" >/dev/null || { Xvfb :99 -screen 0 1280x800x24 >/dev/null 2>&1 & sleep 2; }
