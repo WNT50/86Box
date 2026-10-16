@@ -3761,6 +3761,10 @@ epoch_init(UNUSED(const device_t *info))
                 const char *e_irq = getenv("EPOCH3477_ADAPTER_IRQ");
                 timer_add(&epoch_adr_timer, epoch_adr_irq_cb, NULL, 0);   /* 0 = 不立即启动，稍后 delay 武装 */
                 epoch_adr_irq = e_irq ? atoi(e_irq) : 5;
+                /* [AB] 驱动 ISR 以 ICU type 0x0C(INT0)/0x0D(INT1) 收尾 ⇒ 8259 的 icw2 基址
+                   给出的向量不是它；ADR_OVR=1 时把该 IRQ 的向量覆盖到 0x0C（仿 m_ps2_isa.c:778）。 */
+                if (epoch_adr_irq >= 0 && getenv("EPOCH3477_ADR_OVR"))
+                    pic_set_vector_override((uint8_t) epoch_adr_irq, 0x0C);
                 pclog("3477: ADAPTER IRQ = %d\n", epoch_adr_irq);
             }
             /* 只注册 5250 自检实际驱动的端口，避免抢掉启动早期要用的端口 */
