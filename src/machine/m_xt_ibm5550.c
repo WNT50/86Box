@@ -2115,6 +2115,11 @@ epoch_parity_writew(uint32_t addr, uint16_t val, void *priv)
 {
 if ((addr >= 0x148) && (addr <= 0x14f)) {
 pclog("3477: RAMW16 %04X = %04X pc=%04X:%04X\n", addr, val, CS, cpu_state.pc);
+if (getenv("EPOCH3477_W2A") && addr >= 0x1020 && addr <= 0x1040) {
+    static int w2a;
+    if (w2a < 40) pclog("3477: W2A %04X = %04X CS=%04X ip=%04X (DS=%04X)\n", addr, val, CS, cpu_state.pc, DS);
+    w2a++;
+}
 if (getenv("EPOCH3477_IVTDBG") && addr >= 0x30 && addr <= 0x33) {
     static int ivtw;
     if (ivtw < 24) pclog("3477: IVTW %04X = %02X pc=%04X:%04X\n", addr, val, CS >> 4, cpu_state.pc);
