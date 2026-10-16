@@ -351,8 +351,10 @@ i80186_write_word(i80186_t *dev, uint16_t off, uint16_t val)
 }
 
 static void
-i80186_icu_log(uint16_t off, uint16_t val, int is_wr, int is_byte)
+i80186_icu_log(void *priv, uint16_t port, uint16_t val, int is_wr, int is_byte)
 {
+    i80186_t *dev = (i80186_t *) priv;
+    uint16_t off = (uint16_t) (port - dev->base);
     static int n728w, n728r, n722w;
     if (!i80186_iculog) return;
     if (off == 0x28) {
@@ -367,7 +369,7 @@ static uint8_t
 i80186_inb(uint16_t port, void *priv)
 {
     uint16_t w = i80186_inw(port & 0xFFFEu, priv);
-    i80186_icu_log((uint16_t) (port & 0xFFFEu), (uint16_t) ((port & 1u) ? (w >> 8) : (w & 0xFFu)), 0, 1);
+    i80186_icu_log(priv, (uint16_t) (port & 0xFFFEu), (uint16_t) ((port & 1u) ? (w >> 8) : (w & 0xFFu)), 0, 1);
     return (port & 1u) ? (uint8_t) (w >> 8) : (uint8_t) (w & 0x00FFu);
 }
 
@@ -375,7 +377,7 @@ static void
 i80186_outb(uint16_t port, uint8_t val, void *priv)
 {
     uint16_t w = i80186_inw(port & 0xFFFEu, priv);
-    i80186_icu_log((uint16_t) (port & 0xFFFEu), (uint16_t) val, 1, 1);
+    i80186_icu_log(priv, (uint16_t) (port & 0xFFFEu), (uint16_t) val, 1, 1);
     if (port & 1u) w = (w & 0x00FFu) | ((uint16_t) val << 8);
     else           w = (w & 0xFF00u) | (uint16_t) val;
     i80186_outw(port & 0xFFFEu, w, priv);
