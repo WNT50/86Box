@@ -179,7 +179,8 @@ static void     i80186_outw(uint16_t port, uint16_t val, void *priv);
    （读回 0xFFFF ⇒ bit5 恒 1 ⇒ 客人永远以为 INT1 被屏蔽）。*/
 static uint8_t  i80186_inb(uint16_t port, void *priv);
 static void     i80186_outb(uint16_t port, uint8_t val, void *priv);
-static int      i80186_icub = 0;
+static int      i80186_icub = 1;
+static int      i80186_iculog = 0;
 
 /* The three timers count at one fourth of the CPU clock (270788-001 section
    6.2). 86Box drives tsc at three times the nominal CPU clock on XT-class
@@ -349,10 +350,24 @@ i80186_write_word(i80186_t *dev, uint16_t off, uint16_t val)
         dev->tmr_req = 0;
 }
 
+static void
+i80186_icu_log(uint16_t off, uint16_t val, int is_wr, int is_byte)
+{
+    static int n728w, n728r, n722w;
+    if (!i80186_iculog) return;
+    if (off == 0x28) {
+        if (is_wr) { if (n728w++ < 40) pclog("3477: PCB MASK <- %04X (%s)\n", val, is_byte ? "b" : "w"); }
+        else       { if (n728r++ < 40) pclog("3477: PCB MASK -> %04X (%s)\n", val, is_byte ? "b" : "w"); }
+    } else if (off == 0x22) {
+        if (is_wr && n722w++ < 40) pclog("3477: PCB EOI <- %04X (%s)\n", val, is_byte ? "b" : "w");
+    }
+}
+
 static uint8_t
 i80186_inb(uint16_t port, void *priv)
 {
     uint16_t w = i80186_inw(port & 0xFFFEu, priv);
+    i80186_icu_log((uint16_t) (port & 0xFFFEu), (uint16_t) ((port & 1u) ? (w >> 8) : (w & 0xFFu)), 0, 1);
     return (port & 1u) ? (uint8_t) (w >> 8) : (uint8_t) (w & 0x00FFu);
 }
 
@@ -360,6 +375,7 @@ static void
 i80186_outb(uint16_t port, uint8_t val, void *priv)
 {
     uint16_t w = i80186_inw(port & 0xFFFEu, priv);
+    i80186_icu_log((uint16_t) (port & 0xFFFEu), (uint16_t) val, 1, 1);
     if (port & 1u) w = (w & 0x00FFu) | ((uint16_t) val << 8);
     else           w = (w & 0xFF00u) | (uint16_t) val;
     i80186_outw(port & 0xFFFEu, w, priv);
@@ -424,7 +440,8 @@ i80186_close(void *priv)
 static void *
 i80186_init(const device_t *info)
 {
-    { const char *v = getenv("EPOCH3477_ICUB"); i80186_icub = v ? atoi(v) : 0; }
+    { const char *v = getenv("EPOCH3477_ICUB"); if (v) i80186_icub = atoi(v);
+      v = getenv("EPOCH3477_ICULOG"); i80186_iculog = v ? atoi(v) : 0; }
 
     i80186_t *dev = (i80186_t *) calloc(1, sizeof(i80186_t));
 
