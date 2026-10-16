@@ -2320,7 +2320,11 @@ x1xx xxxx: No floppy drive
             if (pb(PB_A0LOG))
                 pclog("3477: in 0xA2 = %02X (pc=%04X:%04X) font24=%d\n", ret, CS, cpu_state.pc, ((ret == 0x88) ? 1 : 0));
                 /* [PROBE] 同一次 A2 读：打印栈上的返回地址（pushf 之后 [sp+2]），认出是谁在轮询这条环 */
-                pclog("3477: A2CALLER %04X:%04X pc=%04X:%04X\n", SS, mem_readw_phys((((uint32_t) SS) << 4) + ((SP + 2) & 0xFFFF)), CS, cpu_state.pc);
+                pclog("3477: A2CALLER ss=%04X sp=%04X [sp]=%04X [sp+2]=%04X [sp+4]=%04X cs=%04X pc=%04X\n",
+                      SS, SP, mem_readw_phys((((uint32_t) SS) << 4) + (SP & 0xFFFF)),
+                      mem_readw_phys((((uint32_t) SS) << 4) + ((SP + 2) & 0xFFFF)),
+                      mem_readw_phys((((uint32_t) SS) << 4) + ((SP + 4) & 0xFFFF)),
+                      CS, cpu_state.pc);
             break;
 /*
 I/O A3h R: 
