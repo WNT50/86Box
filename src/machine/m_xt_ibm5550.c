@@ -317,7 +317,6 @@ epoch_rompg_switch(uint8_t val)
 }
 
 
-
 enum epoch_nvr_ADDR {
     epoch_nvr_SECOND1,
     epoch_nvr_SECOND10,
@@ -3898,7 +3897,6 @@ i3477_ram_writeb(uint32_t addr, uint8_t val, void *priv)
 }
 
 
-
 static void
 i3477_ram_writew(uint32_t addr, uint16_t val, void *priv)
 {
@@ -4149,6 +4147,56 @@ static uint8_t rombank[0x8000]; /* the 32 KB bank patched into rom[] */
 /* IBM 3477-S: an 80186-12 based, cut-down colour Multistation with no hard disk
    and a 1.44 MB floppy, reusing the 5550 epoch display/keyboard/font stack.
    [Cloud server only, DO NOT USE!!!] First wiring attempt, not validated. */
+
+
+static const device_config_t epoch_5535_config[] = {
+    // clang-format off
+    {
+        .name        = "font",
+        .description = "Font",
+        .type        = CONFIG_SELECTION,
+        .default_int = EPOCH_FONTCARD_ROM_NEW,
+        .selection   = {
+            {
+                .description = "Old",
+                .value = EPOCH_FONTCARD_ROM_OLD
+            },
+            {
+                .description = "New",
+                .value = EPOCH_FONTCARD_ROM_NEW
+            },
+            { .description = "" }
+        }
+    },
+    {
+        .name        = "testmode",
+        .description = "Test mode",
+        .type        = CONFIG_BINARY,
+        .default_int    = 0,
+        .selection      = { { 0 } }
+    },
+    { .name = "", .description = "", .type = CONFIG_END }
+    // clang-format on
+};
+
+const device_t ibm5535_device = {
+    .name          = "IBM 5535 System Unit",
+    .internal_name = "ibm5535",
+    .flags         = DEVICE_ISA,
+    .local         = 0,
+    .init          = epoch_init,
+    .close         = epoch_close,
+    .reset         = epoch_reset,
+    .available     = NULL,
+    .speed_changed = epoch_speed_changed,
+    .force_redraw  = epoch_force_redraw,
+    .config        = epoch_5535_config
+};
+
+/* IBM 3477-S: a cut-down colour Multistation on an 80186-12, with the 5550's
+   display and keyboard but the chip's own timers, DMA and interrupt
+   controller. The system ROS is the first half of the image, in the F8000
+   window; the second half is a burn-in program the ROS can page in. */
 int
 machine_xt_ibm3477_init(const machine_t *model)
 {
@@ -4245,9 +4293,9 @@ machine_xt_ibm3477_init(const machine_t *model)
        lands on the unfilled vector 0x20 - the CPU then runs away into video
        memory.  [Cloud server only, DO NOT USE!!!] */
     pic_init();
-    pic_xt_bios_init(0x08);
+    /* 新 pic.c 里没有 pic_xt_bios_init（该语义已并入 pic_init/钉线机制）*/
     dma_init();
-    pit_ibm5550_init();
+    pit_ibm3477_init();
     nmi_mask = 0;
 
     /* Shared RAM + doorbells towards the keyboard/display controller.  Register
@@ -4256,7 +4304,10 @@ machine_xt_ibm3477_init(const machine_t *model)
 
     /* The 80186's integrated peripherals / chip-select block (the ROM programs
        UMCS via out 0xFFA0 at reset). [Cloud server only, DO NOT USE!!!] */
-    device_add(&i80186_device);
+    /* 用 ibm3477 分支的片内 PCB/ICU/DMA 实现（替代旧的设备层 i80186.c）*/
+    struct i8018x_pcb_t *pcb = device_add(&i8018x_pcb_device);
+    i8018x_pcb_set_dma_channels(pcb, FDC_PRIMARY_DMA, -1);   /* 片上 DMA ch0 给软驱，ch1 空 */
+    i8018x_pcb_set_irq_map(pcb, 4, 2);                        /* 软驱 IRQ4 -> 片内 INT2 */
 
     /* The 5250 adapter's self-test (FD43:0A0E via the module entry at
        FD43:0000) drives its registers through a port table built into the
@@ -4395,86 +4446,6 @@ machine_xt_ibm3477_init(const machine_t *model)
     device_add(&lpt_port_device);
     serial_t *uart = device_add(&ns8250_device);
     serial_setup(uart, 0x3f8, 1); /* Use IRQ 1 */
-
-    return ret;
-}
-
-static const device_config_t epoch_5535_config[] = {
-    // clang-format off
-    {
-        .name        = "font",
-        .description = "Font",
-        .type        = CONFIG_SELECTION,
-        .default_int = EPOCH_FONTCARD_ROM_NEW,
-        .selection   = {
-            {
-                .description = "Old",
-                .value = EPOCH_FONTCARD_ROM_OLD
-            },
-            {
-                .description = "New",
-                .value = EPOCH_FONTCARD_ROM_NEW
-            },
-            { .description = "" }
-        }
-    },
-    {
-        .name        = "testmode",
-        .description = "Test mode",
-        .type        = CONFIG_BINARY,
-        .default_int    = 0,
-        .selection      = { { 0 } }
-    },
-    { .name = "", .description = "", .type = CONFIG_END }
-    // clang-format on
-};
-
-const device_t ibm5535_device = {
-    .name          = "IBM 5535 System Unit",
-    .internal_name = "ibm5535",
-    .flags         = DEVICE_ISA,
-    .local         = 0,
-    .init          = epoch_init,
-    .close         = epoch_close,
-    .reset         = epoch_reset,
-    .available     = NULL,
-    .speed_changed = epoch_speed_changed,
-    .force_redraw  = epoch_force_redraw,
-    .config        = epoch_5535_config
-};
-
-/* IBM 3477-S: a cut-down colour Multistation on an 80186-12, with the 5550's
-   display and keyboard but the chip's own timers, DMA and interrupt
-   controller. The system ROS is the first half of the image, in the F8000
-   window; the second half is a burn-in program the ROS can page in. */
-int
-machine_xt_ibm3477_init(const machine_t *model)
-{
-    int ret;
-
-    ret = bios_load_linear("roms/machines/ibm3477/3477ipl.bin",
-                           0x000f8000, 32768, 0);
-
-    if (bios_only || !ret)
-        return ret;
-
-    epoch_is_5535 = 0;
-
-    device_add(&fdc_xt_5550_device);
-
-    device_add_params(machine_get_kbc_device(machine), (void *) model->kbc_params);
-
-    pic_init();
-    dma_init();
-    pit_ibm3477_init();
-    nmi_mask = 0;
-
-    device_add(&ibm5550_device);
-
-    /* The floppy's completion reaches the CPU through the chip's controller:
-       the line it reports on is taken over as the controller's INT2 input. */
-    struct i8018x_pcb_t *pcb = device_add(&i8018x_pcb_device);
-    i8018x_pcb_set_irq_map(pcb, 4, 2);
 
     return ret;
 }
