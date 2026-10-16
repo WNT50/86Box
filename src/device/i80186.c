@@ -386,6 +386,7 @@ i80186_outb(uint16_t port, uint8_t val, void *priv)
 static uint16_t
 i80186_inw(uint16_t port, void *priv)
 {
+    i80186_icu_log(priv, port, 0, 0, 0);
     i80186_t *dev = (i80186_t *) priv;
     uint16_t  off = (uint16_t) ((port - dev->base) & 0xFEu);
 
@@ -395,6 +396,7 @@ i80186_inw(uint16_t port, void *priv)
 static void
 i80186_outw(uint16_t port, uint16_t val, void *priv)
 {
+    i80186_icu_log(priv, port, val, 1, 0);
     i80186_write_word((i80186_t *) priv, (uint16_t) ((port - ((i80186_t *) priv)->base) & 0xFEu), val);
 }
 
