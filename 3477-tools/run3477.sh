@@ -45,7 +45,7 @@ gfxcard = internal
 
 [Input devices]
 keyboard_type = keyboard_ps55
-mouse_type = none
+mouse_type = ps2
 tablet_type = none
 
 [Floppy and CD-ROM drives]

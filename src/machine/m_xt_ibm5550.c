@@ -1994,6 +1994,9 @@ epoch_parity_readw(uint32_t addr, void *priv)
 static void
 epoch_parity_writeb(uint32_t addr, uint8_t val, void *priv)
 {
+    /* [PROBE] ROM 自检完成的证据：F9216-F921D 会把设备 ID 两字节写到绝对 0x14C/0x14D */
+    if ((addr >= 0x148) && (addr <= 0x14f))
+        pclog("3477: RAMW %04X = %02X pc=%04X:%04X\n", addr, val, CS, cpu_state.pc);
     epoch_t *epoch = (epoch_t *) priv;
     // epoch_log("%04X:%04X mw %0X\n", cs >> 4, cpu_state.pc, addr);
     epoch_parity_mark(epoch, addr, (epoch->parityenabled == 0) || epoch->parityforce);
@@ -2010,6 +2013,8 @@ epoch_parity_writeb(uint32_t addr, uint8_t val, void *priv)
 static void
 epoch_parity_writew(uint32_t addr, uint16_t val, void *priv)
 {
+    if ((addr >= 0x148) && (addr <= 0x14f))
+        pclog("3477: RAMW16 %04X = %04X pc=%04X:%04X\n", addr, val, CS, cpu_state.pc);
     epoch_t *epoch = (epoch_t *) priv;
     epoch_parity_mark(epoch, addr, (epoch->parityenabled == 0) || epoch->parityforce);
     epoch_parity_mark(epoch, addr + 1, (epoch->parityenabled == 0) || epoch->parityforce);
