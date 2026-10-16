@@ -2077,10 +2077,10 @@ if (pb(PB_DEAD)) kr_dump();
 }
 /* [PROBE] 磁盘服务状态块 0x53B8-0x53BF（中性：只读值，不注入）。
    0650:87D1 写 0x80 = 等 RQM 超时；0650:87E0 写 0x20 = 无 DIO；0x53B8 bit7 = 完成标志。 */
-if ((pb(PB_ROMW)) && (addr >= 0x53b8) && (addr <= 0x53bf)) {
+if ((pb(PB_ROMW)) && (addr >= 0x5ab0) && (addr <= 0x5abf)) {   /* ISR 信箱/推栈：ss=0x0070 ⇒ 线性 = 0x700 + 0x53B8 */
 static int fst;
 if (fst < 400)
-pclog("3477: FSTAT %04X = %02X pc=%04X:%04X\n", addr, val, CS, cpu_state.pc);
+pclog("3477: MAILBOX %04X = %02X pc=%04X:%04X\n", addr, val, CS, cpu_state.pc);
 fst++;
 }
     epoch_t *epoch = (epoch_t *) priv;
@@ -2108,11 +2108,11 @@ if (pb(PB_DEAD)) {
 }
 }
 /* [PROBE] 同一区（0x53B8-0x53BF）的字写：ISR 把栈切到 0x0070:0x53B8 后，推栈/信箱都是字写。 */
-if ((pb(PB_ROMW)) && (addr >= 0x53b8) && (addr <= 0x53be)) {
+if ((pb(PB_ROMW)) && (addr >= 0x5ab0) && (addr <= 0x5abe)) {   /* 同上（字写版） */
     static int fsw;
 
     if (fsw < 400)
-        pclog("3477: FSTATW %04X = %04X pc=%04X:%04X\n", addr, val, CS, cpu_state.pc);
+        pclog("3477: MAILBOXW %04X = %04X pc=%04X:%04X\n", addr, val, CS, cpu_state.pc);
     fsw++;
 }
     epoch_t *epoch = (epoch_t *) priv;
