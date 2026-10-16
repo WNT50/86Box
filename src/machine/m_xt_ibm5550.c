@@ -2226,7 +2226,12 @@ epoch_misc_in(uint16_t port, void *priv)
         case 0x1C6: { static int adr_in_dbg; if (adr_in_dbg < 400) { pclog("3477: IN1C6 #%d latch=%02X phase=%d reg=%02X bitcnt=%d wait=%d\n", adr_in_dbg, epoch_adr_latch, epoch_adr_phase, epoch_adr_reg, epoch_adr_bitcnt, epoch_adr_wait); } adr_in_dbg++; } 
             if (pb(PB_ADR)) {
                 /* bit1 = 握手相位；bit4/bit6 = 已写值回显；bit7 = 从设备数据入（暂 0） */
-                ret = (uint8_t) ((epoch_adr_latch & 0x7d) | (epoch_adr_phase ? 0x02 : 0x00));
+                static int adrrb = -1;
+                if (adrrb < 0) { const char *v = getenv("EPOCH3477_ADRRB"); adrrb = v ? atoi(v) : 0; }
+                /* [AB] 读侧原本用 0x7d 掩掉了 bit7，而写侧辛苦算出的 resp_bit 正落在 bit7
+                   （"从设备数据入"）⇒ 客人轮询 0x1C6 等应答时永远等不到。adrrb=1 放行 bit7。 */
+                ret = (uint8_t) ((epoch_adr_latch & 0x7d) | (epoch_adr_phase ? 0x02 : 0x00)
+                                 | (adrrb ? (epoch_adr_latch & 0x80) : 0));
             }
             break;
 
