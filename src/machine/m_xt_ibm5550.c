@@ -2271,11 +2271,11 @@ epoch_misc_in(uint16_t port, void *priv)
                     /* [FIX] 段址必须用运行时 CS（pc 日志里的 3659 是 cs>>4 的截断值）*/
                     const uint32_t b = (CS & 0xFFF0000u) + ((CS & 0xF0000u) ? 0 : 0);
                     /* [FIX2] 驱动用 DS 相对寻址（CS 段是代码、数据区为 0xCC 未初始化）*/
-                    const uint32_t bb = (uint32_t) DS;
+                    const uint32_t bb = ((uint32_t) DS) << 4;   /* 本核 seg base 存原始段值 */
                     pclog("3477: ADRST #%d 2a=%02X 2b=%02X 2d=%02X 30=%02X 31=%02X 32=%02X 33=%02X 34=%02X\n",
                           adr_st_dbg, ram[bb + 0x2a], ram[bb + 0x2b], ram[bb + 0x2d], ram[bb + 0x30],
                           ram[bb + 0x31], ram[bb + 0x32], ram[bb + 0x33], ram[bb + 0x34]);
-                    pclog("3477: ADRPORT ds=%04X [6]=%04X [8]=%04X [C]=%04X\n", DS >> 4, ram[bb+6] | (ram[bb+7]<<8), ram[bb+8] | (ram[bb+9]<<8), ram[bb+0xC] | (ram[bb+0xD]<<8));
+                    pclog("3477: ADRPORT ds=%04X [6]=%04X [8]=%04X [C]=%04X [24]=%04X E400blk=%02X%02X%02X%02X\n", DS, ram[bb+6] | (ram[bb+7]<<8), ram[bb+8] | (ram[bb+9]<<8), ram[bb+0xC] | (ram[bb+0xD]<<8), ram[bb+0x24] | (ram[bb+0x25]<<8), ram[0xE4000+0], ram[0xE4000+1], ram[0xE4000+2], ram[0xE4000+3]);
                 }
                 adr_st_dbg++;
             }
