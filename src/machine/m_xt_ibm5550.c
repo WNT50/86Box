@@ -2223,7 +2223,22 @@ epoch_misc_in(uint16_t port, void *priv)
             if (pb(PB_ADR))
                 ret = 0xff;
             break;
-        case 0x1C6: { static int adr_in_dbg; if (adr_in_dbg < 400) { pclog("3477: IN1C6 #%d latch=%02X phase=%d reg=%02X bitcnt=%d wait=%d\n", adr_in_dbg, epoch_adr_latch, epoch_adr_phase, epoch_adr_reg, epoch_adr_bitcnt, epoch_adr_wait); } adr_in_dbg++; } 
+        case 0x1C6:
+            { /* [PROBE] 把客人 RAM 里 0x3659 段的握手环代码 dump 出来（每 256B 一段） */
+                static int adr_dump_done;
+                if (!adr_dump_done && getenv("EPOCH3477_ADRDUMP")) {
+                    int k;
+                    adr_dump_done = 1;
+                    for (k = 0; k < 4; k++) {
+                        int i;
+                        pclog("3477: DUMP3659 base=%04X ", 0x0A00 + k * 0x40);
+                        for (i = 0; i < 0x40; i++)
+                            pclog("%02X", ram[((uint32_t) 0x3659 << 4) + 0x0A00 + k * 0x40 + i]);
+                        pclog("\n");
+                    }
+                }
+            }
+            { static int adr_in_dbg; if (adr_in_dbg < 400) { pclog("3477: IN1C6 #%d latch=%02X phase=%d reg=%02X bitcnt=%d wait=%d\n", adr_in_dbg, epoch_adr_latch, epoch_adr_phase, epoch_adr_reg, epoch_adr_bitcnt, epoch_adr_wait); } adr_in_dbg++; } 
             if (pb(PB_ADR)) {
                 /* bit1 = 握手相位；bit4/bit6 = 已写值回显；bit7 = 从设备数据入（暂 0） */
                 static int adrrb = -1;
