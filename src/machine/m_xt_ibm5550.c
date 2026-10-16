@@ -37,6 +37,7 @@
 #define HAVE_STDARG_H
 #include <86box/86box.h>
 #include "cpu.h"
+#include "8018x.h"
 #include <86box/timer.h>
 #include <86box/io.h>
 #include <86box/dma.h>
@@ -2930,6 +2931,37 @@ pit_ibm5550_init(void)
     return pit;
 }
 
+/* The 3477-S needs a timer but must not have the 5550's software one: that is
+   counter 1's output driving the 8259's line 6, and the 3477-S uses that line
+   for the chip's own interrupt controller instead. Only the refresh counter
+   and the speaker are wired up here. */
+static pit_t *
+pit_ibm3477_init(void)
+{
+    void *pit;
+
+    pit_intf_t *pit_intf = &pit_devs[0];
+
+    pit       = device_add(&i8253_device);
+    *pit_intf = pit_classic_intf;
+
+    pit_intf->data = pit;
+
+    for (uint8_t i = 0; i < 3; i++) {
+        pit_intf->set_gate(pit_intf->data, i, 1);
+        pit_intf->set_using_timer(pit_intf->data, i, 1);
+    }
+    pit_intf->set_using_timer(pit_intf->data, TIMER_CTR_1, 0);
+
+    pit_intf->set_out_func(pit_intf->data, TIMER_CTR_0, pit_refresh_timer_xt);
+    pit_intf->set_out_func(pit_intf->data, TIMER_CTR_2, pit_speaker_timer);
+    pit_intf->set_load_func(pit_intf->data, TIMER_CTR_2, speaker_set_count);
+
+    pit_intf->set_gate(pit_intf->data, TIMER_CTR_2, 0);
+
+    return pit;
+}
+
 static const device_config_t epoch_5550_config[] = {
     // clang-format off
     {
@@ -3087,6 +3119,45 @@ const device_t ibm5535_device = {
     .force_redraw  = epoch_force_redraw,
     .config        = epoch_5535_config
 };
+
+/* IBM 3477-S: a cut-down colour Multistation on an 80186-12, with the 5550's
+   display and keyboard but the chip's own timers, DMA and interrupt
+   controller. The system ROS is the first half of the image, in the F8000
+   window; the second half is a burn-in program the ROS can page in. */
+int
+machine_xt_ibm3477_init(const machine_t *model)
+{
+    int ret;
+
+    ret = bios_load_linear("roms/machines/ibm3477/3477ipl.bin",
+                           0x000f8000, 32768, 0);
+
+    if (bios_only || !ret)
+        return ret;
+
+    epoch_is_5535 = 0;
+
+    device_add(&fdc_xt_5550_device);
+
+    device_add_params(machine_get_kbc_device(machine), (void *) model->kbc_params);
+
+    pic_init();
+    dma_init();
+    pit_ibm3477_init();
+    nmi_mask = 0;
+
+    device_add(&ibm5550_device);
+
+    /* The floppy's completion reaches the CPU through the chip's controller:
+       the line it reports on is taken over as the controller's INT2 input.
+       Also 8018x board has no separate 8237: the chip's channel 0 carries
+       the floppy's transfers, and channel 1 is wired to nothing here. */
+    struct i8018x_pcb_t *pcb = device_add(&i8018x_pcb_device);
+    i8018x_pcb_set_dma_channels(pcb, FDC_PRIMARY_DMA, -1);
+    i8018x_pcb_set_irq_map(pcb, 4, 2);
+
+    return ret;
+}
 
 /* IBM Multistation 5535-M: a 286 on the 5550 planar, with a 32 KB IPL at
    F8000. Currently we reports no hard disk through port 0xA2 bit 7, which

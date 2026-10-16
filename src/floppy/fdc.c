@@ -368,8 +368,14 @@ fdc_int(fdc_t *fdc, int set_fintr)
 
     if (fdc->flags & FDC_FLAG_PS2_MCA)
         ienable = 1;
-    else if (!(fdc->flags & (FDC_FLAG_PCJR | FDC_FLAG_PCJX)))
-        ienable = !!(fdc->dor & 8);
+    else if (!(fdc->flags & (FDC_FLAG_PCJR | FDC_FLAG_PCJX))) {
+        /* IBM Multistation 3477-S's guest takes the completion
+           interrupt without arming the card's own enable bit. */
+        if (machines[machine].init == machine_xt_ibm3477_init)
+            ienable = 1;
+        else
+            ienable = !!(fdc->dor & 8);
+    }
 
     if (ienable) {
         if (fdc->irq != 0xff)
