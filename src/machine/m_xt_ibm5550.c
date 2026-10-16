@@ -2241,7 +2241,10 @@ epoch_misc_in(uint16_t port, void *priv)
                 ret = 0xff;
             break;
         case 0x1C6:
-            { static int rdbg6; if (rdbg6 < 60) pclog("3477: ADRREAD 1C6 -> (computed) pc=%04X:%04X\n", CS >> 4, cpu_state.pc); rdbg6++; }
+            { static int rdbg6; if (rdbg6 < 40) {
+    pclog("3477: ADRREAD 1C6 #%d CSbase=%05X ip=%04X lin_cs_plus_pc=%05X pc_as_lin=%05X DSbase=%05X SSbase=%05X\n",
+          rdbg6, CS, cpu_state.pc, (CS + cpu_state.pc) & 0xFFFFF, cpu_state.pc & 0xFFFFF, DS, SS);
+} rdbg6++; }
             { /* [PROBE] 把客人 RAM 里 0x3659 段的握手环代码 dump 出来（每 256B 一段） */
                 static int adr_dump_done;
                 if (!adr_dump_done && getenv("EPOCH3477_ADRDUMP")) {
