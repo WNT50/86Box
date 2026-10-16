@@ -3983,7 +3983,6 @@ i3477_shared_close(void *priv)
    2 字节写监视：HB 直方图显示客人 ~63% 时间耗在等 [0x53B8] bit7 的超时环（0650:863F-8648）里，
    需要当场抓出「谁在什么时候置位」。只记写，不记读（读是热路径）。 */
 static mem_mapping_t i3477_flagmap;
-static mem_mapping_t i3477_lowmap;
 static long i3477_flag_reads = 0;
 static uint32_t i3477_flag_last = 0xFFFFFFFF;
 static uint8_t
@@ -4075,46 +4074,6 @@ i3477_sample(void *priv)
     timer_advance_u64(&dev->sample_timer, 20ULL * TIMER_USEC);
 }
 
-static uint8_t
-i3477_low_readb(uint32_t addr, void *priv)
-{
-    uint8_t ret = mem_readb_phys(addr);
-
-    if (pb(PB_DEAD)) {
-        static long rn = 0;
-        if (rn++ < 400)
-            pclog("3477: DEAD lowR [%04X] = %02X pc=%04X:%04X AX=%04X CX=%04X\n",
-                  addr, ret, CS, cpu_state.pc, AX, CX);
-    }
-    return ret;
-}
-
-static uint16_t
-i3477_low_readw(uint32_t addr, void *priv)
-{
-    return (uint16_t) (mem_readb_phys(addr) | (mem_readb_phys(addr + 1) << 8));
-}
-
-static void
-i3477_low_writeb(uint32_t addr, uint8_t val, void *priv)
-{
-    mem_writeb_phys(addr, val);
-
-    if (pb(PB_DEAD)) {
-        static long wn = 0;
-        if (wn++ < 400)
-            pclog("3477: DEAD lowW [%04X] <- %02X pc=%04X:%04X AX=%04X CX=%04X\n",
-                  addr, val, CS, cpu_state.pc, AX, CX);
-    }
-}
-
-static void
-i3477_low_writew(uint32_t addr, uint16_t val, void *priv)
-{
-    i3477_low_writeb(addr, (uint8_t) (val & 0xff), priv);
-    i3477_low_writeb(addr + 1, (uint8_t) (val >> 8), priv);
-}
-
 static void *
 i3477_shared_init(const device_t *info)
 {
@@ -4134,8 +4093,6 @@ i3477_shared_init(const device_t *info)
         /* 同一开关下顺带装 0x53B8 写监视（2 字节，盖在 RAM 上） */
         mem_mapping_add(&i3477_flagmap, 0x53B8, 2, i3477_flag_readb, i3477_flag_readw, NULL,
                         i3477_flag_writeb, i3477_flag_writew, NULL, NULL, MEM_MAPPING_EXTERNAL, dev);
-        mem_mapping_add(&i3477_lowmap, 0x14C, 4, i3477_low_readb, i3477_low_readw, NULL,
-                        i3477_low_writeb, i3477_low_writew, NULL, NULL, MEM_MAPPING_EXTERNAL, dev);
     }
 
     return dev;
