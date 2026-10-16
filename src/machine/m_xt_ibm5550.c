@@ -84,7 +84,11 @@ kr_dump(void)
 static void
 kr_ivt(void)
 {
+    static int kn;
     unsigned v;
+
+    if (kn++ >= 3)
+        return;
 
     pclog("3477: KRIVT cs=%04X ip=%04X\n", CS, cpu_state.pc);
     /* 自证：崩溃处理程序刚写过 0:0x14A-0x14F，应读到 00 00 00 F8 03 00 */
@@ -2486,6 +2490,8 @@ x1xx xxxx: Enable parity update (Disable this -> Write data -> Enable this -> Re
             if (pb(PB_ROMW))
                 pclog("3477: A0W out A0 = %02X pc=%04X:%04X\n", val, cs >> 4, cpu_state.pc);
             if (pb(PB_DEAD)) {
+                static long dn;
+                if (dn++ < 300)
                 uint32_t dl = (uint32_t) (cs + cpu_state.pc);
                 pclog("3477: DEAD A0W v=%02X page=%d lin=%06X off=%05X\n",
                       val, epoch_rom_cur, dl, (dl - 0xF8000u) & 0xFFFFFu);
