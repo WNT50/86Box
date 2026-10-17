@@ -407,8 +407,16 @@ kbc_send_to_ob(atkbc_t *dev, uint8_t val, uint8_t channel, uint8_t stat_hi)
 
             if (dev->mem[0x20] & 0x02)
                 kbc_set_do_irq(dev, channel);
-        } else if (dev->mem[0x20] & 0x01)
-            kbc_set_do_irq(dev, channel);
+        } else {
+            /* A multi-byte PS/55 response leaves bytes behind; the 3477-S ROS
+               waits on MFULL for them and times out at 0xFFFF without it. */
+            if ((machines[machine].init == machine_xt_ibm3477_init) &&
+                (dev->ports[0] != NULL) && (dev->ports[0]->out_new != -1))
+                dev->status |= STAT_MFULL;
+
+            if (dev->mem[0x20] & 0x01)
+                kbc_set_do_irq(dev, channel);
+        }
     } else if (dev->mem[0x20] & 0x01) {
         /* AT KBC: IRQ 1 is level-triggered because it is tied to OBF. */
         if (dev->irq[0] != 0xffff) {

@@ -5773,7 +5773,13 @@ keyboard_at_write(void *priv)
                 break;
 
             case 0xf3: /* set typematic rate/delay */
-                if (val & 0x80) {
+                  if ((val & 0x80) && (keyboard_mode == 0x8a)) {
+                    /* PS/55 (IBM-J 5576) scan code set: bit 7 belongs to the
+                       typematic parameter rather than marking it invalid. */
+                    kbc_at_dev_queue_add(dev, 0xfa, 0); /* ACK */
+                    break;
+                  }
+                  if (val & 0x80) {
                     keyboard_at_log("%s: Set typematic rate/delay [%02X] has bit 7 set - invalid\n", dev->name, val);
                     dev->flags |= FLAG_CTRLDAT;      /* Resend = keep waiting for parameter. */
                     kbc_at_dev_queue_add(dev, 0xfe, 0); /* Command response */

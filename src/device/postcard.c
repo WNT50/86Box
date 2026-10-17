@@ -200,9 +200,14 @@ postcard_init(UNUSED(const device_t *info))
         postcard_port = is286 ? 0x190 : 0x90; /* ISA PS/2 machines */
     else if (strstr(machines[machine].name, " IBM XT "))
         postcard_port = 0x60; /* IBM XT */
-    else if (strstr(machines[machine].name, " Multistation "))
-        postcard_port = 0xA1; /* IBM 5550 */
-    else if (strstr(machines[machine].name, " IBM PCjr")) {
+    else if (strstr(machines[machine].name, " Multistation ")) {
+        if (machines[machine].init == machine_xt_ibm3477_init) {
+            /* The 3477-S reports its progress on 362h rather than on the
+               5550's A1h. */
+            postcard_port = 0x362;
+        } else
+            postcard_port = 0xA1; /* IBM 5550 */
+    } else if (strstr(machines[machine].name, " IBM PCjr")) {
         postcard_port = 0x10; /* IBM PCjr */
         postcard_ports_num = 3; /* IBM PCjr error ports 11h and 12h */
     } else if (strstr(machines[machine].name, " Compaq ") && 
