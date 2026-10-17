@@ -20,6 +20,8 @@
 #define HAVE_STDARG_H
 #include <86box/86box.h>
 #include <86box/io.h>
+#include <86box/mem.h>
+#include <86box/timer.h>
 #include <86box/device.h>
 #include <86box/machine.h>
 #include <86box/plat.h>
@@ -142,6 +144,10 @@ postcard_reset(void)
 static void
 postcard_write(uint16_t port, uint8_t val, UNUSED(void *priv))
 {
+    /* TEMPORARY probe: log every progress write, repeats included, before the
+       unchanged-value early return below. */
+    pclog("3477: POST %04X:%08X port=%03X val=%02X\n", CS, cpu_state.pc, port, val);
+
     /* Index relative to the base port: unlike `port & POSTCARD_MASK`, this
        also works for ports whose low bits are not zero (e.g. the IBM 5550
        diagnostics on port A1h). */
@@ -188,6 +194,19 @@ postcard_writel(uint16_t port, uint32_t val, UNUSED(void *priv))
     postcard_setui();
 }
 
+/* TEMPORARY probe: an independent 1 Hz PC sampler for the 3477-S, so a stall
+   that never touches any port or device is still visible. */
+static pc_timer_t postcard_sample_timer;
+
+static void
+postcard_sample(UNUSED(void *priv))
+{
+    if (machines[machine].init == machine_xt_ibm3477_init)
+        pclog("3477: sample pc=%04X:%08X ret=%04X\n", CS, cpu_state.pc,
+              mem_readw_phys(((uint32_t) SS << 4) + SP));
+    timer_advance_u64(&postcard_sample_timer, 1000000ULL * TIMER_USEC);
+}
+
 static void *
 postcard_init(UNUSED(const device_t *info))
 {
@@ -200,9 +219,14 @@ postcard_init(UNUSED(const device_t *info))
         postcard_port = is286 ? 0x190 : 0x90; /* ISA PS/2 machines */
     else if (strstr(machines[machine].name, " IBM XT "))
         postcard_port = 0x60; /* IBM XT */
-    else if (strstr(machines[machine].name, " Multistation "))
-        postcard_port = 0xA1; /* IBM 5550 */
-    else if (strstr(machines[machine].name, " IBM PCjr")) {
+    else if (strstr(machines[machine].name, " Multistation ")) {
+        if (machines[machine].init == machine_xt_ibm3477_init) {
+            /* The 3477-S reports its progress on 362h rather than on the
+               5550's A1h. */
+            postcard_port = 0x362;
+        } else
+            postcard_port = 0xA1; /* IBM 5550 */
+    } else if (strstr(machines[machine].name, " IBM PCjr")) {
         postcard_port = 0x10; /* IBM PCjr */
         postcard_ports_num = 3; /* IBM PCjr error ports 11h and 12h */
     } else if (strstr(machines[machine].name, " Compaq ") && 
@@ -218,6 +242,8 @@ postcard_init(UNUSED(const device_t *info))
     postcard_log("POST card initializing on port %04Xh\n", postcard_port);
 
     postcard_reset();
+
+    timer_add(&postcard_sample_timer, postcard_sample, NULL, 1);
 
     if (postcard_port)
         io_sethandler(postcard_port, postcard_ports_num,
@@ -235,6 +261,8 @@ postcard_init(UNUSED(const device_t *info))
 static void
 postcard_close(UNUSED(void *priv))
 {
+    timer_disable(&postcard_sample_timer);
+
     if (postcard_port)
         io_removehandler(postcard_port, postcard_ports_num,
                          NULL, NULL, NULL, postcard_write, NULL, NULL, NULL);

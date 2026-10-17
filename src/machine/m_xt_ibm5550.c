@@ -4116,6 +4116,7 @@ machine_xt_ibm5550_init(const machine_t *model)
         return ret;
 
     epoch_is_5535 = 0;
+    epoch_is_3477 = 0;
 
     device_add(&fdc_xt_5550_device);
 
@@ -4221,7 +4222,6 @@ machine_xt_ibm3477_init(const machine_t *model)
     epoch_is_5535 = 0;
     epoch_is_3477 = 1;
 
-
     device_add(&fdc_xt_5550_device);
 
     device_add_params(machine_get_kbc_device(machine), (void *) model->kbc_params);
@@ -4260,6 +4260,7 @@ machine_xt_ibm5535_init(const machine_t *model)
         return ret;
 
     epoch_is_5535 = 1;
+    epoch_is_3477 = 0;
 
     device_add(&fdc_xt_5550_device);
 

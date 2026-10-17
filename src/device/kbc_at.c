@@ -390,6 +390,10 @@ kbc_send_to_ob(atkbc_t *dev, uint8_t val, uint8_t channel, uint8_t stat_hi)
     if (temp == -1)
         return;
 
+    /* TEMPORARY probe: does the controller ever hand 0x55 to the ROM? */
+    if (machines[machine].init == machine_xt_ibm3477_init)
+        pclog("3477: KBC send %02X ch=%d\n", temp, channel);
+
     if ((kbc_ven == KBC_VEN_AMI) || (kbc_ven == KBC_VEN_AMI_TRIGEM) ||
         (kbc_ven == KBC_VEN_HOLTEK) || (kbc_ven == KBC_VEN_UMC) ||
         (dev->misc_flags & FLAG_PS2))
@@ -411,11 +415,10 @@ kbc_send_to_ob(atkbc_t *dev, uint8_t val, uint8_t channel, uint8_t stat_hi)
             if (dev->mem[0x20] & 0x02)
                 kbc_set_do_irq(dev, channel);
         } else {
-            /* [AB] PS/55 键盘是多字节应答设备（复位序列连发 3 个 ID 字节），
-               仍有字节待取时必须置 MFULL，供 3477-S IPL 的“等状态位 5”助手
-               （ROM 0x8AE7）继续取走后续字节；否则该助手恒超时 0xFFFF。 */
-            if ((dev->ports[0] != NULL) && (dev->ports[0]->out_new != -1))
-                dev->status |= STAT_MFULL;
+            /* A multi-byte PS/55 response leaves bytes behind; the 3477-S ROS
+               waits on MFULL for them and times out at 0xFFFF without it. */
+            if ((machines[machine].init == machine_xt_ibm3477_init) &&
+                (dev->ports[0] != NULL) && (dev->ports[0]->out_new != -1))                dev->status |= STAT_MFULL;
 
             if (dev->mem[0x20] & 0x01)
                 kbc_set_do_irq(dev, channel);
@@ -534,6 +537,11 @@ kbc_scan_kbd_at(atkbc_t *dev)
 static void
 kbc_at_poll_at(atkbc_t *dev)
 {
+    /* TEMPORARY probe: periodic PC sample for the 3477-S, independent of any
+       device access, so a stall before the keyboard controller is visible. */
+    static uint32_t sample_count = 0;
+    if ((machines[machine].init == machine_xt_ibm3477_init) && ((++sample_count & 0xFFFF) == 0))
+        pclog("3477: sample pc=%04X:%08X\n", CS, cpu_state.pc);
     switch (dev->state) {
         case STATE_RESET:
             if (dev->status & STAT_IFULL) {
@@ -2755,6 +2763,10 @@ kbc_at_port_2_write(uint16_t port, uint8_t val, void *priv)
     atkbc_t *dev = (atkbc_t *) priv;
     uint8_t kbc_ven = dev->flags & KBC_VEN_MASK;
     uint8_t fast_a20 = (kbc_ven != KBC_VEN_SIEMENS);
+
+    /* TEMPORARY probe: does the ROM ever write a command to 0x64? */
+    if (machines[machine].init == machine_xt_ibm3477_init)
+        pclog("3477: KBC out 64=%02X pc=%04X:%08X\n", val, CS, cpu_state.pc);
 
     kbc_at_log("ATkbc: [%04X:%08X] write(%04X) = %02X\n", CS, cpu_state.pc, port, val);
 

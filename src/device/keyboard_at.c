@@ -5795,8 +5795,7 @@ keyboard_at_write(void *priv)
                     keyboard_at_log("%s: Set typematic rate/delay [%02X] PS/55: accepted\n", dev->name, val);
                     break;
                 }
-                if (val & 0x80) {
-                    keyboard_at_log("%s: Set typematic rate/delay [%02X] has bit 7 set - invalid\n", dev->name, val);
+                if (val & 0x80) {                    keyboard_at_log("%s: Set typematic rate/delay [%02X] has bit 7 set - invalid\n", dev->name, val);
                     dev->flags |= FLAG_CTRLDAT;      /* Resend = keep waiting for parameter. */
                     kbc_at_dev_queue_add(dev, 0xfe, 0); /* Command response */
                     dev->state = DEV_STATE_MAIN_WANT_IN;

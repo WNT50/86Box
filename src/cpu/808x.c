@@ -106,6 +106,9 @@ static bool cpu_md_write_disable = 1;
 #define SEG_CHECK_READ(seg)
 #define SEG_CHECK_WRITE(seg)
 #define CHECK_READ(a, b, c)
+#define CHECK_READ_EA(n)
+#define PROBE_READ_EA(n)
+#define CHECK_WRITE_EA(n)
 #define CHECK_WRITE(a, b, c)
 #define UN_USED(x) (void) (x)
 #define fetch_ea_16(val)
@@ -1263,9 +1266,10 @@ check_interrupts(int nec_hlt)
             /* An 80186 stops DMA from here until the handler's IRET. */
             cpu_dhlt_events++;
             cpu_dhlt_last_event = 1;
-#ifndef OLD_NMI_BEHAVIOR
+            /* The latched NMI has been taken: clear it, or the handler
+               re-enters immediately on every return (the 3477-S arms a
+               parity NMI deliberately and expects to resume). */
             nmi = 0;
-#endif
             return;
         }
         if (i_flag && (pic.int_pending || (i8018x_pcb_current != NULL && i8018x_pcb_icu_pending())) && (is80c88 ? !(noint & 1) : !noint)) {

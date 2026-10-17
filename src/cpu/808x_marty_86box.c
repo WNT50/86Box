@@ -1538,6 +1538,9 @@ extern uint32_t   cpu_data;
 #define SEG_CHECK_READ(seg)
 #define SEG_CHECK_WRITE(seg)
 #define CHECK_READ(a, b, c)
+#define CHECK_READ_EA(n)
+#define PROBE_READ_EA(n)
+#define CHECK_WRITE_EA(n)
 #define CHECK_WRITE(a, b, c)
 #define UN_USED(x) (void) (x)
 #define fetch_ea_16(val)
@@ -4709,9 +4712,6 @@ static void
 m808x_consume_host_nmi(void)
 {
     nmi_enable = 0;
-#ifndef OLD_NMI_BEHAVIOR
-    nmi = 0;
-#endif
 }
 
 void
