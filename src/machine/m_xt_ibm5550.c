@@ -4212,75 +4212,8 @@ machine_xt_ibm3477_init(const machine_t *model)
 {
     int ret;
 
-    /* [EXPERIMENT ipl1] The 3477-S ROM pair is a 64 KB 16-bit image: the upper
-       32 KB (F8000-FFFFF) is the in-situ burn-in (test) program ("AZALEA-DBCS
-       ... Insitu Burn-in Program Ver 1.2"), the lower half (F0000-F7FFF) is the
-       IPL/BIOS ("...System ROS (c) Copyright IBM Corp. 1989"), and the image's
-       reset vector at 0xFFFF0 is 0xEA 00 00 F5 FF = jmp F5FF:0000, i.e. into
-       the BIOS.  Load the whole 64 KB so the BIOS runs first, as it does on the
-       real machine (the burn-in itself documents that it assumes a normal BIOS
-       has already programmed the 8259).  [Cloud server only, DO NOT USE!!!] */
-    /* The lower half of the ROM (F0000-F7FFF) is a second, independent
-       firmware program - the normal-boot IPL - and the burn-in never reads it:
-       a read probe on that window logs zero reads over a whole run, and the
-       run is byte-for-byte identical whether the lower half is present or not.
-       (The one difference seen earlier, a second recording pass, came from
-       this window shadowing the font card while the character generator was
-       still blank.)  The burn-in is self-contained, so no burn-in failure code
-       can be about the lower half.  [Cloud server only, DO NOT USE!!!] */
-    if (pb(PB_ROMPG)) {
-        /* [ROMPG] 32 KB paged system ROS in the F8000 window.  Base mappings
-           may not overlap in mem_mapping_add (three rom_init()s at the same
-           address abort the emulator), so the pages live in plain buffers
-           behind ONE external read-handler mapping and the switch is a
-           pointer swap.  F0000-F7FFF is then left to the font card instead of
-           being shadowed by the flat image's lower half. */
-        /* Two pages only: both self-boot from their own 0xFFF50 stub and each
-           carries a 0x390 writer.  card0.bin is NOT a page (no reset vector,
-           no 0x7F40 template, zero 0x390 write sites) - it is a data image. */
-        static const struct { const char *fn; int off; } epg[2] = {
-            { "roms/machines/ibm3477/3477ipl.bin", 0x0000 }, /* page 0: IPL half */
-            { "roms/machines/ibm3477/3477ipl.bin", 0x8000 }, /* page 1: ROS half (== 3477rom.bin) */
-        };
-        int i;
-
-        ret = 0;
-        epoch_rom_pages = 0;
-        for (i = 0; i < 2; i++) {
-            FILE *fp = rom_fopen(epg[i].fn, "rb");
-
-            if (fp == NULL)
-                break;
-            fseek(fp, (long) epg[i].off, SEEK_SET);
-            epoch_rom_pagebuf[i] = malloc(0x8000);
-            if (fread(epoch_rom_pagebuf[i], 1, 0x8000, fp) != 0x8000) {
-                free(epoch_rom_pagebuf[i]);
-                fclose(fp);
-                break;
-            }
-            fclose(fp);
-            epoch_rom_pages = i + 1;
-        }
-        if (epoch_rom_pages && pb(PB_ROMPG)) {   /* 默认只加载 IPL，不加载测试 ROM（与 ibm3477 一致）*/
-            mem_mapping_add(&epoch_rom_map, 0xf8000, 0x8000,
-                            epoch_rom_readb, epoch_rom_readw, NULL,
-                            NULL, NULL, NULL, NULL,
-                            MEM_MAPPING_EXTERNAL, NULL);
-
-            ret = 1;
-            epoch_rom_cur = -1;
-            {
-            if (getenv("EPOCH3477_ROMX")) epoch_rom_trace = 0;
-            const char *rpp = getenv("EPOCH3477_ROMPG_PAGE");
-            epoch_rompg_switch((uint8_t) (rpp ? atoi(rpp) : 0));
-        } /* [ROMPG] EPOCH3477_ROMPG_PAGE = raw 0x390 value at reset: 0 = page 0 (IPL half, default), 128 = page 1 (ROS half) */ /* reset-visible page = page 0 (IPL half) */
-        }
-        pclog("3477: ROMPG %d pages loaded, mapping %s\n", epoch_rom_pages,
-              epoch_rom_pages ? "at F8000-FFFFF" : "NOT installed");
-    } else {
-        ret = bios_load_linear("roms/machines/ibm3477/3477ipl.bin",
-                               0x000f0000, 65536, 0);
-    }
+    ret = bios_load_linear("roms/machines/ibm3477/3477ipl.bin",
+                           0x000f8000, 32768, 0);
 
     if (bios_only || !ret)
         return ret;
@@ -4288,174 +4221,25 @@ machine_xt_ibm3477_init(const machine_t *model)
     epoch_is_5535 = 0;
     epoch_is_3477 = 1;
 
+
     device_add(&fdc_xt_5550_device);
 
-    /* The 3477-S IPL drives the standard AT 8042 controller on 0x60/0x64
-       (self-test 0xAA->0x55, interface tests 0xAB/0xA9, enable 0xAE, keyboard
-       reset 0xFF, set-scancode 0xF0), not the 5550's epoch 0x60-0x63 map.
-       [Cloud server only, DO NOT USE!!!] */
     device_add_params(machine_get_kbc_device(machine), (void *) model->kbc_params);
 
-    /* The ROM is an in-situ burn-in program: it assumes a normal BIOS has
-       already programmed the 8259 to the XT convention (8086 mode, base 8, its
-       IVT entries 8..0x13) and never programs it itself. Without this the
-       controller stays in 8080 mode, an IRQ resolves to (irq << 3), and IRQ 4
-       lands on the unfilled vector 0x20 - the CPU then runs away into video
-       memory.  [Cloud server only, DO NOT USE!!!] */
     pic_init();
-    /* 新 pic.c 里没有 pic_xt_bios_init（该语义已并入 pic_init/钉线机制）*/
     dma_init();
     pit_ibm3477_init();
     nmi_mask = 0;
 
-    /* Shared RAM + doorbells towards the keyboard/display controller.  Register
-       before the epoch device so this window wins over its 0xA0000-0xDFFFF map. */
-    device_add(&i3477_shared_device);
-
-    /* The 80186's integrated peripherals / chip-select block (the ROM programs
-       UMCS via out 0xFFA0 at reset). [Cloud server only, DO NOT USE!!!] */
-    /* 用 ibm3477 分支的片内 PCB/ICU/DMA 实现（替代旧的设备层 i80186.c）*/
-    struct i8018x_pcb_t *pcb = device_add(&i8018x_pcb_device);
-    i8018x_pcb_set_dma_channels(pcb, FDC_PRIMARY_DMA, -1);   /* 片上 DMA ch0 给软驱，ch1 空 */
-    i8018x_pcb_set_irq_map(pcb, 4, 2);                        /* 软驱 IRQ4 -> 片内 INT2 */
-
-    /* The 5250 adapter's self-test (FD43:0A0E via the module entry at
-       FD43:0000) drives its registers through a port table built into the
-       parameter block at DS:0x7C0: phase A uses 0x1C0-0x1D7, phase B the
-       0x100-0x10F bank.  A probe over both banks shows the ROM only ever
-       *writes* - 0x1B0/0x1B2/0x1B6 as control, 0x1C0/0x1CA/0x1D0 as commands,
-       and the table port 0x1C6 strobed through bit 6 (0x10 -> 0x50 -> 0x10)
-       in an endless timeout loop entered at FD43:06D2 - and never reads
-       anything back, so the sub-test result bytes (DS:[2]/[3], folded into
-       DS:[0]/[1] with or 0x30 by FD43:0AFA) never clear.  Code 21 is a missing
-       *interrupt*: the adapter has to answer the strobe.  [Cloud server only,
-       DO NOT USE!!!] */
     epoch_t *epoch = device_add(&ibm5550_device);
-    /* [FIX] Read the machine's own section.  A machine_t-style init has no
-       "current device", so device_get_config_int() only ever returned the
-       option default and both the bank choice and 0xA0h bit 1 were stuck.
-       testmode = which 32 KB bank, testsw = the 0xA0h bit 1 switch input. */
-    epoch->testmode = config_get_int("Machine", "testmode", 0);
-    epoch->testsw   = config_get_int("Machine", "testsw", 0);
-    pclog("3477: cfg testmode = %d, testsw = %d\n", epoch->testmode, epoch->testsw);
-    /* The 3477-S powers up running the burn-in (test) program, which the ROM's
-       early 0xA0h bit 1 check selects, on a 24-dot display (0xA2h reports 0xA8,
-       so the ROM polls the C000:0148 mailbox).  [Cloud server only, DO NOT USE!!!] */
-    /* [EXPERIMENT rombank] Let the config's testmode drive BOTH the port 0xA0
-       bit 1 and which 32 KB bank is mapped at F8000-FFFFF (see rombank above).
-       [Cloud server only, DO NOT USE!!!] */
-    {
-        FILE *fp = rom_fopen("roms/machines/ibm3477/3477ipl.bin", "rb");
 
-        /* [FIX] Swap the bank inside the ROM buffer the machine already loaded,
-           instead of adding a second mapping over F8000: a mapping with its own
-           read handlers is not the same service path as the BIOS mapping's
-           bios_read(), and it changed the burn-in's recorded code sequence
-           (14/10 appeared, exactly as when the font card is absent).  Patching
-           rom[] keeps F0000-FFFFF served by bios_read() exactly as before. */
-        if ((fp != NULL) && (rom != NULL)) {
-            /* [EXPERIMENT] A/B the ROM bank from the shell: EPOCH3477_TESTMODE=0/1
-               overrides whatever the config resolved.  Probe-only hook, must not
-               reach the clean 80186 baseline. */
-            if (getenv("EPOCH3477_TESTMODE") != NULL)
-                epoch->testmode = atoi(getenv("EPOCH3477_TESTMODE"));
-    /* [3477-S] Floppy turbo: EPOCH3477_TURBO=1 enables.  Default is OFF because
-       the 3477-S ROS does not recognise the drive when turbo is active. */
-            if (getenv("EPOCH3477_TURBO")) {
-                fdd_set_turbo(&drives[0], 1);
-            }
-            fseek(fp, epoch->testmode ? 0x8000 : 0x0000, SEEK_SET);
-            if (fread(rombank, 1, 0x8000, fp) == 0x8000) {
-                memcpy(&rom[0x8000], rombank, 0x8000);
-                pclog("3477: ROM bank = %s (testmode=%d), patched into rom[]\n",
-                      epoch->testmode ? "burn-in (upper 32K)" : "System ROS (lower 32K)",
-                      epoch->testmode);
-            }
-            fclose(fp);
-        }
-    }
-    epoch->font24   = 1;
-
-    /* The 3477-S card is a GB2312 kanji card.  Its 1 MB image (font.bin,
-       32 pages) is a flat glyph array: g0..g862 = GB2312 rows 1-9 (symbols),
-       g863..g7773 = rows 16-87 (hanzi), the rest = the card's own parts; every
-       glyph is 128 bytes = 32 rows of 4 bytes = a 32x32 bitmap, MSB left.  Row
-       3 carries the full-width ASCII set - its position n is code 0x20 + n and
-       the row starts at g192, so a half-width code maps to glyph
-       191 + (code - 0x20) (verified against the extracted font: g192 = full
-       width '!', g207 = '0', g224 = 'A', g249 = 'Z').  The font-24 text
-       renderer fetches the generator from EPOCH_VRAM_SBCS (0x38000), 128 bytes
-       per code, and a text cell is 26 dots wide: the renderer cuts the bitmap
-       in two down the middle and draws the halves side by side (the left 16
-       columns' first 13 dots, then the right 16 columns' first 13 dots), so the
-       machine cuts the 32-column bitmap instead of keeping a second, narrow
-       font.  [Cloud server only, DO NOT USE!!!] */
-    /* [FIX 2026-10-15] The FONT ROM is this machine's glyph source, not a
-       crutch.  The 3477-S ROS never delivers glyphs to the generators: a
-       backward slice of every "mov ds/es,imm" in 3477s_full.dis yields the
-       segment bases 0x0000/0x00xx/0x1000/0x4000/0x8000/0xA000(8)/0xC000(33)/
-       0xE000(29)/0xE100/0xE200(12)/0xE400(16)/0xE800/0xF000(14)/0xF800/0xFFF*,
-       with no 0xD000/0xD800 at all - and 0xD0000/0xD8000 (the guests's view of
-       EPOCH_VRAM_SBEX/SBCS through the 0xC1000-0xDFFFF window) is only
-       reachable from a >= 0xD000 base.  Its only FONT ROM access is the
-       burn-in checksum walk (000F04A0: out 0x400 <- 0xE0..0x00 stepping -0x20,
-       ds = 0xE800, 16384 lodsw/add, 8 x 32 KB banks), which reads and never
-       writes.  The only CRAM writers are the diagnostic status character
-       (000F0599/000F05AA and the shared 000F093B/000F094C helper, es = 0xE000,
-       di = 0xECC/0xE70).  Measured: probe EPOCH3477_VPAGE (4 KB page histogram
-       in epoch_vram_write) shows a 150 s system-ROS run touching only pages
-       0x00/0x01 of the plane (00:5248 01:2944 at n=8192) - pages 0x30..0x3F
-       stay at zero.  So the generator must be filled from the machine side, and
-       with it filled the diagnostic '0' (CELL probe: chr=0x30 attr=0x08 at
-       ma=0x0E70) gains its 131 pixels (PIXEL nz 11440 -> 11571).
-       A/B at runtime: compare with the load commented out, or git revert. */
-    if ((epoch->fontcard_rom != NULL) && (epoch->fontcard_pages > 2)) {
-        /* Half-width (ANK) generator: GB2312 row 3.  The position of a code in
-           the row is n = code - 0x20 and the row starts at g192 (g192 is the
-           full-width '!', verified against the extracted font: g192 = '!',
-           g207 = '0', g224 = 'A', g249 = 'Z'), so glyph 191 + (code - 0x20) is
-           the full-width form of that code.  This card carries one extra glyph
-           between 'Z' and 'a' (verified: g257 = 'a', g258 = 'b', ... g263 = 'g'),
-           so the lower-case block is shifted by one and uses 192 + (code - 0x20);
-           reading it with 191 showed every lower-case letter as its predecessor. */
-        for (uint32_t code = 0x20; code < 0x80; code++) {
-            const uint32_t base = (code >= 0x61) ? 192u : 191u;
-            uint8_t       *dst = epoch->vram + EPOCH_VRAM_SBCS + (code * 0x80);
-            if (code == 0x20) {
-                /* The card's glyph before the row-3 start is a filled block, not a
-                   blank, so a space must be cleared explicitly. */
-                memset(dst, 0, 128);
-                continue;
-            }
-            const uint8_t *src = epoch->fontcard_rom + (base + (code - 0x20)) * 128u;
-
-            /* Narrow it into the 13-dot text cell (see epoch_ank_narrow). */
-            epoch_ank_narrow(src, dst);
-        }
-        /* The alternate generator (attribute bit 1: block and line graphics -
-           e.g. the solid block the IBM logo is built from) still comes from
-           card page 2, indexed from code 0x20. */
-        {
-            const uint8_t *page = epoch->fontcard_rom + 2 * EPOCH_FONTCARD_WIN_SIZE;
-            uint8_t       *base = epoch->vram + EPOCH_VRAM_SBEX;
-
-            for (uint32_t code = 0x20; code < 0x100; code++) {
-                const uint8_t *src = page + (code - 0x20) * 0x80;
-                uint8_t       *dst = base + (code * 0x80);
-
-                /* Same narrow form as the text generator so the renderer reads
-                   one layout for both. */
-                epoch_ank_narrow(src, dst);
-            }
-        }
-        pclog("3477: ANK generator <- FONT ROM GB2312 row 3 (narrowed to 13 dots); "
-              "alternate generator <- FONT ROM page 2 (machine-side, guest never writes it)\n");
-    } else
-        pclog("3477: font ROM not installed, ANK generators left empty\n");
-
-    device_add(&lpt_port_device);
-    serial_t *uart = device_add(&ns8250_device);
-    serial_setup(uart, 0x3f8, 1); /* Use IRQ 1 */
+    /* The floppy's completion reaches the CPU through the chip's controller:
+       the line it reports on is taken over as the controller's INT2 input.
+       Also 8018x board has no separate 8237: the chip's channel 0 carries
+       the floppy's transfers, and channel 1 is wired to nothing here. */
+    struct i8018x_pcb_t *pcb = device_add(&i8018x_pcb_device);
+    i8018x_pcb_set_dma_channels(pcb, FDC_PRIMARY_DMA, -1);
+    i8018x_pcb_set_irq_map(pcb, 4, 2);
 
     return ret;
 }
