@@ -2308,12 +2308,14 @@ epoch_misc_in(uint16_t port, void *priv)
                     0x00, 0x00, 0x00
                 };
                 int i;
-                ret = 0x00;
+                uint8_t base = (uint8_t) ((epoch_adr_latch & 0x7d)
+                                | ((epoch_adr_cmd == 0x40) ? (epoch_adr_b1 ? 0x02 : 0) : 0x02));
+                ret = (uint8_t) (base & 0x3f);
                 if (!epoch_adr_serve) {
-                    ret = 0x00;
+                    ret = (uint8_t) (base & 0x3f);
                 } else if (epoch_adr_ph != 2) {
                     i = epoch_adr_rd;
-                    ret = seq[i];
+                    ret = (uint8_t) ((base & 0x3f) | seq[i]);
                     if (++epoch_adr_rd >= 19) { epoch_adr_ph = 2; epoch_adr_rd = 0; }
                 } else {
                     int k = (epoch_adr_rd == 0) ? -1 : ((epoch_adr_rd - 1) / 2);
@@ -2328,7 +2330,7 @@ epoch_misc_in(uint16_t port, void *priv)
                     else if (k <= 11) fb = 1;
                     else if (k == 12) { int o12 = ones + 1; fb = cmd40 ? ((o12 & 1) ? 0 : 1) : ((o12 & 1) ? 1 : 0); }
                     else              fb = 0;
-                    ret = (uint8_t) (fb ? 0x80 : 0x00);
+                    ret = (uint8_t) ((base & 0x3f) | (fb ? 0x80 : 0x00));
                     if (++epoch_adr_rd >= 33) epoch_adr_rd = 0;
                 }
                 return ret;
