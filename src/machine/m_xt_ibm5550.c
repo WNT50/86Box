@@ -2247,6 +2247,8 @@ static int        epoch_adr_txr;      /* 已读位数 */
 static int        epoch_adr_pls[64];  /* [PPM] 时钟脉冲的数据位序列 */
 static int        epoch_adr_plsn;     /* 已收脉冲数 */
 static uint16_t   epoch_adr_word;     /* [PPM] 解码出的发送字 */
+static int rw_ph = 1, rw_rd = 0, rw_cmdlat = 0, rw_serve = 0, rw_inframe = 0, rw_pcnt = 0, rw_hist = 0;
+static uint16_t rw_word = 0;
 static int        epoch_adr_ph = 1;   /* 1=握手 2=帧 */
 static int        epoch_adr_rd;
 static int        epoch_adr_rdcnt;    /* 收帧阶段的读计数（替代会漂移的 syn_idx） */
@@ -2300,6 +2302,41 @@ epoch_misc_in(uint16_t port, void *priv)
                 ret = 0xff;
             break;
         case 0x1C6:
+            if (getenv("EPOCH3477_ADR_RW")
+                && ((((CS > 0xFFFF) ? (int) (CS >> 4) : (int) CS) >= 0x3500))
+                && ((((CS > 0xFFFF) ? (int) (CS >> 4) : (int) CS) <= 0x3700))) {
+                static const uint8_t rws[19] = {
+                    0x00, 0x00, 0x00, 0x80, 0x00,
+                    0x80, 0x00, 0x80, 0x00, 0x80, 0x00, 0x80, 0x00,
+                    0x80, 0x80, 0x80,
+                    0x00, 0x00, 0x00
+                };
+                uint8_t base = (uint8_t) ((epoch_adr_latch & 0x7d)
+                                | ((rw_cmdlat == 0x40) ? (epoch_adr_b1 ? 0x02 : 0) : 0x02));
+                ret = (uint8_t) (base & 0x3f);
+                if (!rw_serve) {
+                    ret = (uint8_t) (base & 0x3f);
+                } else if (rw_ph != 2) {
+                    ret = (uint8_t) ((base & 0x3f) | rws[rw_rd]);
+                    if (++rw_rd >= 19) { rw_ph = 2; rw_rd = 0; }
+                } else {
+                    int k = rw_rd / 2;
+                    int cmd40 = (rw_cmdlat == 0x40);
+                    int d = cmd40 ? 0x55 : 0xFF;
+                    int ones = 0, fb = 0, t;
+                    for (t = 0; t < 8; t++) ones += (d >> t) & 1;
+                    ones += 3;
+                    if (k == 0)       fb = 1;
+                    else if (k <= 8)  fb = (d >> (k - 1)) & 1;
+                    else if (k <= 11) fb = 1;
+                    else if (k == 12) { int o12 = ones + 1; fb = cmd40 ? ((o12 & 1) ? 0 : 1) : ((o12 & 1) ? 1 : 0); }
+                    else              fb = 0;
+                    ret = (uint8_t) ((base & 0x3f) | (fb ? 0x80 : 0));
+                    if (++rw_rd >= 32) rw_rd = 0;
+                }
+                { static int q; if (q < 60) { pclog("3477: RWREAD rd=%d ph=%d ret=%02X serve=%d\n", rw_rd, rw_ph, ret, rw_serve); q++; } }
+                return ret;
+            }
             if (getenv("EPOCH3477_ADR_SYNTH") && ((CS >> 4) >= 0x3500) && ((CS >> 4) <= 0x3700)) {
                 static const uint8_t seq[19] = {
                     0x00, 0x00, 0x00, 0x80, 0x00,
@@ -2560,6 +2597,38 @@ xxx1 xxxx: Serial port 2f8h
 static void
 epoch_misc_out(uint16_t port, uint8_t val, void *priv)
 {
+    if (port == 0x1B0)
+        pclog("3477: OUT1B0 %02X ax=%04X pc=%04X:%04X [2F]=%02X [28]=%02X\n", val, AX,
+              (CS > 0xFFFF) ? (int) (CS >> 4) : (int) CS, cpu_state.pc, epoch_adr_latch,
+              mem_readb_phys(((uint32_t) DS << 4) + 0x28));
+    if (getenv("EPOCH3477_ADR_RW")) {
+        if (port == 0x1C0) {
+            if ((val == 0x40) || (val == 0x08)) {
+                rw_cmdlat = val; rw_ph = 1; rw_rd = 0; rw_serve = 1;
+                rw_word = 0; rw_inframe = 0; rw_hist = 0;
+                pclog("3477: RWM ARM %02X\n", val);
+            }
+        }
+        if ((port == 0x1C6) && (val & 0x40)) {
+            int d = (val >> 4) & 1;
+            rw_hist = ((rw_hist << 1) | (uint32_t) d) & 0x3FF;
+            if (!rw_inframe) {
+                if (rw_hist == 0x2AA) { rw_inframe = 1; rw_pcnt = 0; rw_word = 0; }
+            } else {
+                if ((rw_pcnt >= 6) && (((rw_pcnt - 6) & 1) == 0)) {
+                    int n = (rw_pcnt - 6) >> 1;
+                    if ((n < 16) && d) rw_word |= (uint16_t) (1u << n);
+                }
+                rw_pcnt++;
+                if (rw_pcnt >= 38) {
+                    rw_inframe = 0;
+                    rw_serve = (mem_readb_phys(((uint32_t) DS << 4) + 0x2F) == 1)
+                             ? (rw_word == 0x1221) : 1;
+                    pclog("3477: RWM FRAME %04X serve=%d\n", rw_word, rw_serve);
+                }
+            }
+        }
+    }
     if (port == 0x1C0) {
         epoch_adr_cmd = val;
         if ((val == 0x40) || (val == 0x08)) {
