@@ -65,6 +65,7 @@ extern uint8_t *rom; /* [FIX] the ROM buffer bios_load_linear filled */
 #define EMU_DEVICE_H
 #include <86box/pit.h>
 #include <86box/mouse.h>
+#include <86box/ibm5250.h>
 
 /* [PROBE] A0 写访问环形缓冲：判断进故障程序前 0x28/0xA9 是否真被写过 */
 static uint16_t kr_ring[16];
@@ -157,7 +158,7 @@ kr_ivt(void)
    到时解析一次并缓存。加新探针时在这里登记一个 PB_*。 */
 enum {
     PB_OUTB = 0, PB_LCDATA, PB_MODE, PB_PIXEL, PB_WLOG, PB_EBTRC,
-    PB_EBANK, PB_HIRAM, PB_FCWR, PB_PCSAMPLE, PB_C000LOG, PB_A0LOG, PB_ROMW, PB_ROMPG, PB_ADR, PB_DEAD, PB_N
+    PB_EBANK, PB_HIRAM, PB_FCWR, PB_PCSAMPLE, PB_C000LOG, PB_A0LOG, PB_ROMW, PB_ROMPG, PB_ADR, PB_DEAD, PB_CWLOG, PB_N
 };
 /* [PROBE] 例程出口取指跟踪：命中触发线性地址后记录其后 N 条取指 pc（拿调用者返回地址） */
 static int      epoch_pctrace_left;
@@ -167,7 +168,8 @@ static const char *const pb_name[PB_N] = {
     "EPOCH3477_OUTB", "EPOCH3477_LCDATA", "EPOCH3477_MODE", "EPOCH3477_PIXEL",
     "EPOCH3477_WLOG", "EPOCH3477_EBTRC", "EPOCH3477_EBANK", "EPOCH3477_HIRAM",
     "EPOCH3477_FCWR", "EPOCH3477_PCSAMPLE", "EPOCH3477_C000LOG", "EPOCH3477_A0LOG",
-    "EPOCH3477_ROMW", "EPOCH3477_ROMPG", "EPOCH3477_ADAPTER", "EPOCH3477_DEAD"
+    "EPOCH3477_ROMW", "EPOCH3477_ROMPG", "EPOCH3477_ADAPTER", "EPOCH3477_DEAD",
+    "EPOCH3477_CWLOG"
 };
 static int pb_flag[PB_N];
 
@@ -193,6 +195,15 @@ epoch_adr_irq_cb(void *priv)
         picint((uint16_t) (1 << epoch_adr_irq));
     }
 }
+/* [ADRDEV] IRQ line callback handed to the standalone device model. */
+static void
+epoch_adr_dev_irq(void *priv)
+{
+    (void) priv;
+    if (epoch_adr_irq >= 0)
+        picint((uint16_t) (1 << epoch_adr_irq));
+}
+
 static inline int
 pb(int id)
 {
@@ -603,6 +614,9 @@ typedef struct epoch_t {
        once and then reads each boundary in turn, and clears it with out A0h,40h
        before the 0xCCCC write that must then fail the read). */
     int parityforce;
+
+    /* [ADRDEV] standalone 5250 adapter instance (EPOCH3477_ADRDEV=1). */
+    ibm5250_t *adapter;
 
 } epoch_t;
 
@@ -1844,6 +1858,14 @@ epoch_cram_write(uint32_t addr, uint8_t val, void *priv)
                   wl, addr, val, val, epoch->dispbank & 3, cs >> 4, cpu_state.pc);
         }
     }
+    if (pb(PB_CWLOG) && ((cs >> 4) < 0xF000) && (val >= 0x21) && (val <= 0x7e)) {
+        static int cwn = 0;
+        if (cwn < 2000) {
+            cwn++;
+            pclog("3477: CW #%d addr=%05X val=%02X pc=%04X:%04X plane=%u\n",
+                  cwn, addr, val, cs >> 4, cpu_state.pc, epoch->dispbank & 3);
+        }
+    }
     epoch->cram[epoch_cram_index(epoch, addr)] = val;
     epoch->fullchange = 3;
     // epoch_log("cw %04X:%04X %04X %02X\n", cs >> 4, cpu_state.pc, addr, val);
@@ -2208,6 +2230,37 @@ static int epoch_adr_reg42 = -1;
 
 static uint8_t    epoch_adr_latch;
 static uint8_t    epoch_adr_phase = 1;
+static int        epoch_adr_ack;   /* 0x1C6 写后 bit7=1 */
+static int        epoch_adr_syn_idx; /* [SYNTH] 0x1C6 回读波形索引 */
+static int        epoch_adr_replied; /* 本轮 8 次轮询里已经回应过一次 */
+static int        epoch_adr_polls;   /* 主机轮询次数 */
+static int        epoch_adr_cooldown; /* 应答一次后静默的轮询数 */
+static int        epoch_adr_cmd;      /* 最近一次 0x1C0 命令 */
+static int        epoch_adr_b1;       /* 0x1C6.bit1 相位（0x1C2 写 4 翻转） */
+static int        epoch_adr_zrun;     /* 连续 0 数据脉冲 */
+static uint32_t   epoch_adr_hist;     /* 最近 10 个脉冲（帧头图样） */
+static int        epoch_adr_serve;    /* 本轮是否应答 */
+static int        epoch_adr_fresh;    /* 刚收完一帧：下一次读从序列 0 开始 */
+static uint8_t    epoch_adr_tx[128];  /* [ECHO] 本帧发出去的位（bit4） */
+static int        epoch_adr_txc;      /* 已发位数 */
+static int        epoch_adr_txr;      /* 已读位数 */
+static int        epoch_adr_pls[64];  /* [PPM] 时钟脉冲的数据位序列 */
+static int        epoch_adr_plsn;     /* 已收脉冲数 */
+static uint16_t   epoch_adr_word;     /* [PPM] 解码出的发送字 */
+static int        epoch_adr_ph = 1;   /* 1=握手 2=帧 */
+static int        epoch_adr_rd;
+static int        epoch_adr_rdcnt;    /* 收帧阶段的读计数（替代会漂移的 syn_idx） */
+static int        epoch_adr_cmdlat;   /* 锁存的命令字：后续 out 0x00 不得覆盖 */
+static int        epoch_adr_armed;    /* 事件驱动：命令到达后挂起的应答序列 */
+static int        epoch_adr_pprev = -1;
+static int        epoch_adr_bitn;
+static int        epoch_adr_pcnt;
+static int        epoch_adr_needsync;
+static int        epoch_adr_burst;
+static int        epoch_adr_run;   /* 连续 1 对计数（用于识别复位前缀） */
+static int        epoch_adr_run0;  /* 连续 0 对计数（帧间长空闲） */
+static int        epoch_adr_inframe;
+static int        epoch_adr_ack_cnt; /* [ACK] 前 3 次读为 1，之后为 0（两相握手） */
 
 
 static int epoch_adr_bitcnt;
@@ -2247,6 +2300,39 @@ epoch_misc_in(uint16_t port, void *priv)
                 ret = 0xff;
             break;
         case 0x1C6:
+            if (getenv("EPOCH3477_ADR_SYNTH") && ((CS >> 4) >= 0x3500) && ((CS >> 4) <= 0x3700)) {
+                static const uint8_t seq[19] = {
+                    0x00, 0x00, 0x00, 0x80, 0x00,
+                    0x80, 0x00, 0x80, 0x00, 0x80, 0x00, 0x80, 0x00,
+                    0x80, 0x80, 0x80,
+                    0x00, 0x00, 0x00
+                };
+                int i;
+                ret = 0x00;
+                if (!epoch_adr_serve) {
+                    ret = 0x00;
+                } else if (epoch_adr_ph != 2) {
+                    i = epoch_adr_rd;
+                    ret = seq[i];
+                    if (++epoch_adr_rd >= 19) { epoch_adr_ph = 2; epoch_adr_rd = 0; }
+                } else {
+                    int k = (epoch_adr_rd == 0) ? -1 : ((epoch_adr_rd - 1) / 2);
+                    int cmd40 = (epoch_adr_cmdlat == 0x40);
+                    int d = cmd40 ? 0x55 : 0xFF;
+                    int ones = 0, fb = 0, t;
+                    for (t = 0; t < 8; t++) ones += (d >> t) & 1;
+                    ones += 3;
+                    if (k < 0)        fb = 0;
+                    else if (k == 0)  fb = 1;
+                    else if (k <= 8)  fb = (d >> (k - 1)) & 1;
+                    else if (k <= 11) fb = 1;
+                    else if (k == 12) { int o12 = ones + 1; fb = cmd40 ? ((o12 & 1) ? 0 : 1) : ((o12 & 1) ? 1 : 0); }
+                    else              fb = 0;
+                    ret = (uint8_t) (fb ? 0x80 : 0x00);
+                    if (++epoch_adr_rd >= 33) epoch_adr_rd = 0;
+                }
+                return ret;
+            }
             { static int rdbg6; if (rdbg6 < 40) {
     pclog("3477: ADRREAD 1C6 #%d CSbase=%05X ip=%04X lin_cs_plus_pc=%05X pc_as_lin=%05X DSbase=%05X SSbase=%05X\n",
           rdbg6, CS, cpu_state.pc, (CS + cpu_state.pc) & 0xFFFFF, cpu_state.pc & 0xFFFFF, DS, SS);
@@ -2473,6 +2559,34 @@ xxx1 xxxx: Serial port 2f8h
 static void
 epoch_misc_out(uint16_t port, uint8_t val, void *priv)
 {
+    if (port == 0x1C0) {
+        epoch_adr_cmd = val;
+        if ((val == 0x40) || (val == 0x08)) {
+            epoch_adr_cmdlat = val; epoch_adr_ph = 1; epoch_adr_rd = 0;
+            epoch_adr_serve = 1; epoch_adr_word = 0; epoch_adr_inframe = 0; epoch_adr_hist = 0;
+            pclog("3477: ARM cmd=%02X\n", val);
+        }
+    }
+    if ((port == 0x1C6) && (val & 0x40) && getenv("EPOCH3477_ADR_SYNTH")) {
+        int d = (val >> 4) & 1;
+        epoch_adr_hist = ((epoch_adr_hist << 1) | (uint32_t) d) & 0x3FF;
+        if (!epoch_adr_inframe) {
+            if (epoch_adr_hist == 0x2AA) { epoch_adr_inframe = 1; epoch_adr_pcnt = 0; epoch_adr_word = 0; }
+        } else {
+            if ((epoch_adr_pcnt >= 6) && (((epoch_adr_pcnt - 6) & 1) == 0)) {
+                int n = (epoch_adr_pcnt - 6) >> 1;
+                if ((n < 16) && d) epoch_adr_word |= (uint16_t) (1u << n);
+            }
+            epoch_adr_pcnt++;
+            if (epoch_adr_pcnt >= 38) {
+                epoch_adr_inframe = 0; epoch_adr_fresh = 1; epoch_adr_polls++;
+                epoch_adr_serve = (mem_readb_phys(((uint32_t) DS << 4) + 0x2F) == 1)
+                                ? (epoch_adr_word == 0x1221) : 1;
+                { static int fc; if (fc < 40) { pclog("3477: FRAME #%d word=%04X polls=%d serve=%d\n", fc, epoch_adr_word, epoch_adr_polls, epoch_adr_serve); fc++; } }
+            }
+        }
+        epoch_adr_pprev = d;
+    }
     if (pb(PB_ADR)) {
         /* [PROBE] 16 位字发送中的字中握手脉冲（out 1C0=08）：顺手读调用栈拿返回地址 */
         {
@@ -3806,14 +3920,24 @@ epoch_init(UNUSED(const device_t *info))
                       pic_set_vector_override((uint8_t) epoch_adr_irq, vv ? (int) strtoul(vv, NULL, 0) : 0x0D); }
                 pclog("3477: ADAPTER IRQ = %d\n", epoch_adr_irq);
             }
-            /* 只注册 5250 自检实际驱动的端口，避免抢掉启动早期要用的端口 */
-            static const uint16_t adr_ports[] = {0x1B0, 0x1B2, 0x1B6, 0x1C0, 0x1C1, 0x1C2, 0x1C3, 0x1C6, 0x1C7, 0x1C8, 0x1C9, 0x1CA, 0x1CB, 0x1CC, 0x1CD, 0x1CE, 0x1CF, 0x1D0, 0x1D1, 0x1D6};
-            for (int i = 0; i < (int) (sizeof(adr_ports) / sizeof(adr_ports[0])); i++) {
-                io_sethandler(adr_ports[i], 0x0001, epoch_misc_in, NULL, NULL, epoch_misc_out, NULL, NULL, epoch);
-                pclog("3477: ADAPTER port %03X registered\n", adr_ports[i]);
+            if (getenv("EPOCH3477_ADRDEV")) {
+                /* 独立设备模型：端口 / 状态 / 中断线全在 src/device/ibm5250.c */
+                epoch->adapter = ibm5250_init(epoch_adr_irq, epoch_adr_dev_irq, epoch);
+            } else {
+                /* 只注册 5250 自检实际驱动的端口，避免抢掉启动早期要用的端口 */
+                static const uint16_t adr_ports[] = {0x1B0, 0x1B2, 0x1B6, 0x1C0, 0x1C1, 0x1C2, 0x1C3, 0x1C6, 0x1C7, 0x1C8, 0x1C9, 0x1CA, 0x1CB, 0x1CC, 0x1CD, 0x1CE, 0x1CF, 0x1D0, 0x1D1, 0x1D6};
+                for (int i = 0; i < (int) (sizeof(adr_ports) / sizeof(adr_ports[0])); i++) {
+                    io_sethandler(adr_ports[i], 0x0001, epoch_misc_in, NULL, NULL, epoch_misc_out, NULL, NULL, epoch);
+                    pclog("3477: ADAPTER port %03X registered\n", adr_ports[i]);
+                }
             }
         }
         io_sethandler(0x2C2, 0x0001,
+                      epoch_misc_in, NULL, NULL, epoch_misc_out, NULL, NULL, epoch);
+        /* [TESTID] 无副作用探针端口 */
+        io_sethandler(0x1CF, 0x0001,
+                      epoch_misc_in, NULL, NULL, epoch_misc_out, NULL, NULL, epoch);
+        io_sethandler(0x0CF, 0x0001,
                       epoch_misc_in, NULL, NULL, epoch_misc_out, NULL, NULL, epoch);
     }
 
