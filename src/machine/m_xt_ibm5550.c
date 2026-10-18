@@ -2318,20 +2318,19 @@ epoch_misc_in(uint16_t port, void *priv)
                     ret = (uint8_t) ((base & 0x3f) | seq[i]);
                     if (++epoch_adr_rd >= 19) { epoch_adr_ph = 2; epoch_adr_rd = 0; }
                 } else {
-                    int k = (epoch_adr_rd == 0) ? -1 : ((epoch_adr_rd - 1) / 2);
+                    int k = epoch_adr_rd / 2;
                     int cmd40 = (epoch_adr_cmdlat == 0x40);
                     int d = cmd40 ? 0x55 : 0xFF;
                     int ones = 0, fb = 0, t;
                     for (t = 0; t < 8; t++) ones += (d >> t) & 1;
                     ones += 3;
-                    if (k < 0)        fb = 0;
-                    else if (k == 0)  fb = 1;
+                    if (k == 0)       fb = 1;
                     else if (k <= 8)  fb = (d >> (k - 1)) & 1;
                     else if (k <= 11) fb = 1;
                     else if (k == 12) { int o12 = ones + 1; fb = cmd40 ? ((o12 & 1) ? 0 : 1) : ((o12 & 1) ? 1 : 0); }
                     else              fb = 0;
                     ret = (uint8_t) ((base & 0x3f) | (fb ? 0x80 : 0x00));
-                    if (++epoch_adr_rd >= 33) epoch_adr_rd = 0;
+                    if (++epoch_adr_rd >= 32) epoch_adr_rd = 0;
                 }
                 return ret;
             }
