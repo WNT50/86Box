@@ -2248,6 +2248,7 @@ static int        epoch_adr_pls[64];  /* [PPM] 时钟脉冲的数据位序列 */
 static int        epoch_adr_plsn;     /* 已收脉冲数 */
 static uint16_t   epoch_adr_word;     /* [PPM] 解码出的发送字 */
 static int rw_ph = 1, rw_rd = 0, rw_cmdlat = 0, rw_serve = 0, rw_inframe = 0, rw_pcnt = 0, rw_hist = 0;
+static int rw_done40 = 0;
 static uint16_t rw_word = 0;
 static int        epoch_adr_ph = 1;   /* 1=握手 2=帧 */
 static int        epoch_adr_rd;
@@ -2332,7 +2333,7 @@ epoch_misc_in(uint16_t port, void *priv)
                     else if (k == 12) { int o12 = ones + 1; fb = cmd40 ? ((o12 & 1) ? 0 : 1) : ((o12 & 1) ? 1 : 0); }
                     else              fb = 0;
                     ret = (uint8_t) ((base & 0x3f) | (fb ? 0x80 : 0));
-                    if (++rw_rd >= 32) rw_rd = 0;
+                    if (++rw_rd >= 32) { rw_rd = 0; if (rw_cmdlat == 0x40) rw_done40 = 1; }
                 }
                 { static int q; if (q < 60) { pclog("3477: RWREAD rd=%d ph=%d ret=%02X serve=%d\n", rw_rd, rw_ph, ret, rw_serve); q++; } }
                 return ret;
@@ -2609,9 +2610,10 @@ epoch_misc_out(uint16_t port, uint8_t val, void *priv)
             if ((val == 0x40) || (val == 0x08)) {
                 /* 0x440 进行中（上次命令是 0x40 且还没收完一帧）时，忽略后来的 0x08，
                    否则帧内容会被换成 d=0xFF 那一版（实测导致 BH=0x0E、校验 0） */
-                int hold = (rw_cmdlat == 0x40) && (rw_ph == 2) && (rw_rd != 0);
+                int hold = (val == 0x08) && (rw_cmdlat == 0x40) && !rw_done40;
                 if (!hold) {
                     rw_cmdlat = val; rw_ph = 1; rw_rd = 0; rw_serve = 1;
+                    if (val == 0x40) rw_done40 = 0;
                     rw_word = 0; rw_inframe = 0; rw_hist = 0;
                     pclog("3477: RWM ARM %02X\n", val);
                 } else {
