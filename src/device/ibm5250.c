@@ -58,6 +58,7 @@ struct ibm5250_t {
     int      rd;         /* read index inside the current phase */
     int      serve;      /* this poll gets a reply */
     int      done40;     /* the 0x40 frame has been served once */
+    int      pre;        /* 帧前空槽（每槽 2 读）*/
     int      fno;        /* frame counter (log only) */
     int      dummy;      /* optional leading idle read */
 
@@ -98,8 +99,14 @@ ibm5250_base(ibm5250_t *dev)
 {
     /* bit1 is the 0x1C2 phase, but command 0x40 always reads it as 0 -
        that is what the 0x890 register handshake in EMDIAG checks. */
-    return (uint8_t) ((dev->latch & 0x7d) |
-                      ((dev->cmdlat == 0x40) ? 0x00 : (dev->phase ? 0x02 : 0x00)));
+    uint8_t v = (uint8_t) ((dev->latch & 0x7d) |
+                           ((dev->cmdlat == 0x40) ? 0x00 : (dev->phase ? 0x02 : 0x00)));
+
+    /* 0x4BD 写 0x1C1=0xFF 后要求 (0x1C6 & 3) == 0 */
+    if (dev->latch == 0xFF)
+        v &= 0xFC;
+
+    return v;
 }
 
 static uint8_t
@@ -142,8 +149,11 @@ ibm5250_in_1c6(ibm5250_t *dev)
     uint8_t base = ibm5250_base(dev);
     uint8_t ret  = (uint8_t) (base & 0x3f);
 
-    if (!dev->serve)
-        return ret;
+    if (!dev->serve) {
+        /* 静默期必须给 0x00：0x720 超时返回时 AL=(读值<<1)，AL 必须为 0
+           （0x440 的 0x4EE 检查）。0x80 也行，但 base 里的 bit1 会让 AL≠0。 */
+        return 0x00;
+    }
 
     if (dev->ph != 2) {
         ret = (uint8_t) ((base & 0x3f) | ibm5250_handshake[dev->rd]);
@@ -169,6 +179,11 @@ ibm5250_in_1c6(ibm5250_t *dev)
         return ret;
     }
 
+    if (dev->pre > 0) {
+        dev->pre--;
+        return (uint8_t) (base & 0x3f);
+    }
+
     {
         int k  = dev->rd / 2;
         int fb = ibm5250_frame_bit(dev, k);
@@ -189,6 +204,9 @@ ibm5250_in_1c6(ibm5250_t *dev)
             dev->rd = 0;
             if (dev->cmdlat == 0x40)
                 dev->done40 = 1;
+            /* 每条命令只应答一帧：之后 0x720 必须"无应答"超时
+               （BL=0 → AL=0）。0x440 的 0x476/0x4EB 都靠这个语义。 */
+            dev->serve = 0;
         }
     }
 
@@ -212,7 +230,9 @@ ibm5250_in(uint16_t port, void *priv)
     switch (port) {
         case 0x1C1:
             /* bit1|bit6 are the adapter signature the ROM handshake checks */
-            return (uint8_t) (dev->latch | 0x42);
+            /* bit6|bit1 = 适配器签名；bit4 = 0x4B2 的 (al|0xAF)+1==0 检查要求
+               (0x50 两位都为 1) */
+            return (uint8_t) (dev->latch | 0x52);
 
         case 0x1C2:
         case 0x1C3:
@@ -240,6 +260,30 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
     }
 
     switch (port) {
+        case 0x1C8:
+        case 0x1C9:      /* EMDIAG 的 [0x12] = 0x1C9，0xAA 等命令从这里发出 */
+        case 0x1CA:
+        case 0x1D0:
+        case 0x1D1:
+            /* 命令/数据寄存器：EMDIAG 在这里发 0xAA 等后续命令，需要重新武装应答 */
+            if (val != 0xFF) {
+                dev->cmdlat = val;
+                dev->ph     = 1;
+                dev->rd     = 0;
+                dev->serve  = 1;
+                dev->pre    = getenv("EPOCH5250_PRE") ? atoi(getenv("EPOCH5250_PRE")) : 0;
+                dev->fno++;
+                {
+                    uint32_t dsa = ((uint32_t) cpu_state.seg_ds.seg << 4);
+                    pclog("5250: CMD %03X = %02X (frame %d) DS:[0x10]=%04X [0x12]=%04X [0x14]=%04X\n",
+                          port, val, dev->fno,
+                          (dsa < 0x1000000) ? mem_readw_phys(dsa + 0x10) : 0,
+                          (dsa < 0x1000000) ? mem_readw_phys(dsa + 0x12) : 0,
+                          (dsa < 0x1000000) ? mem_readw_phys(dsa + 0x14) : 0);
+                }
+            }
+            break;
+
         case 0x1C0:
             if ((val == 0x40) || (val == 0x08)) {
                 /* keep the 0x40 reply in place while the subtest is running */
@@ -250,6 +294,7 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                     dev->ph     = 1;
                     dev->rd     = 0;
                     dev->serve  = 1;
+                    dev->pre    = getenv("EPOCH5250_PRE") ? atoi(getenv("EPOCH5250_PRE")) : 0;
                     dev->fno++;
                     dev->dummy  = getenv("EPOCH5250_LEAD1") ? 2
                                 : (getenv("EPOCH3477_ADR_RW0") ? 1 : 0);
