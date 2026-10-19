@@ -166,7 +166,8 @@ ibm5250_irq_cb(void *priv)
     if (dev->irq_raise == NULL || dev->irq_level) {
         /* 线还高（等客人写 0x722 应答）：继续等窗口，别让轮询断掉。 */
         if (dev->irq_raise != NULL && getenv("EPOCH5250_LEVELIRQ") &&
-            ((dev->cmdlat == 0x00) || (dev->cmdlat == 0x10)) && (dev->poll_left > 0)) {
+            ((dev->cmdlat == 0x00) || (dev->cmdlat == 0x10)) &&
+            (dev->c3 != 0x08) && (dev->poll_left > 0)) {
             dev->timer_armed = 1;
             timer_set_delay_u64(&dev->timer, 1 * TIMER_USEC);
         }
@@ -205,7 +206,8 @@ ibm5250_irq_cb(void *priv)
 
     /* 0x8C0 可能被同一块多次调用：保持窗口轮询，直到客人换命令。 */
     if (getenv("EPOCH5250_LEVELIRQ") &&
-        ((dev->cmdlat == 0x00) || (dev->cmdlat == 0x10))) {
+        ((dev->cmdlat == 0x00) || (dev->cmdlat == 0x10)) &&
+        (dev->c3 != 0x08)) {
         dev->poll_left = 2000;
         dev->timer_armed = 1;
         timer_set_delay_u64(&dev->timer, 1 * TIMER_USEC);
@@ -308,6 +310,13 @@ ibm5250_in_1c6(ibm5250_t *dev)
 {
     uint8_t base = ibm5250_base(dev);
 
+    if (getenv("EPOCH5250_POLLOG") && (dev->cmdlat == 0x00) && (dev->c3 == 0x08)) {
+        static long rn = 0; rn++;
+        if (rn <= 200)
+            pclog("5250: ABR n=%ld pc=%04X ph=%d rd=%d serve=%d\n",
+                  rn, cpu_state.pc, dev->ph, dev->rd, dev->serve);
+    }
+
     if (ISR_PC(cpu_state.pc) && getenv("EPOCH5250_POLLOG"))
         pclog("5250: ISRRD pc=%04X cmd=%02X ph=%d rd=%d base=%02X serve=%d ds=%04X\n",
               cpu_state.pc, dev->cmdlat, dev->ph, dev->rd, base, dev->serve,
@@ -371,21 +380,43 @@ ibm5250_in_1c6(ibm5250_t *dev)
         return (uint8_t) (base & 0x3f);
     }
 
-    /* 0xAB0 的收帧：0x8A0 在 pc=0x8A7（数据）与 pc=0x8B1（时钟）各读一次，
-       0x8AA 只在 0x8B1 读。位只在数据读上前进，时钟读返回同一位。 */
+    /* 块 0xAB0 的 0x840 读脚本（按反汇编定的位序列）：
+       g = 19 + rd（前 19 读是空闲握手）
+         g=23      0x840 的同步位（第 5 次搜寻的数据读）
+         g=25..32  8 拍交替（0x86C 循环要求相邻读不同）
+         g=33..35  111（站号）
+         g=36..38  000（校验位+填充）
+         g=53      0x720 的同步位（第 8 次尝试 ⇒ [0x2D]=7）
+         g=55..83  15 位，s8=1、s7=0 ⇒ AL=(BL>>1)=1 */
     if ((dev->cmdlat == 0x00) && (dev->c3 == 0x08)) {
-        int k;
-        if (cpu_state.pc == 0x08B1) {
-            k = (dev->rd > 0) ? (dev->rd - 1) : 0;
-            return (uint8_t) ((base & 0x3f)
-                              | (ibm5250_frame_bit(dev, k) ? 0x80 : 0x00));
+        int g  = 19 + dev->rd;
+        int fb = 0;
+
+        if (g == 19)                       /* 握手后的第一拍就是同步位 */
+            fb = 1;
+        else if ((g >= 21) && (g <= 28))   /* 8 拍交替 */
+            fb = (g - 21) & 1;
+        else if ((g >= 29) && (g <= 31))   /* 111 站号 */
+            fb = 1;
+        else if ((g >= 32) && (g <= 34))   /* 000 */
+            fb = 0;
+        else if (g == 49)                  /* 0x720 第 8 次尝试命中 ⇒ [0x2D]=7 */
+            fb = 1;
+        else if ((g >= 51) && (g <= 79)) { /* 15 位：s8=1、s7=0 */
+            int i = (g - 51) / 2;
+            fb = (i == 8);
         }
-        k = dev->rd;
+
         if (dev->rd == 0)
             dev->ready = 1;
+        if (getenv("EPOCH5250_POLLOG")) {
+            static long an = 0; an++;
+            if (an <= 200)
+                pclog("5250: AB0 n=%ld pc=%04X g=%d bit=%d ph=%d\n",
+                      an, cpu_state.pc, g, fb, dev->ph);
+        }
         dev->rd++;
-        return (uint8_t) ((base & 0x3f)
-                          | (ibm5250_frame_bit(dev, k) ? 0x80 : 0x00));
+        return (uint8_t) ((base & 0x3f) | (fb ? 0x80 : 0x00));
     }
 
     {
@@ -544,6 +575,8 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
     switch (port) {
         case 0x1C3:
             dev->c3 = val;
+            if (getenv("EPOCH5250_POLLOG"))
+                pclog("5250: OUT1C3 %02X pc=%04X\n", val, cpu_state.pc);
             break;
 
         case 0x1C8:
@@ -564,7 +597,8 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                 dev->ph     = 1;
                 dev->rd     = 0;
                 dev->serve  = 1;
-                dev->pre    = getenv("EPOCH5250_PRE") ? atoi(getenv("EPOCH5250_PRE")) : 0;
+                dev->pre    = ((dev->cmdlat == 0x40) && getenv("EPOCH5250_PRE"))
+                              ? atoi(getenv("EPOCH5250_PRE")) : 0;
                 /* 协议：数据就绪中断在“触发”后一个响应窗口才来（twinax 30–80 µs） */
                 if ((dev->cmdlat == 0x64) && (port == 0x1C9) && getenv("EPOCH5250_LEVELIRQ")) {
                     dev->ready       = 1;
@@ -598,7 +632,8 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                     dev->rd     = 0;
                     dev->serve  = 1;
                     dev->irq_burst = 0;
-                    dev->pre    = getenv("EPOCH5250_PRE") ? atoi(getenv("EPOCH5250_PRE")) : 0;
+                    dev->pre    = ((val == 0x40) && getenv("EPOCH5250_PRE"))
+                                  ? atoi(getenv("EPOCH5250_PRE")) : 0;
                     dev->fno++;
                     dev->dummy  = getenv("EPOCH5250_LEAD1") ? 2
                                 : (getenv("EPOCH3477_ADR_RW0") ? 1 : 0);
