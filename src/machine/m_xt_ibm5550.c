@@ -215,6 +215,8 @@ epoch_adr_dev_irq_clear(void *priv)
 
 static ibm5250_t *epoch_adr_dev_handle = NULL;
 
+static void epoch_adr_shared_clear(void *priv);
+
 static void
 epoch_adr_ack_out(uint16_t port, uint8_t val, void *priv)
 {
@@ -3885,6 +3887,19 @@ epoch_hiram_readb(uint32_t addr, void *priv)
             + ((((uint32_t) epoch->dispbank >> 5) & 7) * 0x8000);
         return epoch->fontcard_rom[off & (EPOCH_FONTCARD_ROM_SIZE_3477 - 1)];
     }
+    if (getenv("EPOCH5250_POLLOG") && (addr == 0xE4000)) {
+        static long e40 = 0; e40++;
+        if (e40 <= 40)
+            pclog("3477: E4000RD n=%ld pc=%04X val=%02X\n", e40, cpu_state.pc,
+                  epoch->hiram[(addr - 0xE1000) & 0xFFFF]);
+    }
+    if (getenv("EPOCH5250_POLLOG") && (addr >= 0xE4000) && (addr < 0xE4100) &&
+        (epoch->hiram[(addr - 0xE1000) & 0xFFFF] != 0)) {
+        static long e4nz = 0; e4nz++;
+        if (e4nz <= 5)
+            pclog("3477: E400NZ n=%ld addr=%05X val=%02X pc=%04X\n", e4nz, addr,
+                  epoch->hiram[(addr - 0xE1000) & 0xFFFF], cpu_state.pc);
+    }
     if (getenv("EPOCH5250_POLLOG") && (addr >= 0xE4000) && (addr < 0xE4010)) {
         static long e4r = 0; e4r++;
         if (e4r <= 6) pclog("3477: E4R n=%ld addr=%05X=%02X\n", e4r, addr,
@@ -3909,9 +3924,9 @@ epoch_hiram_writeb(uint32_t addr, uint8_t val, void *priv)
         if ((hn <= 12) || ((hn % 4096) == 0))
             pclog("3477: HIRAMW n=%ld addr=%05X=%02X\n", hn, addr, val);
     }
-    if (getenv("EPOCH5250_POLLOG") && (addr >= 0xE4000) && (addr < 0xE4100)) {
+    if (getenv("EPOCH5250_POLLOG") && (addr == 0xE4000)) {
         static long e4n = 0; e4n++;
-        if (e4n <= 6) pclog("3477: E4W n=%ld addr=%05X=%02X\n", e4n, addr, val);
+        pclog("3477: E4W n=%ld pc=%04X val=%02X\n", e4n, cpu_state.pc, val);
     }
     ((epoch_t *) priv)->hiram[(addr - 0xE1000) & 0xFFFF] = val;
 }
@@ -3919,12 +3934,22 @@ static void
 epoch_hiram_writew(uint32_t addr, uint16_t val, void *priv)
 {
     epoch_t *epoch = (epoch_t *) priv;
-    if (getenv("EPOCH5250_POLLOG") && (addr >= 0xE4000) && (addr < 0xE4100)) {
+    if (getenv("EPOCH5250_POLLOG") && (addr == 0xE4000)) {
         static long e4w = 0; e4w++;
-        if (e4w <= 6) pclog("3477: E4WW n=%ld addr=%05X=%04X\n", e4w, addr, val);
+        pclog("3477: E4WW n=%ld pc=%04X val=%04X\n", e4w, cpu_state.pc, val);
     }
     epoch->hiram[(addr - 0xE1000) & 0xFFFF]         = val & 0xff;
     epoch->hiram[(addr - 0xE1000 + 1) & 0xFFFF]     = val >> 8;
+}
+
+/* 适配器把 0xE400:0000 起的 256 字节作为自己的共享 RAM 窗口：
+   块 0x9D0 选中它之后立刻要求全 0（0x9D0 自己不清）。 */
+static void
+epoch_adr_shared_clear(void *priv)
+{
+    epoch_t *epoch = (epoch_t *) priv;
+    if (epoch->hiram != NULL)
+        memset(epoch->hiram + 0x3000, 0x00, 0x100);
 }
 
 static void *
@@ -4049,6 +4074,8 @@ epoch_init(UNUSED(const device_t *info))
                 epoch->adapter = ibm5250_init(epoch_adr_irq, epoch_adr_dev_irq, epoch,
                                                 epoch_adr_dev_irq_clear, epoch);
                 epoch_adr_dev_handle = epoch->adapter;
+                ibm5250_set_shared_clear(epoch->adapter,
+                                         epoch_adr_shared_clear, epoch);
                 io_sethandler(0x0722, 0x0002, NULL, NULL, NULL,
                               epoch_adr_ack_out, NULL, NULL, epoch);
                 /* 0x1B0 (terminal type) and 0x1B6 (ICU release) are machine

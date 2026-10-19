@@ -79,6 +79,8 @@ struct ibm5250_t {
     int      w42;
     int      bit0;
     int      b1;          /* 0x1C6.bit1 的选择器输出 */
+    void   (*shared_clear)(void *priv);
+    void    *shared_priv;
     int      poll_left;   /* 0x8C0 窗口轮询计数 */
     int      caller;          /* 数据有效：ISR 采样时 bit1=1 */
     int      pair_pend;      /* 一次位槽的第 1 读已发生 */
@@ -566,14 +568,17 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
         case 0x1C2:
             if (getenv("EPOCH5250_POLLOG")) {
                 int nz = 0, k, first = -1;
+                uint32_t dsa = ((uint32_t) cpu_state.seg_ds.seg << 4);
+                int off24 = (int) (mem_readb_phys(dsa + 0x24)
+                                   | (mem_readb_phys(dsa + 0x25) << 8));
                 for (k = 0; k < 256; k++) {
-                    if (mem_readb_phys(0xE4000 + k) != 0) {
+                    if (mem_readb_phys(0xE4000 + off24 + k) != 0) {
                         nz++;
                         if (first < 0) first = k;
                     }
                 }
-                pclog("5250: OUT1C2 %02X pc=%04X E400nz=%d first=%d v=%02X%02X%02X%02X %02X%02X%02X%02X\n",
-                      val, cpu_state.pc, nz, first,
+                pclog("5250: OUT1C2 %02X pc=%04X [24]=%04X nz=%d first=%d v=%02X%02X%02X%02X %02X%02X%02X%02X\n",
+                      val, cpu_state.pc, off24, nz, first,
                       mem_readb_phys(0xE4000), mem_readb_phys(0xE4001),
                       mem_readb_phys(0xE4002), mem_readb_phys(0xE4003),
                       mem_readb_phys(0xE4004), mem_readb_phys(0xE4005),
@@ -585,6 +590,11 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             }
             /* 选择器：带 bit0（0x01）的写（如 0x09）→ bit1=1；否则 bit1=phase */
             dev->b1 = (val & 0x01) ? 1 : dev->phase;
+            /* 0x09 = 选中适配器共享 RAM 窗口：块 0x9D0 写完立刻就要求
+               0xE400:0000..00FF 为 0（0xA5B），而它自己从不写这块内存。 */
+            if (((val & 0x0F) == 0x09) && (dev->shared_clear != NULL))
+                dev->shared_clear(dev->shared_priv);
+
             if (val & 0x08)
                 dev->bit0 = 1;
             else if (val & 0x01)
@@ -699,6 +709,13 @@ ibm5250_init(int irq, ibm5250_irq_t irq_raise, void *irq_priv,
           irq, (int) (sizeof(ibm5250_ports) / sizeof(ibm5250_ports[0])));
 
     return dev;
+}
+
+void
+ibm5250_set_shared_clear(ibm5250_t *dev, void (*fn)(void *priv), void *priv)
+{
+    dev->shared_clear = fn;
+    dev->shared_priv  = priv;
 }
 
 void

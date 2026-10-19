@@ -21,6 +21,10 @@ typedef void (*ibm5250_irq_t)(void *priv);
 ibm5250_t *ibm5250_init(int irq, ibm5250_irq_t irq_raise, void *irq_priv,
                         ibm5250_irq_t irq_clear, void *irq_clear_priv);
 
+/* 客人写 0x1C2=09（选中适配器共享 RAM 窗口）时清 0xE400:0000 起的 256 字节。 */
+void       ibm5250_set_shared_clear(ibm5250_t *dev,
+                                    void (*fn)(void *priv), void *priv);
+
 /* 客人写 0x722（ISR 收尾）时调用：消掉“数据就绪”电平。 */
 void       ibm5250_irq_ack(ibm5250_t *dev);
 void       ibm5250_close(ibm5250_t *dev);
