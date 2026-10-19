@@ -200,11 +200,27 @@ static void
 epoch_adr_dev_irq(void *priv)
 {
     (void) priv;
-    if (epoch_adr_irq >= 0) {
-        /* 拉一下再放掉：只 picint 会让线一直悬着，8259 边沿触发不再复触发 */
+    if (epoch_adr_irq >= 0)
         picint((uint16_t) (1 << epoch_adr_irq));
+}
+
+/* 电平型中断：客人写 0x722 收尾时才消线 */
+static void
+epoch_adr_dev_irq_clear(void *priv)
+{
+    (void) priv;
+    if (epoch_adr_irq >= 0)
         picintc((uint16_t) (1 << epoch_adr_irq));
-    }
+}
+
+static ibm5250_t *epoch_adr_dev_handle = NULL;
+
+static void
+epoch_adr_ack_out(uint16_t port, uint8_t val, void *priv)
+{
+    (void) port; (void) val; (void) priv;
+    if (epoch_adr_dev_handle != NULL)
+        ibm5250_irq_ack(epoch_adr_dev_handle);
 }
 
 static inline int
@@ -4015,7 +4031,11 @@ epoch_init(UNUSED(const device_t *info))
             }
             if (getenv("EPOCH3477_ADRDEV")) {
                 /* 独立设备模型：端口 / 状态 / 中断线全在 src/device/ibm5250.c */
-                epoch->adapter = ibm5250_init(epoch_adr_irq, epoch_adr_dev_irq, epoch);
+                epoch->adapter = ibm5250_init(epoch_adr_irq, epoch_adr_dev_irq, epoch,
+                                                epoch_adr_dev_irq_clear, epoch);
+                epoch_adr_dev_handle = epoch->adapter;
+                io_sethandler(0x0722, 0x0002, NULL, NULL, NULL,
+                              epoch_adr_ack_out, NULL, NULL, epoch);
                 /* 0x1B0 (terminal type) and 0x1B6 (ICU release) are machine
                    resources, not adapter registers - keep them here. */
                 io_sethandler(0x1B0, 0x0001, epoch_misc_in, NULL, NULL, epoch_misc_out, NULL, NULL, epoch);

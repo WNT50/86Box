@@ -72,10 +72,24 @@ struct ibm5250_t {
     int      irq;
     ibm5250_irq_t irq_raise;
     void    *irq_priv;
+    ibm5250_irq_t irq_clear;
+    void    *irq_clear_priv;
+    int      irq_level;
     pc_timer_t timer;
     int      timer_armed;
     int      irq_burst;
 };
+
+void
+ibm5250_irq_ack(ibm5250_t *dev)
+{
+    if (dev == NULL || !dev->irq_level)
+        return;
+
+    dev->irq_level = 0;
+    if (dev->irq_clear != NULL)
+        dev->irq_clear(dev->irq_clear_priv);
+}
 
 static void
 ibm5250_irq_cb(void *priv)
@@ -101,8 +115,16 @@ ibm5250_arm_irq(ibm5250_t *dev)
     if ((dev->irq_raise == NULL) || dev->timer_armed || getenv("EPOCH5250_NOIRQ"))
         return;
 
-    dev->timer_armed = 1;
-    timer_set_delay_u64(&dev->timer, TIMER_USEC * 80);
+    /* 电平型“数据就绪”：0x64 一武装就拉线，客人写 0x722 才消。
+       0x08/0x40/0xAA 不投中断（会破坏对应测试）。 */
+    if (dev->cmdlat != 0x64)
+        return;
+
+    if (dev->irq_level)
+        return;
+
+    dev->irq_level = 1;
+    dev->irq_raise(dev->irq_priv);
 }
 
 static uint8_t
@@ -432,7 +454,8 @@ static const uint16_t ibm5250_ports[] = {
 };
 
 ibm5250_t *
-ibm5250_init(int irq, ibm5250_irq_t irq_raise, void *irq_priv)
+ibm5250_init(int irq, ibm5250_irq_t irq_raise, void *irq_priv,
+             ibm5250_irq_t irq_clear, void *irq_clear_priv)
 {
     ibm5250_t *dev = calloc(1, sizeof(ibm5250_t));
 
@@ -442,6 +465,8 @@ ibm5250_init(int irq, ibm5250_irq_t irq_raise, void *irq_priv)
     dev->irq       = irq;
     dev->irq_raise = irq_raise;
     dev->irq_priv  = irq_priv;
+    dev->irq_clear = irq_clear;
+    dev->irq_clear_priv = irq_clear_priv;
 
     ibm5250_reset(dev);
 
