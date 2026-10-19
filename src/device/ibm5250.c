@@ -76,6 +76,7 @@ struct ibm5250_t {
     void    *irq_clear_priv;
     int      irq_level;
     int      ready;
+    int      w42;
     int      caller;          /* 数据有效：ISR 采样时 bit1=1 */
     int      pair_pend;      /* 一次位槽的第 1 读已发生 */
     uint64_t pair_tsc;
@@ -126,7 +127,8 @@ ibm5250_arm_irq(ibm5250_t *dev)
 
     /* 电平型“数据就绪”：0x64 一武装就拉线，客人写 0x722 才消。
        0x08/0x40/0xAA 不投中断（会破坏对应测试）。 */
-    if (((dev->cmdlat != 0x64) && (dev->cmdlat != 0x10)) ||
+    if (((dev->cmdlat != 0x64) && (dev->cmdlat != 0x10) &&
+         (dev->cmdlat != 0x00)) ||
         (getenv("EPOCH5250_LEVELIRQ") == NULL))
         return;
 
@@ -145,6 +147,11 @@ ibm5250_base(ibm5250_t *dev)
        phase 不是 0x1C6 的内容，绝不映射到 bit1 —— 之前正是它让每个块
        的 `1C6 & 2` 判据直接失败（AH=0x03 / 0xA1 …）。 */
     uint8_t v = (uint8_t) (dev->latch & 0x7d);
+
+    /* 0x8C0 的判据链证明 bit1 = phase（0x1C2 写入 0x04 时更新）：
+       0x8E8 要求 bit1=1、0x904 在写 0x1C1=0x42 之后要求 bit1=0。 */
+    if (dev->phase)
+        v |= 0x02;
 
     /* 0x4BD 写 0x1C1=0xFF 后要求 (0x1C6 & 3) == 0 */
     if (dev->latch == 0xFF)
@@ -439,6 +446,7 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             break;
 
         case 0x1C0:
+            pclog("5250: CMDW %02X pc=%04X\n", val, cpu_state.pc);
             /* 协议表：每个测试块都先写一条命令（0x00/0x08/0x10/0x40/0x64/0xAA…），
                之前只放行 0x40/0x08/0x64，导致 0x7A0 起步就被忽略。 */
             if (val != 0xFF) {
@@ -462,18 +470,30 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                     dev->word    = 0;
                     dev->inframe = 0;
                     dev->hist    = 0;
+                    dev->w42     = 0;   /* 新命令：清掉上一块遗留的 1C1=42 */
+                    dev->latch   = 0;   /* 上一块末尾的 1C1=0xFF 会把 bit1 掩掉 */
                     pclog("5250: ARM %02X (frame %d)\n", val, dev->fno);
                 } else {
                     pclog("5250: ARM %02X ignored (0x40 pending)\n", val);
                 }
             }
+            /* 块 0x7A0 在 0x7C6 写 1C0=0x00，随后 0x7F7 调 0x8C0 检查
+               [0x2B]&2（要 bit1=1）——按同一响应窗口投一次中断 */
+            if ((val == 0x00) && (cpu_state.pc == 0x7C6) &&
+                getenv("EPOCH5250_LEVELIRQ") && dev->irq_raise) {
+                dev->ready       = 1;
+                dev->irq_level   = 0;
+                dev->timer_armed = 1;
+                timer_set_delay_u64(&dev->timer, 60 * TIMER_USEC);
+            }
+
             ibm5250_arm_irq(dev);
             break;
 
         case 0x1C1:
             dev->latch = (uint8_t) (val | 0x42);
             if ((val & 0x42) == 0x42)
-                dev->phase = 0;
+                dev->w42 = 1;      /* 记下“写过 0x41=0x42”，供下一次 1C2=04 判 phase */
             /* 0x6A0 末尾：写 0x1C1=0xFF 之后要求 (0x1C6 & 3) == 0
                ⇒ 视为复位/静默，停止继续供帧，0x1C6 读回 0 */
             if (val == 0xFF) {
@@ -485,8 +505,10 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             break;
 
         case 0x1C2:
-            if (val & 0x04)
-                dev->phase = ((dev->latch & 0x42) == 0x42) ? 0 : 1;
+            if (val & 0x04) {
+                dev->phase = dev->w42 ? 0 : 1;
+                dev->w42   = 0;
+            }
             break;
 
         case 0x1C6:
