@@ -118,10 +118,13 @@ ibm5250_frame_bit(ibm5250_t *dev, int k)
         return 1;                       /* station address 111 */
     if (k == 12) {
         /* B15..B4 = start + 8 data + 3 address */
+        /* B15..B4 = 同步位 1 + 8 数据 + 3 地址 = 12 位；校验位按这 12 位的 1 的个数算，
+           不能把校验位自己再数进去（旧代码 +1 等于把结果整体翻转：
+           实测 0x500 收到校验 1 → BH=0x3F（偶）与 BL=0xFE（奇）不同 → AH=0x02） */
         ones = 1 + 3;
         for (int t = 0; t < 8; t++)
             ones += (d >> t) & 1;
-        o12 = ones + 1;                 /* + the parity bit itself */
+        o12 = ones;
         return (uint8_t) (cmd40 ? ((o12 & 1) ? 0 : 1) : ((o12 & 1) ? 1 : 0));
     }
     return 0;                           /* fill */
