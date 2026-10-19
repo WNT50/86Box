@@ -77,6 +77,7 @@ struct ibm5250_t {
     int      irq_level;
     int      pair_pend;      /* 一次位槽的第 1 读已发生 */
     uint64_t pair_tsc;
+    uint64_t last_tsc;
     pc_timer_t timer;
     int      timer_armed;
     int      irq_burst;
@@ -229,12 +230,17 @@ ibm5250_in_1c6(ibm5250_t *dev)
         int k  = dev->rd / 2;
         int fb = ibm5250_frame_bit(dev, k);
 
+        /* EMDIAG 的 ISR(0x2D0) 在 0x2D6 与 0x2DD 处各读一次 0x1C6 做状态采样。
+           这些读不是帧位，不能推进 rd/配对。 */
+        if ((cpu_state.pc == 0x2D7) || (cpu_state.pc == 0x2DE))
+            return (uint8_t) ((base & 0x3f) | (fb ? 0x80 : 0x00));
+
         /* 读配对：0x8A0 每个位槽连读两次（同一 bit），而 ISR(0x2D0) 只单读一次。
            只在第 2 读上推 rd，单读不推进，ISR 采样就不会打乱帧边界。
            以 tsc 间隔区分：同槽两读相隔几十个周期，中断间隔远大于此。 */
         if ((dev->cmdlat == 0x64) && getenv("EPOCH5250_PAIR")) {
             int paired = dev->pair_pend
-                      && ((tsc - dev->pair_tsc) <= (uint64_t) atoi(getenv("EPOCH5250_PAIRW") ? getenv("EPOCH5250_PAIRW") : "600"));
+                      && ((tsc - dev->pair_tsc) <= (uint64_t) atoi(getenv("EPOCH5250_PAIRW") ? getenv("EPOCH5250_PAIRW") : "850"));
 
             if (!paired) {
                 dev->pair_pend = 1;
@@ -247,10 +253,12 @@ ibm5250_in_1c6(ibm5250_t *dev)
         if (getenv("EPOCH5250_TRACE")) {
             static int n;
             if (n < 200) {
-                pclog("5250: TRACE f=%d k=%2d fb=%d rd=%2d at=%04X:%04X bx=%04X bl=%02X bh=%02X\n",
+                pclog("5250: TRACE f=%d k=%2d fb=%d rd=%2d dt=%llu at=%04X:%04X bx=%04X bl=%02X bh=%02X\n",
                       dev->fno, k, fb, dev->rd,
+                      (unsigned long long) (tsc - dev->last_tsc),
                       ((CS > 0xFFFF) ? (int) (CS >> 4) : (int) CS), cpu_state.pc,
                       BX, (unsigned) (BX & 0xff), (unsigned) ((BX >> 8) & 0xff));
+                dev->last_tsc = tsc;
                 n++;
             }
         }
