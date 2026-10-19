@@ -200,8 +200,11 @@ static void
 epoch_adr_dev_irq(void *priv)
 {
     (void) priv;
-    if (epoch_adr_irq >= 0)
+    if (epoch_adr_irq >= 0) {
+        /* 拉一下再放掉：只 picint 会让线一直悬着，8259 边沿触发不再复触发 */
         picint((uint16_t) (1 << epoch_adr_irq));
+        picintc((uint16_t) (1 << epoch_adr_irq));
+    }
 }
 
 static inline int

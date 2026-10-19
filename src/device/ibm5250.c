@@ -74,6 +74,7 @@ struct ibm5250_t {
     void    *irq_priv;
     pc_timer_t timer;
     int      timer_armed;
+    int      irq_burst;
 };
 
 static void
@@ -84,6 +85,14 @@ ibm5250_irq_cb(void *priv)
     dev->timer_armed = 0;
     if (dev->irq_raise != NULL)
         dev->irq_raise(dev->irq_priv);
+
+    /* EMDIAG 的 ISR（0x2D0）要定期被叫到才会刷新 [0x2A]/[0x2B]：
+       收发期间每 200 µs 再来一次，最多 64 次。 */
+    if (dev->serve && (dev->irq_burst < 64)) {
+        dev->irq_burst++;
+        dev->timer_armed = 1;
+        timer_set_delay_u64(&dev->timer, TIMER_USEC * 200);
+    }
 }
 
 static void
@@ -323,6 +332,7 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                     dev->ph     = 1;
                     dev->rd     = 0;
                     dev->serve  = 1;
+                    dev->irq_burst = 0;
                     dev->pre    = getenv("EPOCH5250_PRE") ? atoi(getenv("EPOCH5250_PRE")) : 0;
                     dev->fno++;
                     dev->dummy  = getenv("EPOCH5250_LEAD1") ? 2
