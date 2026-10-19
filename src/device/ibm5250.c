@@ -115,7 +115,10 @@ static uint8_t
 ibm5250_frame_bit(ibm5250_t *dev, int k)
 {
     int cmd40 = (dev->cmdlat == 0x40);
-    int d     = cmd40 ? 0x55 : ((dev->cmdlat == 0x64) ? 0x14 : 0xFF);
+    int d     = cmd40 ? 0x55
+              : ((dev->cmdlat == 0x64)
+                    ? (dev->seq64 == 0 ? 0x14 : (dev->seq64 == 1 ? 0xAA : 0xDB))
+                    : 0xFF);
 
     if (cmd40 && getenv("EPOCH5250_D40"))         /* 实验用：覆盖 0x40 帧数据字节 */
         d = (int) strtoul(getenv("EPOCH5250_D40"), NULL, 16);
@@ -219,10 +222,13 @@ ibm5250_in_1c6(ibm5250_t *dev)
                     pclog(" %02X", mem_readb_phys(csa + 0x6C0 + i));
                 pclog("   DS:%04X CS:%04X BX=%04X\n", base >> 4, csa >> 4, BX);
             }
-            if (dev->cmdlat == 0x64)
+            if (dev->cmdlat == 0x64) {
                 dev->seq64 = (dev->seq64 + 1) & 3;
-            if ((dev->cmdlat == 0x40) || (dev->cmdlat == 0x64) || (dev->cmdlat == 0xAA))
+                if (dev->seq64 == 0)
+                    dev->serve = 0;      /* 三帧发完再静默 */
+            } else if ((dev->cmdlat == 0x40) || (dev->cmdlat == 0xAA)) {
                 dev->serve = 0;
+            }
         }
     }
 
