@@ -2597,6 +2597,9 @@ xxx1 xxxx: Serial port 2f8h
 static void
 epoch_misc_out(uint16_t port, uint8_t val, void *priv)
 {
+    if (port == 0xCF)
+        pclog("3477: TESTID %02X pc=%04X:%04X\n", val,
+              (CS > 0xFFFF) ? (int) (CS >> 4) : (int) CS, cpu_state.pc);
     if (port == 0x1B0)
         pclog("3477: OUT1B0 %02X ax=%04X pc=%04X:%04X [2F]=%02X [28]=%02X\n", val, AX,
               (CS > 0xFFFF) ? (int) (CS >> 4) : (int) CS, cpu_state.pc, epoch_adr_latch,
@@ -2604,9 +2607,16 @@ epoch_misc_out(uint16_t port, uint8_t val, void *priv)
     if (getenv("EPOCH3477_ADR_RW")) {
         if (port == 0x1C0) {
             if ((val == 0x40) || (val == 0x08)) {
-                rw_cmdlat = val; rw_ph = 1; rw_rd = 0; rw_serve = 1;
-                rw_word = 0; rw_inframe = 0; rw_hist = 0;
-                pclog("3477: RWM ARM %02X\n", val);
+                /* 0x440 进行中（上次命令是 0x40 且还没收完一帧）时，忽略后来的 0x08，
+                   否则帧内容会被换成 d=0xFF 那一版（实测导致 BH=0x0E、校验 0） */
+                int hold = (rw_cmdlat == 0x40) && (rw_ph == 2) && (rw_rd != 0);
+                if (!hold) {
+                    rw_cmdlat = val; rw_ph = 1; rw_rd = 0; rw_serve = 1;
+                    rw_word = 0; rw_inframe = 0; rw_hist = 0;
+                    pclog("3477: RWM ARM %02X\n", val);
+                } else {
+                    pclog("3477: RWM ARM %02X ignored (0x40 pending)\n", val);
+                }
             }
         }
         if ((port == 0x1C6) && (val & 0x40)) {
