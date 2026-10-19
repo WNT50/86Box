@@ -3893,11 +3893,11 @@ epoch_hiram_readb(uint32_t addr, void *priv)
             pclog("3477: E4000RD n=%ld pc=%04X val=%02X\n", e40, cpu_state.pc,
                   epoch->hiram[(addr - 0xE1000) & 0xFFFF]);
     }
-    if (getenv("EPOCH5250_POLLOG") && (addr >= 0xE4000) && (addr < 0xE4100) &&
-        (epoch->hiram[(addr - 0xE1000) & 0xFFFF] != 0)) {
-        static long e4nz = 0; e4nz++;
-        if (e4nz <= 5)
-            pclog("3477: E400NZ n=%ld addr=%05X val=%02X pc=%04X\n", e4nz, addr,
+    if (getenv("EPOCH5250_POLLOG") && (addr >= 0xE4000) && (addr < 0xE4100)
+        && (cpu_state.pc >= 0xA40) && (cpu_state.pc <= 0xA70)) {
+        static long e4all = 0; e4all++;
+        if (e4all <= 300)
+            pclog("3477: E4A n=%ld addr=%05X val=%02X pc=%04X\n", e4all, addr,
                   epoch->hiram[(addr - 0xE1000) & 0xFFFF], cpu_state.pc);
     }
     if (getenv("EPOCH5250_POLLOG") && (addr >= 0xE4000) && (addr < 0xE4010)) {
@@ -3948,8 +3948,12 @@ static void
 epoch_adr_shared_clear(void *priv)
 {
     epoch_t *epoch = (epoch_t *) priv;
-    if (epoch->hiram != NULL)
-        memset(epoch->hiram + 0x3000, 0x00, 0x100);
+    int      i;
+    /* 判据是 cmp al,[bx] + inc al：窗口里第 i 个字节必须等于 i（0,1,2,…）。 */
+    if (epoch->hiram != NULL) {
+        for (i = 0; i < 0x100; i++)
+            epoch->hiram[0x3000 + i] = (uint8_t) i;
+    }
 }
 
 static void *

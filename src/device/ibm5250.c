@@ -114,8 +114,15 @@ ibm5250_irq_cb(void *priv)
     if (getenv("EPOCH5250_POLLOG"))
         pclog("5250: CB pc=%04X lvl=%d poll=%d raise=%d\n",
               cpu_state.pc, dev->irq_level, dev->poll_left, dev->irq_raise != NULL);
-    if (dev->irq_raise == NULL || dev->irq_level)
+    if (dev->irq_raise == NULL || dev->irq_level) {
+        /* 线还高（等客人写 0x722 应答）：继续等窗口，别让轮询断掉。 */
+        if (dev->irq_raise != NULL && getenv("EPOCH5250_LEVELIRQ") &&
+            ((dev->cmdlat == 0x00) || (dev->cmdlat == 0x10)) && (dev->poll_left > 0)) {
+            dev->timer_armed = 1;
+            timer_set_delay_u64(&dev->timer, 1 * TIMER_USEC);
+        }
         return;
+    }
 
     /* 块 0x7A0：等客人真正进入 0x8C0 且已过 0xCA0 的清零（pc>=0x8C3）
        再拉线，避免中断样本被 [0x2A]/[0x2B] 的清零抹掉。 */
@@ -146,6 +153,14 @@ ibm5250_irq_cb(void *priv)
     dev->irq_raise(dev->irq_priv);
     if (getenv("EPOCH5250_PCLOG"))
         pclog("5250: IRQ ASSERT (level) after trigger\n");
+
+    /* 0x8C0 可能被同一块多次调用：保持窗口轮询，直到客人换命令。 */
+    if (getenv("EPOCH5250_LEVELIRQ") &&
+        ((dev->cmdlat == 0x00) || (dev->cmdlat == 0x10))) {
+        dev->poll_left = 2000;
+        dev->timer_armed = 1;
+        timer_set_delay_u64(&dev->timer, 1 * TIMER_USEC);
+    }
 
     /* 诊断：确认 ISR 的 [0x2B] 是否写进了判据所用的 DS */
     if (getenv("EPOCH5250_FORCE2B")) {
@@ -589,7 +604,8 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                 dev->w42   = 0;
             }
             /* 选择器：带 bit0（0x01）的写（如 0x09）→ bit1=1；否则 bit1=phase */
-            dev->b1 = (val & 0x01) ? 1 : dev->phase;
+            /* 08/09/01 → bit1=1（0x9D0:0x51、0xAB0:0x71 都这么要求）；04 → 跟 phase */
+            dev->b1 = (val & 0x09) ? 1 : dev->phase;
             /* 0x09 = 选中适配器共享 RAM 窗口：块 0x9D0 写完立刻就要求
                0xE400:0000..00FF 为 0（0xA5B），而它自己从不写这块内存。 */
             if (((val & 0x0F) == 0x09) && (dev->shared_clear != NULL))
