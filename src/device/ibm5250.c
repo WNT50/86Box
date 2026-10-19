@@ -107,6 +107,9 @@ ibm5250_frame_bit(ibm5250_t *dev, int k)
 {
     int cmd40 = (dev->cmdlat == 0x40);
     int d     = cmd40 ? 0x55 : 0xFF;
+
+    if (cmd40 && getenv("EPOCH5250_D40"))         /* 实验用：覆盖 0x40 帧数据字节 */
+        d = (int) strtoul(getenv("EPOCH5250_D40"), NULL, 16);
     int ones  = 0;
     int o12;
 
@@ -125,6 +128,9 @@ ibm5250_frame_bit(ibm5250_t *dev, int k)
         for (int t = 0; t < 8; t++)
             ones += (d >> t) & 1;
         o12 = ones;
+        /* EPOCH5250_P40 可强制 0x40 帧的校验位取 0（实测 BH/BL 同奇偶才通过） */
+        if (cmd40 && getenv("EPOCH5250_P40"))
+            return (uint8_t) atoi(getenv("EPOCH5250_P40"));
         return (uint8_t) (cmd40 ? ((o12 & 1) ? 0 : 1) : ((o12 & 1) ? 1 : 0));
     }
     return 0;                           /* fill */
@@ -150,8 +156,15 @@ ibm5250_in_1c6(ibm5250_t *dev)
     }
 
     if (dev->dummy) {
-        /* optional extra idle read, kept behind EPOCH3477_ADR_RW0 so the
-           0x500 timing stays untouched unless explicitly requested */
+        /* 帧前多一拍。EPOCH5250_LEAD1=1 时给 1（客人把它当同步位消费掉，
+           随后 15 位正好落在 k0..k14）；EPOCH3477_ADR_RW0=1 时给 0（空闲）。 */
+        if (getenv("EPOCH5250_LEAD1")) {
+            /* 两拍前导：第 1 拍给 1（结束 0x720 的等 1 循环），
+               第 2 拍给 0（成为客人 15 位移位窗口的第 1 位）。
+               这样窗口整体后移一位，BL.bit1 由起始位 1 变成数据 d0。 */
+            dev->dummy--;
+            return (uint8_t) ((dev->dummy == 1) ? (ret | 0x80) : (ret & 0x7f));
+        }
         dev->dummy = 0;
         return ret;
     }
@@ -238,7 +251,8 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                     dev->rd     = 0;
                     dev->serve  = 1;
                     dev->fno++;
-                    dev->dummy  = getenv("EPOCH3477_ADR_RW0") ? 1 : 0;
+                    dev->dummy  = getenv("EPOCH5250_LEAD1") ? 2
+                                : (getenv("EPOCH3477_ADR_RW0") ? 1 : 0);
                     if (val == 0x40)
                         dev->done40 = 0;
                     dev->word    = 0;
