@@ -34,6 +34,7 @@ add_library(dev OBJECT
     i2c.c
     i2c_gpio.c
     i80186.c
+    ibm5250.c
     ibm_5161.c
     inboard386.c
     ibm_xma.c
