@@ -118,7 +118,7 @@ ibm5250_irq_cb(void *priv)
 static void
 ibm5250_arm_irq(ibm5250_t *dev)
 {
-    if ((dev->irq_raise == NULL) || dev->timer_armed || getenv("EPOCH5250_NOIRQ"))
+    if ((dev->irq_raise == NULL) || getenv("EPOCH5250_NOIRQ"))
         return;
 
     /* 电平型“数据就绪”：0x64 一武装就拉线，客人写 0x722 才消。
@@ -293,9 +293,13 @@ ibm5250_in_1c6(ibm5250_t *dev)
                 pclog("   DS:%04X CS:%04X BX=%04X\n", base >> 4, csa >> 4, BX);
             }
             if (dev->cmdlat == 0x64) {
-                dev->seq64 = (dev->seq64 + 1) & 3;
-                if (dev->seq64 == 0)
+                dev->seq64 = (dev->seq64 + 1) & 7;
+                if (dev->seq64 >= 3) {
                     dev->serve = 0;      /* 三帧发完再静默 */
+                    /* 0xCA0 → 0xC40 在帧前把 [0x2A] 清 0，这里再拉一次
+                       “数据就绪”，让 ISR 在 0x6F8 之前重新采样 0x1C1。 */
+                    ibm5250_arm_irq(dev);
+                }
             } else if ((dev->cmdlat == 0x40) || (dev->cmdlat == 0xAA)) {
                 dev->serve = 0;
             }
@@ -324,6 +328,10 @@ ibm5250_in(uint16_t port, void *priv)
             /* bit1|bit6 are the adapter signature the ROM handshake checks */
             /* bit6|bit1 = 适配器签名；bit4 = 0x4B2 的 (al|0xAF)+1==0 检查要求
                (0x50 两位都为 1) */
+            if (getenv("EPOCH5250_PCLOG"))
+                pclog("5250: IN 0x1C1 = %02X pc=%04X (ISR=%d)\n",
+                      (unsigned) (dev->latch | 0x52), cpu_state.pc,
+                      (cpu_state.pc == 0x2D7));
             return (uint8_t) (dev->latch | 0x52);
 
         case 0x1C2:
