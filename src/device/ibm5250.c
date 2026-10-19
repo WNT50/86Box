@@ -75,7 +75,8 @@ struct ibm5250_t {
     ibm5250_irq_t irq_clear;
     void    *irq_clear_priv;
     int      irq_level;
-    int      ready;          /* 数据有效：ISR 采样时 bit1=1 */
+    int      ready;
+    int      caller;          /* 数据有效：ISR 采样时 bit1=1 */
     int      pair_pend;      /* 一次位槽的第 1 读已发生 */
     uint64_t pair_tsc;
     uint64_t last_tsc;
@@ -298,6 +299,17 @@ ibm5250_in_1c6(ibm5250_t *dev)
         ret = (uint8_t) ((base & 0x3f) | (fb ? 0x80 : 0x00));
         /* 配对模式下本读已是第 2 读：rd 一次 +2，保持 k=rd/2 与 32 读阈值不变 */
         dev->rd += (((dev->cmdlat == 0x64) && getenv("EPOCH5250_PAIR")) ? 2 : 1);
+
+        /* 帧长按调用者区分：0x840 内部调用 0x720（返回 0x89D）收 16 槽；
+           0x6A0 直接调 0x720（返回 0x6DB / 0x6EC）收 15 槽。 */
+        {
+            uint32_t spa = ((uint32_t) cpu_state.seg_ss.seg << 4) + SP;
+            int caller = (spa < 0x1000000) ? mem_readw_phys(spa) : -1;
+            dev->caller = caller;
+            if (getenv("EPOCH5250_PCLOG"))
+                pclog("5250: FRAMEDONE caller=%04X rd=%d seq=%d\n", caller, dev->rd, dev->seq64);
+        }
+
         if (dev->rd >= 32) {
             dev->rd = 0;
             if (dev->cmdlat == 0x40)
@@ -316,8 +328,8 @@ ibm5250_in_1c6(ibm5250_t *dev)
                 dev->seq64 = (dev->seq64 + 1) & 7;
                 if (dev->seq64 >= 3) {
                     dev->serve = 0;      /* 三帧发完再静默 */
-                    /* 注：帧后再投一次“采样”中断（bit1=0）会让 0x8CC 提前失败，
-                       说明 0x840 与 0x720 的帧计数不是同一套；先保持单次采样。 */
+                    /* 帧后第二次采样（bit1=0）暂不启用：它会把 [0x2B] 留在 0，
+                       后续任何 0x840 的 0x8CC 判据（要 bit1=1）都会失败。 */
                 }
             } else if ((dev->cmdlat == 0x40) || (dev->cmdlat == 0xAA)) {
                 dev->serve = 0;
