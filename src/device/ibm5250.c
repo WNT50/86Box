@@ -60,6 +60,7 @@ struct ibm5250_t {
     int      done40;     /* the 0x40 frame has been served once */
     int      pre;        /* 帧前空槽（每槽 2 读）*/
     uint8_t  data8;      /* 0x1C8 数据寄存器 */
+    int      seq64;      /* 0x64 命令的帧序号 */
     int      fno;        /* frame counter (log only) */
     int      dummy;      /* optional leading idle read */
 
@@ -88,7 +89,7 @@ ibm5250_irq_cb(void *priv)
 static void
 ibm5250_arm_irq(ibm5250_t *dev)
 {
-    if ((dev->irq_raise == NULL) || dev->timer_armed)
+    if ((dev->irq_raise == NULL) || dev->timer_armed || getenv("EPOCH5250_NOIRQ"))
         return;
 
     dev->timer_armed = 1;
@@ -114,7 +115,7 @@ static uint8_t
 ibm5250_frame_bit(ibm5250_t *dev, int k)
 {
     int cmd40 = (dev->cmdlat == 0x40);
-    int d     = cmd40 ? 0x55 : ((dev->cmdlat == 0x64) ? 0x0A : 0xFF);
+    int d     = cmd40 ? 0x55 : ((dev->cmdlat == 0x64) ? 0x14 : 0xFF);
 
     if (cmd40 && getenv("EPOCH5250_D40"))         /* 实验用：覆盖 0x40 帧数据字节 */
         d = (int) strtoul(getenv("EPOCH5250_D40"), NULL, 16);
@@ -210,6 +211,16 @@ ibm5250_in_1c6(ibm5250_t *dev)
                 dev->done40 = 1;
             /* 0x40/0x64 只应答一帧：之后 0x720 必须"无应答"超时
                （BL=0 → AL=0）。0x08 等其它命令保持连续应答，IPL 需要。 */
+            if (getenv("EPOCH5250_CODEDUMP") && (dev->cmdlat == 0x64)) {
+                uint32_t base = ((uint32_t) cpu_state.seg_ds.seg << 4);
+                uint32_t csa  = ((uint32_t) CS > 0xFFFF) ? (uint32_t) CS : ((uint32_t) CS << 4);
+                pclog("5250: CODE @CS:6C0 =");
+                for (int i = 0; i < 28; i++)
+                    pclog(" %02X", mem_readb_phys(csa + 0x6C0 + i));
+                pclog("   DS:%04X CS:%04X BX=%04X\n", base >> 4, csa >> 4, BX);
+            }
+            if (dev->cmdlat == 0x64)
+                dev->seq64 = (dev->seq64 + 1) & 3;
             if ((dev->cmdlat == 0x40) || (dev->cmdlat == 0x64) || (dev->cmdlat == 0xAA))
                 dev->serve = 0;
         }
@@ -279,6 +290,7 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                    0x1C9 只是启动这次收发。 */
                 if (port != 0x1C9)
                     dev->cmdlat = val;
+
                 dev->ph     = 1;
                 dev->rd     = 0;
                 dev->serve  = 1;
@@ -311,6 +323,8 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                                 : (getenv("EPOCH3477_ADR_RW0") ? 1 : 0);
                     if (val == 0x40)
                         dev->done40 = 0;
+                    if (val == 0x64)
+                        dev->seq64 = 0;
                     dev->word    = 0;
                     dev->inframe = 0;
                     dev->hist    = 0;
