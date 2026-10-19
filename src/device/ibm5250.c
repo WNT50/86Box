@@ -89,6 +89,9 @@ ibm5250_irq_ack(ibm5250_t *dev)
     if (dev == NULL || !dev->irq_level)
         return;
 
+    if (getenv("EPOCH5250_PCLOG"))
+        pclog("5250: IRQACK level->0 (seq=%d)\n", dev->seq64);
+
     dev->irq_level = 0;
     if (dev->irq_clear != NULL)
         dev->irq_clear(dev->irq_clear_priv);
@@ -186,6 +189,15 @@ static uint8_t
 ibm5250_in_1c6(ibm5250_t *dev)
 {
     uint8_t base = ibm5250_base(dev);
+
+    if (getenv("EPOCH5250_PCLOG") && (dev->cmdlat == 0x64)) {
+        static int n;
+        if (n < 400) {
+            pclog("5250: PCLOG rd=%02d pc=%04X serve=%d seq=%d\n",
+                  dev->rd, cpu_state.pc, dev->serve, dev->seq64);
+            n++;
+        }
+    }
     uint8_t ret  = (uint8_t) (base & 0x3f);
 
     if (!dev->serve) {
@@ -232,7 +244,7 @@ ibm5250_in_1c6(ibm5250_t *dev)
 
         /* EMDIAG 的 ISR(0x2D0) 在 0x2D6 与 0x2DD 处各读一次 0x1C6 做状态采样。
            这些读不是帧位，不能推进 rd/配对。 */
-        if ((cpu_state.pc == 0x2D7) || (cpu_state.pc == 0x2DE))
+        if ((cpu_state.pc == 0x2D7) || (cpu_state.pc == 0x2DF))
             return (uint8_t) ((base & 0x3f) | (fb ? 0x80 : 0x00));
 
         /* 读配对：0x8A0 每个位槽连读两次（同一 bit），而 ISR(0x2D0) 只单读一次。
@@ -447,7 +459,6 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                     }
                 }
             }
-            ibm5250_arm_irq(dev);
             break;
 
         default:

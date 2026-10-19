@@ -218,7 +218,9 @@ static ibm5250_t *epoch_adr_dev_handle = NULL;
 static void
 epoch_adr_ack_out(uint16_t port, uint8_t val, void *priv)
 {
-    (void) port; (void) val; (void) priv;
+    (void) port; (void) priv;
+    if (getenv("EPOCH5250_PCLOG"))
+        pclog("5250: ACK 0x722 = %04X\n", val);
     if (epoch_adr_dev_handle != NULL)
         ibm5250_irq_ack(epoch_adr_dev_handle);
 }
