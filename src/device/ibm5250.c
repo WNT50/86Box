@@ -59,6 +59,7 @@ struct ibm5250_t {
     int      serve;      /* this poll gets a reply */
     int      done40;     /* the 0x40 frame has been served once */
     int      pre;        /* 帧前空槽（每槽 2 读）*/
+    uint8_t  data8;      /* 0x1C8 数据寄存器 */
     int      fno;        /* frame counter (log only) */
     int      dummy;      /* optional leading idle read */
 
@@ -113,7 +114,7 @@ static uint8_t
 ibm5250_frame_bit(ibm5250_t *dev, int k)
 {
     int cmd40 = (dev->cmdlat == 0x40);
-    int d     = cmd40 ? 0x55 : 0xFF;
+    int d     = cmd40 ? 0x55 : ((dev->cmdlat == 0x64) ? 0x0A : 0xFF);
 
     if (cmd40 && getenv("EPOCH5250_D40"))         /* 实验用：覆盖 0x40 帧数据字节 */
         d = (int) strtoul(getenv("EPOCH5250_D40"), NULL, 16);
@@ -150,9 +151,12 @@ ibm5250_in_1c6(ibm5250_t *dev)
     uint8_t ret  = (uint8_t) (base & 0x3f);
 
     if (!dev->serve) {
-        /* 静默期必须给 0x00：0x720 超时返回时 AL=(读值<<1)，AL 必须为 0
-           （0x440 的 0x4EE 检查）。0x80 也行，但 base 里的 bit1 会让 AL≠0。 */
-        return 0x00;
+        /* 只有 EMDIAG 的 0x40/0x64 收发要求静默期读回 0x00
+           （0x720 超时返回 AL=(读值<<1)，必须为 0）；
+           其它情形（IPL 早期轮询）保持 base，否则 POST 会卡住。 */
+        if ((dev->cmdlat == 0x40) || (dev->cmdlat == 0x64) || (dev->cmdlat == 0xAA))
+            return 0x00;
+        return ret;
     }
 
     if (dev->ph != 2) {
@@ -204,9 +208,10 @@ ibm5250_in_1c6(ibm5250_t *dev)
             dev->rd = 0;
             if (dev->cmdlat == 0x40)
                 dev->done40 = 1;
-            /* 每条命令只应答一帧：之后 0x720 必须"无应答"超时
-               （BL=0 → AL=0）。0x440 的 0x476/0x4EB 都靠这个语义。 */
-            dev->serve = 0;
+            /* 0x40/0x64 只应答一帧：之后 0x720 必须"无应答"超时
+               （BL=0 → AL=0）。0x08 等其它命令保持连续应答，IPL 需要。 */
+            if ((dev->cmdlat == 0x40) || (dev->cmdlat == 0x64) || (dev->cmdlat == 0xAA))
+                dev->serve = 0;
         }
     }
 
@@ -261,13 +266,19 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
 
     switch (port) {
         case 0x1C8:
-        case 0x1C9:      /* EMDIAG 的 [0x12] = 0x1C9，0xAA 等命令从这里发出 */
+            /* 数据寄存器：只存字节，不重新武装（0x6A0 先写 0xDB 再写 0xAA） */
+            dev->data8 = val;
+            break;
+
+        case 0x1C9:      /* EMDIAG 的 [0x12]：写 0xAA 是“触发一帧应答”，命令号不变 */
         case 0x1CA:
         case 0x1D0:
         case 0x1D1:
-            /* 命令/数据寄存器：EMDIAG 在这里发 0xAA 等后续命令，需要重新武装应答 */
             if (val != 0xFF) {
-                dev->cmdlat = val;
+                /* 不要把 val 当命令：0x6A0 的命令在 0x1C0（0x64），
+                   0x1C9 只是启动这次收发。 */
+                if (port != 0x1C9)
+                    dev->cmdlat = val;
                 dev->ph     = 1;
                 dev->rd     = 0;
                 dev->serve  = 1;
@@ -285,7 +296,7 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             break;
 
         case 0x1C0:
-            if ((val == 0x40) || (val == 0x08)) {
+            if ((val == 0x40) || (val == 0x08) || (val == 0x64)) {
                 /* keep the 0x40 reply in place while the subtest is running */
                 int hold = (val == 0x08) && (dev->cmdlat == 0x40) && !dev->done40;
 
