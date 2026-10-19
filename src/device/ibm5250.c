@@ -126,6 +126,7 @@ struct ibm5250_t {
     int      ready;
     int      w42;
     int      bit0;
+    int      c3;          /* 0x1C3 写入值（块 0xAB0 写 0x08） */
     int      b1;          /* 0x1C6.bit1 的选择器输出 */
     void   (*shared_clear)(void *priv);
     void    *shared_priv;
@@ -337,7 +338,12 @@ ibm5250_in_1c6(ibm5250_t *dev)
         /* ISR 的采样读不能消耗握手槽 */
         if (ISR_PC(cpu_state.pc))
             return (uint8_t) ((base & 0x3d) | (dev->ready ? 0x02 : 0x00));
-        ret = (uint8_t) ((base & 0x3f) | ibm5250_handshake[dev->rd]);
+        /* 协议：接收方以 sync=1 对齐；帧前必须是空闲 0。
+           0x64 的 19 槽握手是实测拟合值，只用于它自己；其它命令（0x00/0x08…）
+           给纯空闲，否则 0x840 的同步搜索会提前命中握手里的 1 而错位。 */
+        ret = (uint8_t) ((base & 0x3f)
+                         | ((dev->cmdlat == 0x00 && dev->c3 == 0x08) ? 0x00
+                                                  : ibm5250_handshake[dev->rd]));
         if (++dev->rd >= 19) {
             dev->ph = 2;
             dev->rd = 0;
@@ -363,6 +369,23 @@ ibm5250_in_1c6(ibm5250_t *dev)
     if (dev->pre > 0) {
         dev->pre--;
         return (uint8_t) (base & 0x3f);
+    }
+
+    /* 0xAB0 的收帧：0x8A0 在 pc=0x8A7（数据）与 pc=0x8B1（时钟）各读一次，
+       0x8AA 只在 0x8B1 读。位只在数据读上前进，时钟读返回同一位。 */
+    if ((dev->cmdlat == 0x00) && (dev->c3 == 0x08)) {
+        int k;
+        if (cpu_state.pc == 0x08B1) {
+            k = (dev->rd > 0) ? (dev->rd - 1) : 0;
+            return (uint8_t) ((base & 0x3f)
+                              | (ibm5250_frame_bit(dev, k) ? 0x80 : 0x00));
+        }
+        k = dev->rd;
+        if (dev->rd == 0)
+            dev->ready = 1;
+        dev->rd++;
+        return (uint8_t) ((base & 0x3f)
+                          | (ibm5250_frame_bit(dev, k) ? 0x80 : 0x00));
     }
 
     {
@@ -519,6 +542,10 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
     }
 
     switch (port) {
+        case 0x1C3:
+            dev->c3 = val;
+            break;
+
         case 0x1C8:
             /* 数据寄存器：只存字节，不重新武装（0x6A0 先写 0xDB 再写 0xAA） */
             dev->data8 = val;
