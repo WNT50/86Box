@@ -209,6 +209,10 @@ ibm5250_in_1c6(ibm5250_t *dev)
         return ret;
     }
 
+    /* 协议：0x64 的响应在 0x1C9 触发后才就绪；0xCA0 清 [0x2A] 之后、
+       0x840 开始收帧时拉 IRQ4，ISR 采样 0x1C1 写入 [0x2A]（0x6F8 检查）。 */
+    if ((dev->cmdlat == 0x64) && (dev->ph == 2) && (dev->rd == 0) && (dev->seq64 == 0))
+        ibm5250_arm_irq(dev);
     if (dev->ph != 2) {
         ret = (uint8_t) ((base & 0x3f) | ibm5250_handshake[dev->rd]);
         if (++dev->rd >= 19) {
@@ -244,8 +248,13 @@ ibm5250_in_1c6(ibm5250_t *dev)
 
         /* EMDIAG 的 ISR(0x2D0) 在 0x2D6 与 0x2DD 处各读一次 0x1C6 做状态采样。
            这些读不是帧位，不能推进 rd/配对。 */
-        if ((cpu_state.pc == 0x2D7) || (cpu_state.pc == 0x2DF))
+        if ((cpu_state.pc == 0x2D7) || (cpu_state.pc == 0x2DF)) {
+            /* ISR 插进同一槽的两次读之间时，把配对时间戳顺延，
+               否则第 2 读会被当成新槽的首读，整帧错一位。 */
+            if (dev->pair_pend)
+                dev->pair_tsc = tsc;
             return (uint8_t) ((base & 0x3f) | (fb ? 0x80 : 0x00));
+        }
 
         /* 读配对：0x8A0 每个位槽连读两次（同一 bit），而 ISR(0x2D0) 只单读一次。
            只在第 2 读上推 rd，单读不推进，ISR 采样就不会打乱帧边界。
@@ -296,9 +305,6 @@ ibm5250_in_1c6(ibm5250_t *dev)
                 dev->seq64 = (dev->seq64 + 1) & 7;
                 if (dev->seq64 >= 3) {
                     dev->serve = 0;      /* 三帧发完再静默 */
-                    /* 0xCA0 → 0xC40 在帧前把 [0x2A] 清 0，这里再拉一次
-                       “数据就绪”，让 ISR 在 0x6F8 之前重新采样 0x1C1。 */
-                    ibm5250_arm_irq(dev);
                 }
             } else if ((dev->cmdlat == 0x40) || (dev->cmdlat == 0xAA)) {
                 dev->serve = 0;
