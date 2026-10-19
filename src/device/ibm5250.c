@@ -403,8 +403,8 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             if (val != 0xFF) {
                 /* 不要把 val 当命令：0x6A0 的命令在 0x1C0（0x64），
                    0x1C9 只是启动这次收发。 */
-                if (port != 0x1C9)
-                    dev->cmdlat = val;
+                /* 命令只能由 0x1C0 设定；0x1C9/0x1CA/0x1D0/0x1D1 只是
+                   触发或参数（0x6A0 末尾写 0x1CA=0x01 曾把 cmdlat 冲成 0x01）。 */
 
                 dev->ph     = 1;
                 dev->rd     = 0;
