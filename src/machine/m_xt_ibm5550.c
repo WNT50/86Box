@@ -2249,6 +2249,7 @@ static int        epoch_adr_plsn;     /* 已收脉冲数 */
 static uint16_t   epoch_adr_word;     /* [PPM] 解码出的发送字 */
 static int rw_ph = 1, rw_rd = 0, rw_cmdlat = 0, rw_serve = 0, rw_inframe = 0, rw_pcnt = 0, rw_hist = 0;
 static int rw_done40 = 0;
+static int rw_dummy = 0;
 static uint16_t rw_word = 0;
 static int        epoch_adr_ph = 1;   /* 1=握手 2=帧 */
 static int        epoch_adr_rd;
@@ -2319,7 +2320,10 @@ epoch_misc_in(uint16_t port, void *priv)
                     ret = (uint8_t) (base & 0x3f);
                 } else if (rw_ph != 2) {
                     ret = (uint8_t) ((base & 0x3f) | rws[rw_rd]);
-                    if (++rw_rd >= 19) { rw_ph = 2; rw_rd = 0; }
+                    if (++rw_rd >= 19) { rw_ph = 2; rw_rd = 0; rw_dummy = 1; }
+                } else if (getenv("EPOCH3477_ADR_RW0") && rw_dummy) {
+                    rw_dummy = 0;      /* 帧相首读：给 0，让客人的 15 次移位与我们 16 位对齐 */
+                    ret = (uint8_t) (base & 0x3f);
                 } else {
                     int k = rw_rd / 2;
                     int cmd40 = (rw_cmdlat == 0x40);
@@ -2335,7 +2339,7 @@ epoch_misc_in(uint16_t port, void *priv)
                     ret = (uint8_t) ((base & 0x3f) | (fb ? 0x80 : 0));
                     if (++rw_rd >= 32) { rw_rd = 0; if (rw_cmdlat == 0x40) rw_done40 = 1; }
                 }
-                { static int q; if (q < 60) { pclog("3477: RWREAD rd=%d ph=%d ret=%02X serve=%d\n", rw_rd, rw_ph, ret, rw_serve); q++; } }
+                { static int q; if (q < 400) { pclog("3477: RWREAD rd=%d ph=%d ret=%02X serve=%d pc=%04X:%04X\n", rw_rd, rw_ph, ret, rw_serve, (CS > 0xFFFF) ? (int) (CS >> 4) : (int) CS, cpu_state.pc); q++; } }
                 return ret;
             }
             if (getenv("EPOCH3477_ADR_SYNTH") && ((CS >> 4) >= 0x3500) && ((CS >> 4) <= 0x3700)) {
