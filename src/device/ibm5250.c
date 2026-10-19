@@ -126,7 +126,8 @@ ibm5250_arm_irq(ibm5250_t *dev)
 
     /* 电平型“数据就绪”：0x64 一武装就拉线，客人写 0x722 才消。
        0x08/0x40/0xAA 不投中断（会破坏对应测试）。 */
-    if ((dev->cmdlat != 0x64) || (getenv("EPOCH5250_LEVELIRQ") == NULL))
+    if (((dev->cmdlat != 0x64) && (dev->cmdlat != 0x10)) ||
+        (getenv("EPOCH5250_LEVELIRQ") == NULL))
         return;
 
     if (dev->irq_level)
@@ -251,6 +252,9 @@ ibm5250_in_1c6(ibm5250_t *dev)
         int k  = dev->rd / 2;
         int fb = ibm5250_frame_bit(dev, k);
 
+        if (dev->rd == 0)
+            dev->ready = 1;
+
         /* EMDIAG 的 ISR(0x2D0) 在 0x2D6 与 0x2DD 处各读一次 0x1C6 做状态采样。
            这些读不是帧位，不能推进 rd/配对。 */
         if (ISR_PC(cpu_state.pc)) {
@@ -328,8 +332,13 @@ ibm5250_in_1c6(ibm5250_t *dev)
                 dev->seq64 = (dev->seq64 + 1) & 7;
                 if (dev->seq64 >= 3) {
                     dev->serve = 0;      /* 三帧发完再静默 */
-                    /* 帧后第二次采样（bit1=0）暂不启用：它会把 [0x2B] 留在 0，
-                       后续任何 0x840 的 0x8CC 判据（要 bit1=1）都会失败。 */
+                    /* 0x64 三帧结束：第二次采样 bit1=0（0x70D 要 [0x2B]&3==0） */
+                    dev->ready = 0;
+                    if (getenv("EPOCH5250_LEVELIRQ") && dev->irq_raise) {
+                        dev->irq_level = 0;
+                        dev->irq_raise(dev->irq_priv);
+                        dev->irq_level = 1;
+                    }
                 }
             } else if ((dev->cmdlat == 0x40) || (dev->cmdlat == 0xAA)) {
                 dev->serve = 0;
@@ -430,7 +439,9 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             break;
 
         case 0x1C0:
-            if ((val == 0x40) || (val == 0x08) || (val == 0x64)) {
+            /* 协议表：每个测试块都先写一条命令（0x00/0x08/0x10/0x40/0x64/0xAA…），
+               之前只放行 0x40/0x08/0x64，导致 0x7A0 起步就被忽略。 */
+            if (val != 0xFF) {
                 /* keep the 0x40 reply in place while the subtest is running */
                 int hold = (val == 0x08) && (dev->cmdlat == 0x40) && !dev->done40;
 
