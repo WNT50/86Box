@@ -49,6 +49,54 @@ static const uint8_t ibm5250_handshake[19] = {
     0x00, 0x00, 0x00
 };
 
+/* 协议形式的帧描述：B15=sync、B14..B7=data、B6..B4=station、
+   B3=parity（覆盖 B15..B4 共 12 位）、B2..B0=fill≥3。
+   每条命令一帧或多帧，数据与站号不再散落在三元表达式里。 */
+typedef struct {
+    uint8_t cmd;
+    uint8_t station;    /* 0..6 设备站号；7 = EOM，只能出现在末帧 */
+    uint8_t odd;        /* 1 = 奇校验，0 = 偶校验 */
+    uint8_t nframes;
+    uint8_t data[3];
+} ibm5250_frame_desc_t;
+
+static const ibm5250_frame_desc_t ibm5250_frames[] = {
+    /* 0x40 Clear Unit：实测用奇校验（手册写偶，待真机/ROM 复核） */
+    { 0x40, 7, 1, 1, { 0x55, 0x00, 0x00 } },
+    /* 0x64：三帧，数据 14/AA/DB */
+    { 0x64, 7, 0, 3, { 0x14, 0xAA, 0xDB } },
+    /* 0x08 轮询：单帧 FF */
+    { 0x08, 7, 0, 1, { 0xFF, 0x00, 0x00 } },
+    /* 0x00：块 0xAB0 / 0x920 需要一帧带 sync 的应答（数据待 0x840/0x720 反推） */
+    { 0x00, 7, 0, 1, { 0x00, 0x00, 0x00 } },
+};
+
+static const ibm5250_frame_desc_t *
+ibm5250_frame_desc(uint8_t cmd)
+{
+    for (size_t i = 0; i < sizeof(ibm5250_frames) / sizeof(ibm5250_frames[0]); i++) {
+        if (ibm5250_frames[i].cmd == cmd)
+            return &ibm5250_frames[i];
+    }
+    return NULL;
+}
+
+/* 0x1C2 低 4 位是状态选择码：0xFF = 保持原值，SEL_PHASE = 跟 phase。 */
+#define SEL_KEEP   0xFF
+#define SEL_PHASE  0xFE
+typedef struct {
+    uint8_t code;
+    uint8_t b1;
+    uint8_t b0;
+} ibm5250_sel_t;
+
+static const ibm5250_sel_t ibm5250_sels[] = {
+    { 0x01, 1,         0         },  /* 0x7E5 → 0x7ED jz 要求 bit0=0 */
+    { 0x04, SEL_PHASE, SEL_KEEP  },  /* 0x8E1/0x8FF：bit1=phase */
+    { 0x08, 1,         1         },  /* 0x7FA → 0x808 jc 要求 bit0=1 */
+    { 0x09, 1,         SEL_KEEP  },  /* 0x9D7 → 0x9E8 jnz 要求 bit1=1 */
+};
+
 struct ibm5250_t {
     uint8_t  latch;      /* 0x1C1 status latch, mirrored into 0x1C6 */
     uint8_t  cmdlat;     /* command latched at 0x1C0 */
@@ -225,38 +273,33 @@ ibm5250_base(ibm5250_t *dev)
 static uint8_t
 ibm5250_frame_bit(ibm5250_t *dev, int k)
 {
-    int cmd40 = (dev->cmdlat == 0x40);
-    int d     = cmd40 ? 0x55
-              : ((dev->cmdlat == 0x64)
-                    ? (dev->seq64 == 0 ? 0x14 : (dev->seq64 == 1 ? 0xAA : 0xDB))
-                    : 0xFF);
+    const ibm5250_frame_desc_t *f = ibm5250_frame_desc(dev->cmdlat);
+    int d, ones, o12;
 
-    if (cmd40 && getenv("EPOCH5250_D40"))         /* 实验用：覆盖 0x40 帧数据字节 */
+    if (f == NULL)
+        f = ibm5250_frame_desc(0x08);
+
+    d = f->data[(dev->cmdlat == 0x64) ? (dev->seq64 % f->nframes) : 0];
+
+    if (dev->cmdlat == 0x40 && getenv("EPOCH5250_D40"))   /* 实验覆盖 */
         d = (int) strtoul(getenv("EPOCH5250_D40"), NULL, 16);
-    int ones  = 0;
-    int o12;
 
-    if (k == 0)
-        return 1;                       /* start / sync */
-    if (k <= 8)
-        return (uint8_t) ((d >> (k - 1)) & 1);
-    if (k <= 11)
-        return 1;                       /* station address 111 */
+    if (k == 0)                 return 1;                 /* B15 sync */
+    if (k <= 8)                 return (uint8_t) ((d >> (k - 1)) & 1);  /* B14..B7 */
+    if (k <= 11)                return (uint8_t) ((f->station >> (k - 9)) & 1); /* B6..B4 */
     if (k == 12) {
-        /* B15..B4 = start + 8 data + 3 address */
-        /* B15..B4 = 同步位 1 + 8 数据 + 3 地址 = 12 位；校验位按这 12 位的 1 的个数算，
-           不能把校验位自己再数进去（旧代码 +1 等于把结果整体翻转：
-           实测 0x500 收到校验 1 → BH=0x3F（偶）与 BL=0xFE（奇）不同 → AH=0x02） */
-        ones = 1 + 3;
+        ones = 1;                                          /* sync */
         for (int t = 0; t < 8; t++)
-            ones += (d >> t) & 1;
+            ones += (d >> t) & 1;                          /* data */
+        for (int t = 0; t < 3; t++)
+            ones += (f->station >> t) & 1;                 /* station */
         o12 = ones;
-        /* EPOCH5250_P40 可强制 0x40 帧的校验位取 0（实测 BH/BL 同奇偶才通过） */
-        if (cmd40 && getenv("EPOCH5250_P40"))
+        if (dev->cmdlat == 0x40 && getenv("EPOCH5250_P40"))
             return (uint8_t) atoi(getenv("EPOCH5250_P40"));
-        return (uint8_t) (cmd40 ? ((o12 & 1) ? 0 : 1) : ((o12 & 1) ? 1 : 0));
+        /* 偶校验：12 位里 1 的个数为奇数时补 1；奇校验反过来 */
+        return (uint8_t) (f->odd ? ((o12 & 1) ? 0 : 1) : ((o12 & 1) ? 1 : 0));
     }
-    return 0;                           /* fill */
+    return 0;                                              /* B2..B0 fill */
 }
 
 static uint8_t
@@ -604,17 +647,28 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                 dev->w42   = 0;
             }
             /* 选择器：带 bit0（0x01）的写（如 0x09）→ bit1=1；否则 bit1=phase */
-            /* 08/09/01 → bit1=1（0x9D0:0x51、0xAB0:0x71 都这么要求）；04 → 跟 phase */
-            dev->b1 = (val & 0x09) ? 1 : dev->phase;
+
             /* 0x09 = 选中适配器共享 RAM 窗口：块 0x9D0 写完立刻就要求
                0xE400:0000..00FF 为 0（0xA5B），而它自己从不写这块内存。 */
             if (((val & 0x0F) == 0x09) && (dev->shared_clear != NULL))
                 dev->shared_clear(dev->shared_priv);
 
-            if (val & 0x08)
-                dev->bit0 = 1;
-            else if (val & 0x01)
-                dev->bit0 = 0;
+            {
+                const ibm5250_sel_t *sel = NULL;
+                for (size_t si = 0; si < sizeof(ibm5250_sels) / sizeof(ibm5250_sels[0]); si++) {
+                    if (ibm5250_sels[si].code == (val & 0x0F)) {
+                        sel = &ibm5250_sels[si];
+                        break;
+                    }
+                }
+                if (sel != NULL) {
+                    dev->b1   = (sel->b1 == SEL_PHASE) ? dev->phase : sel->b1;
+                    if (sel->b0 != SEL_KEEP)
+                        dev->bit0 = sel->b0;
+                } else {
+                    dev->b1 = dev->phase;
+                }
+            }
 
             /* 块 0x7A0 每次写 0x1C2 之后都会进 0x8C0：每次都重新武装
                中断窗口，否则第二次调用没有中断、[0x2B] 被 0xCA0 清掉。 */
