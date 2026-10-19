@@ -2250,6 +2250,7 @@ static uint16_t   epoch_adr_word;     /* [PPM] 解码出的发送字 */
 static int rw_ph = 1, rw_rd = 0, rw_cmdlat = 0, rw_serve = 0, rw_inframe = 0, rw_pcnt = 0, rw_hist = 0;
 static int rw_done40 = 0;
 static int rw_dummy = 0;
+static int rw_fno = 0;
 static uint16_t rw_word = 0;
 static int        epoch_adr_ph = 1;   /* 1=握手 2=帧 */
 static int        epoch_adr_rd;
@@ -2320,6 +2321,9 @@ epoch_misc_in(uint16_t port, void *priv)
                     ret = (uint8_t) (base & 0x3f);
                 } else if (rw_ph != 2) {
                     ret = (uint8_t) ((base & 0x3f) | rws[rw_rd]);
+                    /* 实验：客人把握手最后一读当作帧首读 ⇒ 该拍就给起始位 1 */
+                    if (getenv("EPOCH3477_ADR_RW18") && (rw_rd == 18))
+                        ret = (uint8_t) ((base & 0x3f) | 0x80);
                     if (++rw_rd >= 19) { rw_ph = 2; rw_rd = 0; rw_dummy = 1; }
                 } else if (getenv("EPOCH3477_ADR_RW0") && rw_dummy) {
                     rw_dummy = 0;      /* 帧相首读：给 0，让客人的 15 次移位与我们 16 位对齐 */
@@ -2339,7 +2343,7 @@ epoch_misc_in(uint16_t port, void *priv)
                     ret = (uint8_t) ((base & 0x3f) | (fb ? 0x80 : 0));
                     if (++rw_rd >= 32) { rw_rd = 0; if (rw_cmdlat == 0x40) rw_done40 = 1; }
                 }
-                { static int q; if (q < 400) { pclog("3477: RWREAD rd=%d ph=%d ret=%02X serve=%d pc=%04X:%04X\n", rw_rd, rw_ph, ret, rw_serve, (CS > 0xFFFF) ? (int) (CS >> 4) : (int) CS, cpu_state.pc); q++; } }
+                { static int q; if (q < 1500 && rw_ph == 2 && rw_serve) { pclog("3477: RWREAD f=%d rd=%d ret=%02X pc=%04X:%04X\n", rw_fno, rw_rd, ret, (CS > 0xFFFF) ? (int) (CS >> 4) : (int) CS, cpu_state.pc); q++; } }
                 return ret;
             }
             if (getenv("EPOCH3477_ADR_SYNTH") && ((CS >> 4) >= 0x3500) && ((CS >> 4) <= 0x3700)) {
@@ -2616,7 +2620,7 @@ epoch_misc_out(uint16_t port, uint8_t val, void *priv)
                    否则帧内容会被换成 d=0xFF 那一版（实测导致 BH=0x0E、校验 0） */
                 int hold = (val == 0x08) && (rw_cmdlat == 0x40) && !rw_done40;
                 if (!hold) {
-                    rw_cmdlat = val; rw_ph = 1; rw_rd = 0; rw_serve = 1;
+                    rw_cmdlat = val; rw_ph = 1; rw_rd = 0; rw_serve = 1; rw_fno++;
                     if (val == 0x40) rw_done40 = 0;
                     rw_word = 0; rw_inframe = 0; rw_hist = 0;
                     pclog("3477: RWM ARM %02X\n", val);
@@ -4009,6 +4013,10 @@ epoch_init(UNUSED(const device_t *info))
             if (getenv("EPOCH3477_ADRDEV")) {
                 /* 独立设备模型：端口 / 状态 / 中断线全在 src/device/ibm5250.c */
                 epoch->adapter = ibm5250_init(epoch_adr_irq, epoch_adr_dev_irq, epoch);
+                /* 0x1B0 (terminal type) and 0x1B6 (ICU release) are machine
+                   resources, not adapter registers - keep them here. */
+                io_sethandler(0x1B0, 0x0001, epoch_misc_in, NULL, NULL, epoch_misc_out, NULL, NULL, epoch);
+                io_sethandler(0x1B6, 0x0001, epoch_misc_in, NULL, NULL, epoch_misc_out, NULL, NULL, epoch);
             } else {
                 /* 只注册 5250 自检实际驱动的端口，避免抢掉启动早期要用的端口 */
                 static const uint16_t adr_ports[] = {0x1B0, 0x1B2, 0x1B6, 0x1C0, 0x1C1, 0x1C2, 0x1C3, 0x1C6, 0x1C7, 0x1C8, 0x1C9, 0x1CA, 0x1CB, 0x1CC, 0x1CD, 0x1CE, 0x1CF, 0x1D0, 0x1D1, 0x1D6};
