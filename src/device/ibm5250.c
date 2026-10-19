@@ -75,6 +75,7 @@ struct ibm5250_t {
     ibm5250_irq_t irq_clear;
     void    *irq_clear_priv;
     int      irq_level;
+    int      ready;          /* 数据有效：ISR 采样时 bit1=1 */
     int      pair_pend;      /* 一次位槽的第 1 读已发生 */
     uint64_t pair_tsc;
     uint64_t last_tsc;
@@ -137,10 +138,11 @@ ibm5250_arm_irq(ibm5250_t *dev)
 static uint8_t
 ibm5250_base(ibm5250_t *dev)
 {
-    /* bit1 is the 0x1C2 phase, but command 0x40 always reads it as 0 -
-       that is what the 0x890 register handshake in EMDIAG checks. */
-    uint8_t v = (uint8_t) ((dev->latch & 0x7d) |
-                           ((dev->cmdlat == 0x40) ? 0x00 : (dev->phase ? 0x02 : 0x00)));
+    /* 协议（见 references/3477s-emdiag-protocol-table.md）：
+       0x1C6 bit7 = 数据位、bit1 = 错误位（正常必须为 0）、bit0 = 就绪。
+       phase 不是 0x1C6 的内容，绝不映射到 bit1 —— 之前正是它让每个块
+       的 `1C6 & 2` 判据直接失败（AH=0x03 / 0xA1 …）。 */
+    uint8_t v = (uint8_t) (dev->latch & 0x7d);
 
     /* 0x4BD 写 0x1C1=0xFF 后要求 (0x1C6 & 3) == 0 */
     if (dev->latch == 0xFF)
@@ -213,9 +215,9 @@ ibm5250_in_1c6(ibm5250_t *dev)
     /* 协议：0x64 的响应在 0x1C9 触发后才就绪；0xCA0 清 [0x2A] 之后、
        0x840 开始收帧时拉 IRQ4，ISR 采样 0x1C1 写入 [0x2A]（0x6F8 检查）。 */
     if (dev->ph != 2) {
-        /* ISR 的采样读不能消耗握手槽；bit1 是错误位，采样必须为 0 */
+        /* ISR 的采样读不能消耗握手槽 */
         if (ISR_PC(cpu_state.pc))
-            return (uint8_t) (base & 0x3d);
+            return (uint8_t) ((base & 0x3d) | (dev->ready ? 0x02 : 0x00));
         ret = (uint8_t) ((base & 0x3f) | ibm5250_handshake[dev->rd]);
         if (++dev->rd >= 19) {
             dev->ph = 2;
@@ -255,8 +257,14 @@ ibm5250_in_1c6(ibm5250_t *dev)
                否则第 2 读会被当成新槽的首读，整帧错一位。 */
             if (dev->pair_pend)
                 dev->pair_tsc = tsc;
-            /* 0x8CE 检查 [0x2B] & 2 == 0（bit1 = 错误位），采样读不能带它 */
-            return (uint8_t) ((base & 0x3d) | (fb ? 0x80 : 0x00));
+            if (getenv("EPOCH5250_PCLOG"))
+                pclog("5250: ISR SAMPLE 0x1C6 -> %02X (cmdlat=%02X ph=%d rd=%d)\n",
+                      (unsigned) ((base & 0x3d) | (fb ? 0x80 : 0x00)),
+                      dev->cmdlat, dev->ph, dev->rd);
+            /* 0x8CC `jnz` → 帧前采样 bit1=1（数据有效）；0x712 要求帧后
+               采样 bit1=0 ⇒ 由 dev->ready 决定 */
+            return (uint8_t) ((base & 0x3d) | (dev->ready ? 0x02 : 0x00)
+                                           | (fb ? 0x80 : 0x00));
         }
 
         /* 读配对：0x8A0 每个位槽连读两次（同一 bit），而 ISR(0x2D0) 只单读一次。
@@ -308,6 +316,8 @@ ibm5250_in_1c6(ibm5250_t *dev)
                 dev->seq64 = (dev->seq64 + 1) & 7;
                 if (dev->seq64 >= 3) {
                     dev->serve = 0;      /* 三帧发完再静默 */
+                    /* 注：帧后再投一次“采样”中断（bit1=0）会让 0x8CC 提前失败，
+                       说明 0x840 与 0x720 的帧计数不是同一套；先保持单次采样。 */
                 }
             } else if ((dev->cmdlat == 0x40) || (dev->cmdlat == 0xAA)) {
                 dev->serve = 0;
@@ -390,6 +400,7 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                 dev->pre    = getenv("EPOCH5250_PRE") ? atoi(getenv("EPOCH5250_PRE")) : 0;
                 /* 协议：数据就绪中断在“触发”后一个响应窗口才来（twinax 30–80 µs） */
                 if ((dev->cmdlat == 0x64) && (port == 0x1C9) && getenv("EPOCH5250_LEVELIRQ")) {
+                    dev->ready       = 1;
                     dev->irq_level   = 0;
                     dev->timer_armed = 1;
                     timer_set_delay_u64(&dev->timer, 60 * TIMER_USEC);
@@ -440,6 +451,14 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             dev->latch = (uint8_t) (val | 0x42);
             if ((val & 0x42) == 0x42)
                 dev->phase = 0;
+            /* 0x6A0 末尾：写 0x1C1=0xFF 之后要求 (0x1C6 & 3) == 0
+               ⇒ 视为复位/静默，停止继续供帧，0x1C6 读回 0 */
+            if (val == 0xFF) {
+                dev->serve = 0;
+                dev->rd    = 0;
+                dev->ph    = 0;
+                dev->seq64 = 0;
+            }
             break;
 
         case 0x1C2:
