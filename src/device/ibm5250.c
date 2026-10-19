@@ -103,17 +103,18 @@ ibm5250_irq_cb(void *priv)
     ibm5250_t *dev = (ibm5250_t *) priv;
 
     dev->timer_armed = 0;
-    if (dev->irq_raise != NULL)
-        dev->irq_raise(dev->irq_priv);
+    if (dev->irq_raise == NULL || dev->irq_level)
+        return;
 
-    /* EMDIAG 的 ISR（0x2D0）要定期被叫到才会刷新 [0x2A]/[0x2B]：
-       收发期间每 200 µs 再来一次，最多 64 次。 */
-    if (dev->serve && (dev->irq_burst < 64)) {
-        dev->irq_burst++;
-        dev->timer_armed = 1;
-        timer_set_delay_u64(&dev->timer, TIMER_USEC * 200);
-    }
+    dev->irq_level = 1;
+    dev->irq_raise(dev->irq_priv);
+    if (getenv("EPOCH5250_PCLOG"))
+        pclog("5250: IRQ ASSERT (level) after trigger\n");
 }
+
+/* EMDIAG 的两份 ISR（0x2D0 / 0x2EC）里对 0x1C1 / 0x1C6 的采样读 */
+#define ISR_PC(pc) (((pc) == 0x2D7) || ((pc) == 0x2DF) || \
+                    ((pc) == 0x2F7) || ((pc) == 0x2FB))
 
 static void
 ibm5250_arm_irq(ibm5250_t *dev)
@@ -211,9 +212,10 @@ ibm5250_in_1c6(ibm5250_t *dev)
 
     /* 协议：0x64 的响应在 0x1C9 触发后才就绪；0xCA0 清 [0x2A] 之后、
        0x840 开始收帧时拉 IRQ4，ISR 采样 0x1C1 写入 [0x2A]（0x6F8 检查）。 */
-    if ((dev->cmdlat == 0x64) && (dev->ph == 2) && (dev->rd == 0) && (dev->seq64 == 0))
-        ibm5250_arm_irq(dev);
     if (dev->ph != 2) {
+        /* ISR 的采样读不能消耗握手槽；bit1 是错误位，采样必须为 0 */
+        if (ISR_PC(cpu_state.pc))
+            return (uint8_t) (base & 0x3d);
         ret = (uint8_t) ((base & 0x3f) | ibm5250_handshake[dev->rd]);
         if (++dev->rd >= 19) {
             dev->ph = 2;
@@ -248,12 +250,13 @@ ibm5250_in_1c6(ibm5250_t *dev)
 
         /* EMDIAG 的 ISR(0x2D0) 在 0x2D6 与 0x2DD 处各读一次 0x1C6 做状态采样。
            这些读不是帧位，不能推进 rd/配对。 */
-        if ((cpu_state.pc == 0x2D7) || (cpu_state.pc == 0x2DF)) {
+        if (ISR_PC(cpu_state.pc)) {
             /* ISR 插进同一槽的两次读之间时，把配对时间戳顺延，
                否则第 2 读会被当成新槽的首读，整帧错一位。 */
             if (dev->pair_pend)
                 dev->pair_tsc = tsc;
-            return (uint8_t) ((base & 0x3f) | (fb ? 0x80 : 0x00));
+            /* 0x8CE 检查 [0x2B] & 2 == 0（bit1 = 错误位），采样读不能带它 */
+            return (uint8_t) ((base & 0x3d) | (fb ? 0x80 : 0x00));
         }
 
         /* 读配对：0x8A0 每个位槽连读两次（同一 bit），而 ISR(0x2D0) 只单读一次。
@@ -385,6 +388,12 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                 dev->rd     = 0;
                 dev->serve  = 1;
                 dev->pre    = getenv("EPOCH5250_PRE") ? atoi(getenv("EPOCH5250_PRE")) : 0;
+                /* 协议：数据就绪中断在“触发”后一个响应窗口才来（twinax 30–80 µs） */
+                if ((dev->cmdlat == 0x64) && (port == 0x1C9) && getenv("EPOCH5250_LEVELIRQ")) {
+                    dev->irq_level   = 0;
+                    dev->timer_armed = 1;
+                    timer_set_delay_u64(&dev->timer, 60 * TIMER_USEC);
+                }
                 dev->fno++;
                 {
                     uint32_t dsa = ((uint32_t) cpu_state.seg_ds.seg << 4);
