@@ -75,6 +75,8 @@ struct ibm5250_t {
     ibm5250_irq_t irq_clear;
     void    *irq_clear_priv;
     int      irq_level;
+    int      pair_pend;      /* 一次位槽的第 1 读已发生 */
+    uint64_t pair_tsc;
     pc_timer_t timer;
     int      timer_armed;
     int      irq_burst;
@@ -117,7 +119,7 @@ ibm5250_arm_irq(ibm5250_t *dev)
 
     /* 电平型“数据就绪”：0x64 一武装就拉线，客人写 0x722 才消。
        0x08/0x40/0xAA 不投中断（会破坏对应测试）。 */
-    if (dev->cmdlat != 0x64)
+    if ((dev->cmdlat != 0x64) || (getenv("EPOCH5250_LEVELIRQ") == NULL))
         return;
 
     if (dev->irq_level)
@@ -227,6 +229,21 @@ ibm5250_in_1c6(ibm5250_t *dev)
         int k  = dev->rd / 2;
         int fb = ibm5250_frame_bit(dev, k);
 
+        /* 读配对：0x8A0 每个位槽连读两次（同一 bit），而 ISR(0x2D0) 只单读一次。
+           只在第 2 读上推 rd，单读不推进，ISR 采样就不会打乱帧边界。
+           以 tsc 间隔区分：同槽两读相隔几十个周期，中断间隔远大于此。 */
+        if ((dev->cmdlat == 0x64) && getenv("EPOCH5250_PAIR")) {
+            int paired = dev->pair_pend
+                      && ((tsc - dev->pair_tsc) <= (uint64_t) atoi(getenv("EPOCH5250_PAIRW") ? getenv("EPOCH5250_PAIRW") : "600"));
+
+            if (!paired) {
+                dev->pair_pend = 1;
+                dev->pair_tsc  = tsc;
+                return (uint8_t) ((base & 0x3f) | (fb ? 0x80 : 0x00));
+            }
+            dev->pair_pend = 0;
+        }
+
         if (getenv("EPOCH5250_TRACE")) {
             static int n;
             if (n < 200) {
@@ -239,7 +256,9 @@ ibm5250_in_1c6(ibm5250_t *dev)
         }
 
         ret = (uint8_t) ((base & 0x3f) | (fb ? 0x80 : 0x00));
-        if (++dev->rd >= 32) {
+        /* 配对模式下本读已是第 2 读：rd 一次 +2，保持 k=rd/2 与 32 读阈值不变 */
+        dev->rd += (((dev->cmdlat == 0x64) && getenv("EPOCH5250_PAIR")) ? 2 : 1);
+        if (dev->rd >= 32) {
             dev->rd = 0;
             if (dev->cmdlat == 0x40)
                 dev->done40 = 1;
