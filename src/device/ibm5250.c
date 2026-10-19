@@ -77,6 +77,8 @@ struct ibm5250_t {
     int      irq_level;
     int      ready;
     int      w42;
+    int      bit0;
+    int      poll_left;   /* 0x8C0 窗口轮询计数 */
     int      caller;          /* 数据有效：ISR 采样时 bit1=1 */
     int      pair_pend;      /* 一次位槽的第 1 读已发生 */
     uint64_t pair_tsc;
@@ -106,8 +108,36 @@ ibm5250_irq_cb(void *priv)
     ibm5250_t *dev = (ibm5250_t *) priv;
 
     dev->timer_armed = 0;
+    if (getenv("EPOCH5250_POLLOG"))
+        pclog("5250: CB pc=%04X lvl=%d poll=%d raise=%d\n",
+              cpu_state.pc, dev->irq_level, dev->poll_left, dev->irq_raise != NULL);
     if (dev->irq_raise == NULL || dev->irq_level)
         return;
+
+    /* 块 0x7A0：等客人真正进入 0x8C0 且已过 0xCA0 的清零（pc>=0x8C3）
+       再拉线，避免中断样本被 [0x2A]/[0x2B] 的清零抹掉。 */
+    if (dev->poll_left > 0) {
+        uint16_t pc = cpu_state.pc;
+        int in_win = ((pc >= 0x8C3) && (pc <= 0x912)) ||
+                     ((pc >= 0xC48) && (pc <= 0xC63));
+
+        {
+            static int dbgn;
+            if (getenv("EPOCH5250_POLLOG") && (dbgn < 25)) {
+                pclog("5250: POLL pc=%04X win=%d left=%d\n", pc, in_win, dev->poll_left);
+                dbgn++;
+            }
+        }
+        if (!in_win) {
+            dev->poll_left--;
+            if (dev->poll_left > 0) {
+                dev->timer_armed = 1;
+                timer_set_delay_u64(&dev->timer, 1 * TIMER_USEC);
+            }
+            return;
+        }
+        dev->poll_left = 0;
+    }
 
     dev->irq_level = 1;
     dev->irq_raise(dev->irq_priv);
@@ -127,9 +157,9 @@ ibm5250_arm_irq(ibm5250_t *dev)
 
     /* 电平型“数据就绪”：0x64 一武装就拉线，客人写 0x722 才消。
        0x08/0x40/0xAA 不投中断（会破坏对应测试）。 */
-    if (((dev->cmdlat != 0x64) && (dev->cmdlat != 0x10) &&
-         (dev->cmdlat != 0x00)) ||
-        (getenv("EPOCH5250_LEVELIRQ") == NULL))
+    /* 只有 0x64 在触发时拉线；0x00（块 0x7A0）必须等进入 0x8C0 的窗口，
+       由 ibm5250_irq_cb 的 pc 轮询投递，不能在这里立即拉。 */
+    if ((dev->cmdlat != 0x64) || (getenv("EPOCH5250_LEVELIRQ") == NULL))
         return;
 
     if (dev->irq_level)
@@ -152,6 +182,10 @@ ibm5250_base(ibm5250_t *dev)
        0x8E8 要求 bit1=1、0x904 在写 0x1C1=0x42 之后要求 bit1=0。 */
     if (dev->phase)
         v |= 0x02;
+    /* 0x1C2 是状态选择器：写 0x01 → bit0=0，写 0x08 → bit0=1
+       （0x7ED `jz` / 0x808 `jc` 两条字节级判据）。 */
+    if (dev->bit0)
+        v |= 0x01;
 
     /* 0x4BD 写 0x1C1=0xFF 后要求 (0x1C6 & 3) == 0 */
     if (dev->latch == 0xFF)
@@ -472,6 +506,7 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                     dev->hist    = 0;
                     dev->w42     = 0;   /* 新命令：清掉上一块遗留的 1C1=42 */
                     dev->latch   = 0;   /* 上一块末尾的 1C1=0xFF 会把 bit1 掩掉 */
+                    dev->bit0    = 0;
                     pclog("5250: ARM %02X (frame %d)\n", val, dev->fno);
                 } else {
                     pclog("5250: ARM %02X ignored (0x40 pending)\n", val);
@@ -482,9 +517,14 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             if ((val == 0x00) && (cpu_state.pc == 0x7C6) &&
                 getenv("EPOCH5250_LEVELIRQ") && dev->irq_raise) {
                 dev->ready       = 1;
+                /* 上一次（0x64）的中断可能还挂在 8259 上：先真正拉低，
+                   否则再拉高没有边沿，ISR 不会进。 */
+                if (dev->irq_clear != NULL)
+                    dev->irq_clear(dev->irq_clear_priv);
                 dev->irq_level   = 0;
+                dev->poll_left   = 2000;   /* 最多等 2 ms */
                 dev->timer_armed = 1;
-                timer_set_delay_u64(&dev->timer, 60 * TIMER_USEC);
+                timer_set_delay_u64(&dev->timer, 1 * TIMER_USEC);
             }
 
             ibm5250_arm_irq(dev);
@@ -509,6 +549,10 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                 dev->phase = dev->w42 ? 0 : 1;
                 dev->w42   = 0;
             }
+            if (val & 0x08)
+                dev->bit0 = 1;
+            else if (val & 0x01)
+                dev->bit0 = 0;
             break;
 
         case 0x1C6:
