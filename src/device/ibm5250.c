@@ -78,6 +78,7 @@ struct ibm5250_t {
     int      ready;
     int      w42;
     int      bit0;
+    int      b1;          /* 0x1C6.bit1 的选择器输出 */
     int      poll_left;   /* 0x8C0 窗口轮询计数 */
     int      caller;          /* 数据有效：ISR 采样时 bit1=1 */
     int      pair_pend;      /* 一次位槽的第 1 读已发生 */
@@ -143,6 +144,16 @@ ibm5250_irq_cb(void *priv)
     dev->irq_raise(dev->irq_priv);
     if (getenv("EPOCH5250_PCLOG"))
         pclog("5250: IRQ ASSERT (level) after trigger\n");
+
+    /* 诊断：确认 ISR 的 [0x2B] 是否写进了判据所用的 DS */
+    if (getenv("EPOCH5250_FORCE2B")) {
+        uint32_t dsa = ((uint32_t) cpu_state.seg_ds.seg << 4);
+        if (dsa < 0x1000000) {
+            pclog("5250: DSAT ds=%04X mem2b=%02X mem2a=%02X\n",
+                  cpu_state.seg_ds.seg, mem_readb_phys(dsa + 0x2B),
+                  mem_readb_phys(dsa + 0x2A));
+        }
+    }
 }
 
 /* EMDIAG 的两份 ISR（0x2D0 / 0x2EC）里对 0x1C1 / 0x1C6 的采样读 */
@@ -180,7 +191,7 @@ ibm5250_base(ibm5250_t *dev)
 
     /* 0x8C0 的判据链证明 bit1 = phase（0x1C2 写入 0x04 时更新）：
        0x8E8 要求 bit1=1、0x904 在写 0x1C1=0x42 之后要求 bit1=0。 */
-    if (dev->phase)
+    if (dev->b1)
         v |= 0x02;
     /* 0x1C2 是状态选择器：写 0x01 → bit0=0，写 0x08 → bit0=1
        （0x7ED `jz` / 0x808 `jc` 两条字节级判据）。 */
@@ -235,6 +246,11 @@ static uint8_t
 ibm5250_in_1c6(ibm5250_t *dev)
 {
     uint8_t base = ibm5250_base(dev);
+
+    if (ISR_PC(cpu_state.pc) && getenv("EPOCH5250_POLLOG"))
+        pclog("5250: ISRRD pc=%04X cmd=%02X ph=%d rd=%d base=%02X serve=%d ds=%04X\n",
+              cpu_state.pc, dev->cmdlat, dev->ph, dev->rd, base, dev->serve,
+              cpu_state.seg_ds.seg);
 
     if (getenv("EPOCH5250_PCLOG") && (dev->cmdlat == 0x64)) {
         static int n;
@@ -413,7 +429,9 @@ ibm5250_in(uint16_t port, void *priv)
                 pclog("5250: IN 0x1C1 = %02X pc=%04X (ISR=%d)\n",
                       (unsigned) (dev->latch | 0x52), cpu_state.pc,
                       (cpu_state.pc == 0x2D7));
-            return (uint8_t) (dev->latch | 0x52);
+            /* 全部 0x1C1 判据的并集：bit7|6|4|3|1 = 1、bit2 = 0 ⇒ 0xDA
+               （0x4AD 要 6|4、0x616 要 7、0x683 要 2=0、0x8D3 要 6|1、0xA17 要 6|3） */
+            return (uint8_t) (dev->latch | 0xDA);
 
         case 0x1C2:
         case 0x1C3:
@@ -532,8 +550,9 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
 
         case 0x1C1:
             dev->latch = (uint8_t) (val | 0x42);
-            if ((val & 0x42) == 0x42)
-                dev->w42 = 1;      /* 记下“写过 0x41=0x42”，供下一次 1C2=04 判 phase */
+            /* 任何一次 0x1C1 写入都会让下一次 1C2=04 的 bit1 变成 0：
+               0x8F6 写 0x42、0xA2B 写 0x48 都是这个效果（0x904 / 0xA48 两条判据）。 */
+            dev->w42 = 1;
             /* 0x6A0 末尾：写 0x1C1=0xFF 之后要求 (0x1C6 & 3) == 0
                ⇒ 视为复位/静默，停止继续供帧，0x1C6 读回 0 */
             if (val == 0xFF) {
@@ -545,14 +564,44 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             break;
 
         case 0x1C2:
+            if (getenv("EPOCH5250_POLLOG")) {
+                int nz = 0, k, first = -1;
+                for (k = 0; k < 256; k++) {
+                    if (mem_readb_phys(0xE4000 + k) != 0) {
+                        nz++;
+                        if (first < 0) first = k;
+                    }
+                }
+                pclog("5250: OUT1C2 %02X pc=%04X E400nz=%d first=%d v=%02X%02X%02X%02X %02X%02X%02X%02X\n",
+                      val, cpu_state.pc, nz, first,
+                      mem_readb_phys(0xE4000), mem_readb_phys(0xE4001),
+                      mem_readb_phys(0xE4002), mem_readb_phys(0xE4003),
+                      mem_readb_phys(0xE4004), mem_readb_phys(0xE4005),
+                      mem_readb_phys(0xE4006), mem_readb_phys(0xE4007));
+            }
             if (val & 0x04) {
                 dev->phase = dev->w42 ? 0 : 1;
                 dev->w42   = 0;
             }
+            /* 选择器：带 bit0（0x01）的写（如 0x09）→ bit1=1；否则 bit1=phase */
+            dev->b1 = (val & 0x01) ? 1 : dev->phase;
             if (val & 0x08)
                 dev->bit0 = 1;
             else if (val & 0x01)
                 dev->bit0 = 0;
+
+            /* 块 0x7A0 每次写 0x1C2 之后都会进 0x8C0：每次都重新武装
+               中断窗口，否则第二次调用没有中断、[0x2B] 被 0xCA0 清掉。 */
+            if ((dev->cmdlat == 0x00) && getenv("EPOCH5250_LEVELIRQ") &&
+                dev->irq_raise) {
+                dev->ready = 1;
+                if (dev->irq_clear != NULL)
+                    dev->irq_clear(dev->irq_clear_priv);
+                dev->irq_level = 0;
+                dev->poll_left = 2000;
+                dev->timer_armed = 1;
+                timer_set_delay_u64(&dev->timer, 1 * TIMER_USEC);
+            }
             break;
 
         case 0x1C6:
@@ -603,6 +652,7 @@ ibm5250_reset(ibm5250_t *dev)
     dev->latch    = 0x00;
     dev->cmdlat   = 0x00;
     dev->phase    = 1;
+    dev->b1       = 1;
     dev->ph       = 1;
     dev->rd       = 0;
     dev->serve    = 1;

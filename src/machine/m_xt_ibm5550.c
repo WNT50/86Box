@@ -3885,6 +3885,11 @@ epoch_hiram_readb(uint32_t addr, void *priv)
             + ((((uint32_t) epoch->dispbank >> 5) & 7) * 0x8000);
         return epoch->fontcard_rom[off & (EPOCH_FONTCARD_ROM_SIZE_3477 - 1)];
     }
+    if (getenv("EPOCH5250_POLLOG") && (addr >= 0xE4000) && (addr < 0xE4010)) {
+        static long e4r = 0; e4r++;
+        if (e4r <= 6) pclog("3477: E4R n=%ld addr=%05X=%02X\n", e4r, addr,
+                            epoch->hiram[(addr - 0xE1000) & 0xFFFF]);
+    }
     return epoch->hiram[(addr - 0xE1000) & 0xFFFF];
 }
 static uint16_t
@@ -3904,12 +3909,20 @@ epoch_hiram_writeb(uint32_t addr, uint8_t val, void *priv)
         if ((hn <= 12) || ((hn % 4096) == 0))
             pclog("3477: HIRAMW n=%ld addr=%05X=%02X\n", hn, addr, val);
     }
+    if (getenv("EPOCH5250_POLLOG") && (addr >= 0xE4000) && (addr < 0xE4100)) {
+        static long e4n = 0; e4n++;
+        if (e4n <= 6) pclog("3477: E4W n=%ld addr=%05X=%02X\n", e4n, addr, val);
+    }
     ((epoch_t *) priv)->hiram[(addr - 0xE1000) & 0xFFFF] = val;
 }
 static void
 epoch_hiram_writew(uint32_t addr, uint16_t val, void *priv)
 {
     epoch_t *epoch = (epoch_t *) priv;
+    if (getenv("EPOCH5250_POLLOG") && (addr >= 0xE4000) && (addr < 0xE4100)) {
+        static long e4w = 0; e4w++;
+        if (e4w <= 6) pclog("3477: E4WW n=%ld addr=%05X=%04X\n", e4w, addr, val);
+    }
     epoch->hiram[(addr - 0xE1000) & 0xFFFF]         = val & 0xff;
     epoch->hiram[(addr - 0xE1000 + 1) & 0xFFFF]     = val >> 8;
 }
