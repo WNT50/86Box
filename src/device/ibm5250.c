@@ -157,6 +157,17 @@ ibm5250_in_1c6(ibm5250_t *dev)
         int k  = dev->rd / 2;
         int fb = ibm5250_frame_bit(dev, k);
 
+        if (getenv("EPOCH5250_TRACE")) {
+            static int n;
+            if (n < 200) {
+                pclog("5250: TRACE f=%d k=%2d fb=%d rd=%2d at=%04X:%04X bx=%04X bl=%02X bh=%02X\n",
+                      dev->fno, k, fb, dev->rd,
+                      ((CS > 0xFFFF) ? (int) (CS >> 4) : (int) CS), cpu_state.pc,
+                      BX, (unsigned) (BX & 0xff), (unsigned) ((BX >> 8) & 0xff));
+                n++;
+            }
+        }
+
         ret = (uint8_t) ((base & 0x3f) | (fb ? 0x80 : 0x00));
         if (++dev->rd >= 32) {
             dev->rd = 0;
