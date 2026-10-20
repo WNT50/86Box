@@ -128,6 +128,10 @@ struct ibm5250_t {
     int      bit0;
     int      c3;          /* 0x1C3 写入值（块 0xAB0 写 0x08） */
     int      ab0;         /* 处于块 0xAB0 的 0x840 收帧上下文 */
+    int      fhunt;       /* 0x720 搜寻同步位时已数到的空闲拍 */
+    int      fsync;       /* 0x720 已锁定同步位，进入 15 位收帧 */
+    int      fbit;        /* 0x720 已收的位数 0..14（对应 B14..B0） */
+    int      flast;       /* 0x720 上一位的值（时钟读沿用） */
     int      samp;        /* pc 采样剩余次数（0xAB0 诊断） */
     int      b1;          /* 0x1C6.bit1 的选择器输出 */
     void   (*shared_clear)(void *priv);
@@ -290,6 +294,16 @@ ibm5250_base(ibm5250_t *dev)
 }
 
 static uint8_t
+ibm5250_ab0_frame_bit(int n)
+{
+    int b = 14 - n;          /* n=0 → B14 … n=14 → B0 */
+
+    if (b == 3)              /* B3 偶校验位（sync=1 使 1 的个数为奇数） */
+        return 1;
+    return 0;
+}
+
+static uint8_t
 ibm5250_frame_bit(ibm5250_t *dev, int k)
 {
     const ibm5250_frame_desc_t *f = ibm5250_frame_desc(dev->cmdlat);
@@ -423,6 +437,44 @@ ibm5250_in_1c6(ibm5250_t *dev)
         /* 实测读点（反汇编）：rd0=数据读(0x8A7)，rd1=它的时钟读，
            0x86C 的 8 次交替是 rd2..9，0x882 的三个 1 是 rd10..12，
            0x88F 的三个 0 是 rd13..15，之后 0x720 从 rd16 起收 16 位。 */
+        /* 0x720 的读：0x729 的 call 0x8A0 返回地址是 0x72C。
+           它有自己的搜寻/收帧计数，命中同步位后重锁位边界，
+           不受 0x840 前段 rd 漂移影响。 */
+        {
+            uint32_t ssp = ((uint32_t) cpu_state.seg_ss.seg << 4) + SP;
+            uint16_t r1  = (uint16_t) (mem_readb_phys(ssp) |
+                                       (mem_readb_phys(ssp + 1) << 8));
+            int is_data  = ((cpu_state.pc == 0x08A7) || (cpu_state.pc == 0x08A8));
+
+            if (r1 == 0x072C) {
+                if (!dev->fsync) {
+                    fb = (dev->fhunt >= 7) ? 1 : 0;
+                    if (is_data) {
+                        if (fb) {
+                            dev->fsync = 1;
+                            dev->fbit  = 0;
+                            if (getenv("EPOCH5250_POLLOG"))
+                                pclog("5250: 720 SYNC fhunt=%d rd=%d\n",
+                                      dev->fhunt, dev->rd);
+                        } else {
+                            dev->fhunt++;
+                        }
+                    }
+                } else if (is_data) {
+                    fb         = ibm5250_ab0_frame_bit(dev->fbit);
+                    dev->flast = fb;
+                    dev->fbit++;
+                    if (getenv("EPOCH5250_POLLOG") && (dev->fbit >= 14))
+                        pclog("5250: 720 BIT n=%d bit=%d\n", dev->fbit - 1, fb);
+                } else {
+                    fb = dev->flast;
+                }
+
+                dev->rd++;
+                return (uint8_t) ((base & 0x3f) | (fb ? 0x80 : 0x00));
+            }
+        }
+
         if (rd <= 9)                       fb = ((rd & 1) == 0);
         else if ((rd >= 10) && (rd <= 12)) fb = 1;
         else if ((rd >= 13) && (rd <= 15)) fb = 0;
@@ -758,6 +810,10 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                 dev->ab0 = 1;
                 dev->ph  = 2;
                 dev->rd  = 0;
+                dev->fhunt = 0;
+                dev->fsync = 0;
+                dev->fbit  = 0;
+                dev->flast = 0;
             }
 
             if (val & 0x04) {
