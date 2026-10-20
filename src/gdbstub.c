@@ -1741,6 +1741,9 @@ gdbstub_server_thread(void *priv)
         }
         thread_release_mutex(client_list_mutex);
 
+        /* A client is now attached: take over cpu_exec. */
+        gdbstub_cpu_init();
+
         /* Pause CPU execution. */
         gdbstub_break();
 
@@ -1757,8 +1760,10 @@ gdbstub_server_thread(void *priv)
 void
 gdbstub_cpu_init(void)
 {
-    /* Replace cpu_exec with our own function if the GDB stub is active. */
-    if ((gdbstub_socket != -1) && (cpu_exec != gdbstub_cpu_exec)) {
+    /* Replace cpu_exec with our own function only once a client is attached.
+       Installing the wrapper just because the socket is listening changes
+       instruction timing and breaks the 80186 IPL/KBC handshake. */
+    if ((gdbstub_socket != -1) && first_client && (cpu_exec != gdbstub_cpu_exec)) {
         cpu_exec_shadow = cpu_exec;
         cpu_exec        = gdbstub_cpu_exec;
     }
