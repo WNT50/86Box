@@ -477,6 +477,8 @@ ibm5250_in_1c6(ibm5250_t *dev)
                                        (mem_readb_phys(ssp + 1) << 8));
             uint16_t r2  = (uint16_t) (mem_readb_phys(ssp + 2) |
                                        (mem_readb_phys(ssp + 3) << 8));
+            uint16_t r3  = (uint16_t) (mem_readb_phys(ssp + 4) |
+                                       (mem_readb_phys(ssp + 5) << 8));
             int is_data  = ((cpu_state.pc == 0x08A7) || (cpu_state.pc == 0x08A8));
 
             if ((r1 == 0x072C) || (r1 == 0x0743)) {   /* 0x729 搜寻 / 0x740 收帧 */
@@ -496,7 +498,10 @@ ibm5250_in_1c6(ibm5250_t *dev)
                     dev->fbit  = 0;
                 }
                 if (!dev->fsync) {
-                    fb = (dev->fhunt >= 7) ? 1 : 0;
+                    /* 块 0x920 的 0x970 那次调用必须立刻给出同步位，
+                       否则 0x720 的 256 次搜寻全部超时、返回 BX=0
+                       （gdb 0x976 现场 BX=0000，AH=0x93）。 */
+                    fb = ((dev->fhunt >= 7) || (r3 == 0x0973)) ? 1 : 0;
                     if (is_data) {
                         if (fb) {
                             dev->fsync = 1;
@@ -512,9 +517,14 @@ ibm5250_in_1c6(ibm5250_t *dev)
                     /* 0x840 自己那次 call 0x720(返回 0x89D) 必须给 0；
                        块里 0xAE4 的调用才走递增序列 1,2,3… */
                     fb = ibm5250_ab0_frame_bit(dev, dev->fbit,
-                                               (r2 == 0x089D)
-                                                   ? 0
-                                                   : ((dev->fseq + 1) & 0xFF));
+                                               /* 0x976 查 BH bit0 = B8 = 数据位1，
+                                                  0x981 查 BL bit7 = B7 = 数据位0
+                                                  ⇒ 数据位 7 必须为 1（data=0x80）。 */
+                                               ((r2 == 0x089D) && (r3 == 0x0973))
+                                                   ? 0xC0
+                                                   : ((r2 == 0x089D)
+                                                          ? 0
+                                                          : ((dev->fseq + 1) & 0xFF)));
                     dev->flast = fb;
                     dev->fbit++;
                     if (getenv("EPOCH5250_POLLOG") && (dev->fbit >= 15))
@@ -904,6 +914,19 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                否则第二块会接着上一块的 rd 继续，序列整体错位。 */
             /* 只在进入该块时重置一次；块内还会多次写 0x1C2（04/09 等），
                每次都重置会把序列在第 13 拍反复打断。 */
+            /* 块 0x920 第二阶段：0x999 写 1C2=04 之后紧跟 0x9A2 call 0x840，
+               此时 rd 已经走到 51，不重开起始序列就必然 AH=01。 */
+            if ((val == 0x04) && ((cpu_state.pc == 0x099A) || (cpu_state.pc == 0x0999) ||
+                                  (cpu_state.pc == 0x099B))) {
+                dev->rd    = 0;
+                dev->clkc  = 0;
+                dev->fhunt = 0;
+                dev->fsync = 0;
+                dev->fbit  = 0;
+                dev->flast = 0;
+                dev->ph    = 2;
+            }
+
             if ((dev->cmdlat == 0x00) && !dev->ab0) {
                 dev->ab0   = 1;
                 dev->ph    = 2;
