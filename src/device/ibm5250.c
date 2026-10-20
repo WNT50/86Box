@@ -306,10 +306,12 @@ ibm5250_ab0_frame_bit(int k, int data)
        所以数据字节就是 k=0..7（LSB 先），与手册 B14..B7 一致。 */
     if ((k >= 0) && (k <= 7))
         return (uint8_t) ((data >> k) & 1);
-    if ((k >= 8) && (k <= 10))            /* B6..B4 站号 */
-        return 0;
+    /* 站号 = 7（EOM）：0xB11 的 (BH|0xF1)+1==0 要求 BH 低 4 位全 1，
+       即 W8(数据 bit7) 与 W9..W11（站号三位）都必须为 1。 */
+    if ((k >= 8) && (k <= 10))
+        return 1;
     if (k == 11) {                        /* B3 偶校验：覆盖 B15..B4 */
-        ones = 1;                         /* sync 位 */
+        ones = 4;                         /* sync 位 + 站号三位 */
         for (int t = 0; t < 8; t++)
             ones += (data >> t) & 1;
         return (uint8_t) (ones & 1);
@@ -480,8 +482,13 @@ ibm5250_in_1c6(ibm5250_t *dev)
                     dev->fsync = 1;          /* 已进入 15 位收帧循环 */
                 if (dev->fsync && (dev->fbit >= 15)) {
                     /* 上一帧收完，0x720 又回来搜寻下一帧 */
-                    if (r2 != 0x089D)      /* 0x840 内部那一帧不占序号 */
+                    if (r2 != 0x089D) {     /* 0x840 内部那一帧不占序号 */
                         dev->fseq++;
+                        /* 255 帧收完：补投一次中断，让 ISR 从 0x1C1(=0xDA)
+                           采到 [0x2A]，0xB03 的 (al|0xB7)+1==0 才能成立。 */
+                        if ((dev->fseq == 255) && (dev->irq_raise != NULL))
+                            dev->irq_raise(dev->irq_priv);
+                    }
                     dev->fsync = 0;
                     dev->fhunt = 0;
                     dev->fbit  = 0;
