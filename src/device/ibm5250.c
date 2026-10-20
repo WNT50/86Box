@@ -135,6 +135,7 @@ struct ibm5250_t {
     int      fsync;       /* 0x720 已锁定同步位，进入 15 位收帧 */
     int      fbit;        /* 0x720 已收的位数 0..14（对应 B14..B0） */
     int      flast;       /* 0x720 上一位的值（时钟读沿用） */
+    int      c1_ff;       /* 0x1C1 bit7 回读触发器：写 bit6=1 → 置 1，写 bit6=0 → 清 0 */
     int      clkc;        /* 块 0xAB0 时钟读计数（每次时钟读翻转） */
     int      fseq;        /* 0x720 已收完的帧号（第 k 帧数据字节 = k+1） */
     int      samp;        /* pc 采样剩余次数（0xAB0 诊断） */
@@ -450,11 +451,17 @@ ibm5250_in_1c6(ibm5250_t *dev)
            ([0x2A] | 0xB7) + 1 == 0 ⇒ 至少要有 bit6 与 bit3。 */
         /* ISR 两次读：0x2D6 读 0x1C1 → [0x2A]，0x2DE 读 0x1C6 → [0x2B]。
            块 0x920 的 0x95E 要求 [0x2B]&2，所以这一次也要给 bit1。 */
+        /* 块 0x5B0 的 A1：0x5E8 读 0x1C6 必须 bit1=1。 */
+        if ((cpu_state.pc == 0x05E8) || (cpu_state.pc == 0x05E9))
+            return (uint8_t) ((base & 0x3f) | 0x02);
+
         if ((cpu_state.pc == 0x02D6) || (cpu_state.pc == 0x02D7) ||
             (cpu_state.pc == 0x02DE) || (cpu_state.pc == 0x02DF) ||
             (cpu_state.pc == 0x02F2) || (cpu_state.pc == 0x02F3) ||
             (cpu_state.pc == 0x02FA) || (cpu_state.pc == 0x02FB))
-            return 0x4A;
+            /* 块 0x5B0 的 A7 要求 [0x2A]&4：最后一次写 0x1C1 是 0x80(bit6=0)
+               时，ISR 采样带上 bit2；其它情形仍是 0x4A。 */
+            return (uint8_t) (0x4A | (dev->c1_ff ? 0x00 : 0x04));
 
         if ((cpu_state.pc != 0x08A7) && (cpu_state.pc != 0x08A8) &&
             (cpu_state.pc != 0x08B1) && (cpu_state.pc != 0x08B2))
@@ -714,6 +721,17 @@ ibm5250_in(uint16_t port, void *priv)
                （0x4AD 要 6|4、0x616 要 7、0x683 要 2=0、0x8D3 要 6|1、0xA17 要 6|3） */
             {
                 uint8_t u = (uint8_t) (dev->latch | 0xDA);
+                /* 只在 A3/A4 的回读点生效：0x616 读要 bit7=1、0x62B 读要 bit7=0。
+                   全局套用会破坏 ISR(0x2D6) 采样（A2 要 [0x2A]&0x80）。 */
+                if ((cpu_state.pc == 0x061A) || (cpu_state.pc == 0x061B))
+                    u |= 0x80;
+                if ((cpu_state.pc == 0x062B) || (cpu_state.pc == 0x062C))
+                    u &= 0x7F;
+                /* 块 0x5B0 的 A7：ISR 采样 0x1C1 → [0x2A] 必须带 bit2。
+                   最后一次写 0x1C1 是 0x80(bit6=0) 时给出该位。 */
+                if (((cpu_state.pc == 0x02D6) || (cpu_state.pc == 0x02D7) ||
+                     (cpu_state.pc == 0x02F2) || (cpu_state.pc == 0x02F3)) && !dev->c1_ff)
+                    u |= 0x04;
                 if (dev->u_bit0 && (cpu_state.pc == 0x02D7)) {
                     dev->u_bit0 = 0;
                     u |= 0x01;
@@ -827,7 +845,8 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                         dev->fsync = 0;
                         dev->fbit  = 0;
                         dev->flast = 0;
-                        dev->clkc  = 0;
+                        dev->c1_ff = 1;
+    dev->clkc  = 0;
                         dev->fseq  = 0;
                         dev->ab0   = 1;
                         /* 必须同时把相位推进到 2：ph!=2 的读一律返回
@@ -877,6 +896,9 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             break;
 
         case 0x1C1:
+            /* 块 0x5B0 的 A3/A4：写 0xC0 后读回 bit7=1、写 0x80 后读回 bit7=0
+               ⇒ bit6 是 bit7 回读的“置位/清除”控制。 */
+            dev->c1_ff = ((val & 0x40) != 0);
             dev->latch = (uint8_t) (val | 0x42);
             /* 任何一次 0x1C1 写入都会让下一次 1C2=04 的 bit1 变成 0：
                0x8F6 写 0x42、0xA2B 写 0x48 都是这个效果（0x904 / 0xA48 两条判据）。 */
@@ -914,6 +936,14 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                否则第二块会接着上一块的 rd 继续，序列整体错位。 */
             /* 只在进入该块时重置一次；块内还会多次写 0x1C2（04/09 等），
                每次都重置会把序列在第 13 拍反复打断。 */
+            /* 块 0x5B0：0x5B7 写 1C2=10、0x5D4 写 1C2=00，随后 0x5E9 要求
+               0x1C6 bit1=1（否则 AH=0xA1）。 */
+            if ((val == 0x00) && ((cpu_state.pc == 0x05D4) || (cpu_state.pc == 0x05D5) ||
+                                  (cpu_state.pc == 0x05D6))) {
+                dev->ready = 1;
+                dev->ph    = 2;
+            }
+
             /* 块 0x920 第二阶段：0x999 写 1C2=04 之后紧跟 0x9A2 call 0x840，
                此时 rd 已经走到 51，不重开起始序列就必然 AH=01。 */
             if ((val == 0x04) && ((cpu_state.pc == 0x099A) || (cpu_state.pc == 0x0999) ||
