@@ -366,7 +366,7 @@ ibm5250_in_1c6(ibm5250_t *dev)
            0x64 的 19 槽握手是实测拟合值，只用于它自己；其它命令（0x00/0x08…）
            给纯空闲，否则 0x840 的同步搜索会提前命中握手里的 1 而错位。 */
         ret = (uint8_t) ((base & 0x3f)
-                         | ((dev->cmdlat == 0x00 && dev->c3 == 0x08) ? 0x00
+                         | ((dev->cmdlat == 0x00) ? 0x00
                                                   : ibm5250_handshake[dev->rd]));
         if (++dev->rd >= 19) {
             dev->ph = 2;
@@ -404,17 +404,27 @@ ibm5250_in_1c6(ibm5250_t *dev)
          rd=15..28  0       （0x720 等 sync，前 7 次尝试）
          rd=29      1       （第 8 次尝试 ⇒ [0x2D]=7）
          rd=30..59  15 位，s8=1、s7=0 ⇒ AL=(BL>>1)=1 */
-    if ((dev->cmdlat == 0x00) && (dev->c3 == 0x08)) {
+    if (dev->cmdlat == 0x00) {
         int rd = dev->rd;
         int fb;
 
-        if (rd == 0)                      fb = 0;
-        else if ((rd >= 1) && (rd <= 8))  fb = rd & 1;
-        else if ((rd >= 9) && (rd <= 11)) fb = 1;
-        else if ((rd >= 12) && (rd <= 14)) fb = 0;
-        else if (rd == 29)                fb = 1;
+        /* 只让 0x840 的两个读点（数据 0x8A7、时钟 0x8B1）推进序列；
+           块内 0x71 检查等其它读不占位，否则同步位会错一拍。 */
+        if ((cpu_state.pc != 0x08A7) && (cpu_state.pc != 0x08A8) &&
+            (cpu_state.pc != 0x08B1) && (cpu_state.pc != 0x08B2))
+            return (uint8_t) (base & 0x3f);
+
+        /* 实测读序：rd=0 是 0x8A7 的数据读（0x84E 取它的 CF），
+           rd=1 是 0x8B1 的时钟读，rd=2 起是 0x8AA。
+           同步位必须落在 rd=0；之后每拍翻转 = quiesce 的半位样本。 */
+        /* rd=0 是 0x84B 前的 0x8AA 时钟读；rd=1 是 0x8A0 的数据读
+           （0x84E 取这一次的 CF）；rd=2 是它的时钟读（0x865 判 bit6）。 */
+        if (rd <= 10)                      fb = ((rd & 1) == 0);
+        else if ((rd >= 11) && (rd <= 13)) fb = 1;
+        else if ((rd >= 14) && (rd <= 16)) fb = 0;
+        else if (rd == 29)                 fb = 1;
         else if ((rd >= 30) && (rd <= 59)) fb = (((rd - 30) / 2) == 8);
-        else                              fb = 0;
+        else                               fb = 0;
 
         if (dev->rd == 0)
             dev->ready = 1;
@@ -596,7 +606,8 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                 }
             }
             if (getenv("EPOCH5250_POLLOG"))
-                pclog("5250: OUT1C3 %02X pc=%04X\n", val, cpu_state.pc);
+                pclog("5250: OUT1C3 %02X pc=%04X cmd=%02X ph=%d rd=%d\n",
+                      val, cpu_state.pc, dev->cmdlat, dev->ph, dev->rd);
             break;
 
         case 0x1C8:
@@ -614,7 +625,9 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                 /* 命令只能由 0x1C0 设定；0x1C9/0x1CA/0x1D0/0x1D1 只是
                    触发或参数（0x6A0 末尾写 0x1CA=0x01 曾把 cmdlat 冲成 0x01）。 */
 
-                dev->ph     = 1;
+                /* 0x00（块 0xAB0）：0x840 的搜寻样本本身就是这些读，
+                   不能再叠加一层 19 槽握手，否则预算在找到 quiesce 前就耗尽。 */
+                dev->ph     = (dev->cmdlat == 0x00) ? 2 : 1;
                 dev->rd     = 0;
                 dev->serve  = 1;
                 dev->pre    = ((dev->cmdlat == 0x40) && getenv("EPOCH5250_PRE"))
