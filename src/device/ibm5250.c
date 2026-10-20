@@ -127,6 +127,7 @@ struct ibm5250_t {
     int      w42;
     int      bit0;
     int      c3;          /* 0x1C3 写入值（块 0xAB0 写 0x08） */
+    int      samp;        /* pc 采样剩余次数（0xAB0 诊断） */
     int      b1;          /* 0x1C6.bit1 的选择器输出 */
     void   (*shared_clear)(void *priv);
     void    *shared_priv;
@@ -160,6 +161,20 @@ ibm5250_irq_cb(void *priv)
     ibm5250_t *dev = (ibm5250_t *) priv;
 
     dev->timer_armed = 0;
+
+    if (dev->samp > 0) {
+        static long sn = 0;
+        dev->samp--;
+        sn++;
+        if ((cpu_state.pc >= 0x0840) && (cpu_state.pc <= 0x08A0) && (sn <= 400))
+            pclog("5250: PCTR n=%ld pc=%04X\n", sn, cpu_state.pc);
+        if (dev->samp > 0) {
+            dev->timer_armed = 1;
+            timer_set_delay_u64(&dev->timer, 1 * TIMER_USEC);
+        }
+        return;
+    }
+
     if (getenv("EPOCH5250_POLLOG"))
         pclog("5250: CB pc=%04X lvl=%d poll=%d raise=%d\n",
               cpu_state.pc, dev->irq_level, dev->poll_left, dev->irq_raise != NULL);
@@ -380,40 +395,34 @@ ibm5250_in_1c6(ibm5250_t *dev)
         return (uint8_t) (base & 0x3f);
     }
 
-    /* 块 0xAB0 的 0x840 读脚本（按反汇编定的位序列）：
-       g = 19 + rd（前 19 读是空闲握手）
-         g=23      0x840 的同步位（第 5 次搜寻的数据读）
-         g=25..32  8 拍交替（0x86C 循环要求相邻读不同）
-         g=33..35  111（站号）
-         g=36..38  000（校验位+填充）
-         g=53      0x720 的同步位（第 8 次尝试 ⇒ [0x2D]=7）
-         g=55..83  15 位，s8=1、s7=0 ⇒ AL=(BL>>1)=1 */
+    /* 块 0xAB0：按手册的起始序列（5 quiesce 位 + 3 位违规 + 帧）。
+       实测第一拍落在 pc=0x8B2（rd=0），quiesce 的 1 必须在下一拍
+       （pc=0x8A8，数据读）出现；之后每个读都是半位样本，逐拍翻转。
+         rd=1..8    1,0,1,0,…（quiesce，相邻样本交替）
+         rd=9..11   1,1,1   （违规正半位，1.5 位）
+         rd=12..14  0,0,0   （违规负半位，1.5 位）
+         rd=15..28  0       （0x720 等 sync，前 7 次尝试）
+         rd=29      1       （第 8 次尝试 ⇒ [0x2D]=7）
+         rd=30..59  15 位，s8=1、s7=0 ⇒ AL=(BL>>1)=1 */
     if ((dev->cmdlat == 0x00) && (dev->c3 == 0x08)) {
-        int g  = 19 + dev->rd;
-        int fb = 0;
+        int rd = dev->rd;
+        int fb;
 
-        if (g == 19)                       /* 握手后的第一拍就是同步位 */
-            fb = 1;
-        else if ((g >= 21) && (g <= 28))   /* 8 拍交替 */
-            fb = (g - 21) & 1;
-        else if ((g >= 29) && (g <= 31))   /* 111 站号 */
-            fb = 1;
-        else if ((g >= 32) && (g <= 34))   /* 000 */
-            fb = 0;
-        else if (g == 49)                  /* 0x720 第 8 次尝试命中 ⇒ [0x2D]=7 */
-            fb = 1;
-        else if ((g >= 51) && (g <= 79)) { /* 15 位：s8=1、s7=0 */
-            int i = (g - 51) / 2;
-            fb = (i == 8);
-        }
+        if (rd == 0)                      fb = 0;
+        else if ((rd >= 1) && (rd <= 8))  fb = rd & 1;
+        else if ((rd >= 9) && (rd <= 11)) fb = 1;
+        else if ((rd >= 12) && (rd <= 14)) fb = 0;
+        else if (rd == 29)                fb = 1;
+        else if ((rd >= 30) && (rd <= 59)) fb = (((rd - 30) / 2) == 8);
+        else                              fb = 0;
 
         if (dev->rd == 0)
             dev->ready = 1;
         if (getenv("EPOCH5250_POLLOG")) {
             static long an = 0; an++;
             if (an <= 200)
-                pclog("5250: AB0 n=%ld pc=%04X g=%d bit=%d ph=%d\n",
-                      an, cpu_state.pc, g, fb, dev->ph);
+                pclog("5250: AB0 n=%ld pc=%04X rd=%d bit=%d ph=%d\n",
+                      an, cpu_state.pc, dev->rd, fb, dev->ph);
         }
         dev->rd++;
         return (uint8_t) ((base & 0x3f) | (fb ? 0x80 : 0x00));
@@ -575,6 +584,17 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
     switch (port) {
         case 0x1C3:
             dev->c3 = val;
+            /* 块 0xAB0 的 0x840 采样预算只有约 20 拍，不能先耗在 19 拍握手上：
+               quiesce 紧跟在空闲之后，直接进帧阶段。 */
+            if ((val == 0x08) && (dev->cmdlat == 0x00)) {
+                dev->ph = 2;
+                dev->rd = 0;
+                if (getenv("EPOCH5250_POLLOG")) {
+                    dev->samp = 40000;
+                    dev->timer_armed = 1;
+                    timer_set_delay_u64(&dev->timer, 1 * TIMER_USEC);
+                }
+            }
             if (getenv("EPOCH5250_POLLOG"))
                 pclog("5250: OUT1C3 %02X pc=%04X\n", val, cpu_state.pc);
             break;
