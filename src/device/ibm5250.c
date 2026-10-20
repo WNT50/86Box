@@ -135,6 +135,8 @@ struct ibm5250_t {
     int      fsync;       /* 0x720 已锁定同步位，进入 15 位收帧 */
     int      fbit;        /* 0x720 已收的位数 0..14（对应 B14..B0） */
     int      flast;       /* 0x720 上一位的值（时钟读沿用） */
+    int      c1_cnt;      /* 0x5B0 循环里 0x1C1=0x80 的计数（每轮一次） */
+    int      a7_pend;     /* 延迟中断：等 0xCA0 清完 [0x2A] 再拉 */
     int      c1_ff;       /* 0x1C1 bit7 回读触发器：写 bit6=1 → 置 1，写 bit6=0 → 清 0 */
     int      clkc;        /* 块 0xAB0 时钟读计数（每次时钟读翻转） */
     int      fseq;        /* 0x720 已收完的帧号（第 k 帧数据字节 = k+1） */
@@ -173,6 +175,13 @@ ibm5250_irq_cb(void *priv)
     ibm5250_t *dev = (ibm5250_t *) priv;
 
     dev->timer_armed = 0;
+
+    if (dev->a7_pend) {
+        dev->a7_pend = 0;
+        if (dev->irq_raise != NULL)
+            dev->irq_raise(dev->irq_priv);
+        return;
+    }
 
     if (dev->samp > 0) {
         static long sn = 0;
@@ -729,6 +738,10 @@ ibm5250_in(uint16_t port, void *priv)
                     u &= 0x7F;
                 /* 块 0x5B0 的 A7：ISR 采样 0x1C1 → [0x2A] 必须带 bit2。
                    最后一次写 0x1C1 是 0x80(bit6=0) 时给出该位。 */
+                /* 块 0x5B0 的 A9：写 0x1C1=0x84 之后 0x687 读回 bit2 必须为 0
+                   （bit2 是不可写状态位；全局屏蔽会误伤块 0x500 的 0x13）。 */
+                if ((cpu_state.pc == 0x0687) || (cpu_state.pc == 0x0688))
+                    u &= (uint8_t) ~0x04;
                 if (((cpu_state.pc == 0x02D6) || (cpu_state.pc == 0x02D7) ||
                      (cpu_state.pc == 0x02F2) || (cpu_state.pc == 0x02F3)) && !dev->c1_ff)
                     u |= 0x04;
@@ -846,6 +859,8 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                         dev->fbit  = 0;
                         dev->flast = 0;
                         dev->c1_ff = 1;
+    dev->c1_cnt = 0;
+    dev->a7_pend = 0;
     dev->clkc  = 0;
                         dev->fseq  = 0;
                         dev->ab0   = 1;
@@ -899,6 +914,20 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             /* 块 0x5B0 的 A3/A4：写 0xC0 后读回 bit7=1、写 0x80 后读回 bit7=0
                ⇒ bit6 是 bit7 回读的“置位/清除”控制。 */
             dev->c1_ff = ((val & 0x40) != 0);
+            /* 块 0x5B0：0x602 写 C0 起一轮，循环里每轮写一次 80（共 15 轮）。
+               第 15 次写之后客人先查 A5/A6（[0x2A]==0），再 call 0xCA0 清、
+               然后 call 0xB90 延时约 1ms 才查 A7（[0x2A]&4）。
+               所以中断必须延迟到 0xCA0 之后，不能在写点立刻拉。 */
+            if (val == 0xC0)
+                dev->c1_cnt = 0;
+            else if (val == 0x80) {
+                if (++dev->c1_cnt >= 15) {
+                    dev->c1_cnt  = 0;
+                    dev->a7_pend = 1;
+                    dev->timer_armed = 1;
+                    timer_set_delay_u64(&dev->timer, 200 * TIMER_USEC);
+                }
+            }
             dev->latch = (uint8_t) (val | 0x42);
             /* 任何一次 0x1C1 写入都会让下一次 1C2=04 的 bit1 变成 0：
                0x8F6 写 0x42、0xA2B 写 0x48 都是这个效果（0x904 / 0xA48 两条判据）。 */
