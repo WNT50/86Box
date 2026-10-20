@@ -132,6 +132,7 @@ struct ibm5250_t {
     int      fsync;       /* 0x720 已锁定同步位，进入 15 位收帧 */
     int      fbit;        /* 0x720 已收的位数 0..14（对应 B14..B0） */
     int      flast;       /* 0x720 上一位的值（时钟读沿用） */
+    int      clkc;        /* 块 0xAB0 时钟读计数（每次时钟读翻转） */
     int      samp;        /* pc 采样剩余次数（0xAB0 诊断） */
     int      b1;          /* 0x1C6.bit1 的选择器输出 */
     void   (*shared_clear)(void *priv);
@@ -423,6 +424,14 @@ ibm5250_in_1c6(ibm5250_t *dev)
         int rd = dev->rd;
         int fb;
 
+        if (getenv("EPOCH5250_RLOG")) {
+            static int rn;
+            if ((rn < 120) && (cpu_state.pc >= 0x08A0) && (cpu_state.pc <= 0x08C0)) {
+                pclog("5250: R pc=%04X rd=%d\n", cpu_state.pc, dev->rd);
+                rn++;
+            }
+        }
+
         /* 只让 0x840 的两个读点（数据 0x8A7、时钟 0x8B1）推进序列；
            块内 0x71 检查等其它读不占位，否则同步位会错一拍。 */
         if ((cpu_state.pc != 0x08A7) && (cpu_state.pc != 0x08A8) &&
@@ -483,6 +492,12 @@ ibm5250_in_1c6(ibm5250_t *dev)
         else if (rd == 30)                 fb = 1;
         else if ((rd >= 32) && (rd <= 61)) fb = (((rd - 32) / 2) == 11);
         else                               fb = 0;
+
+        /* 同一拍里 0x8A7 是数据读、0x8B1 是时钟读，biphase 编码下两者互补：
+           0x84E 用数据读的 CF 判“找到同步”，随后 0x865 用时钟读的 bit7
+           判“线路仍为高则失败”，所以时钟读必须取反。 */
+        if ((cpu_state.pc == 0x08B1) || (cpu_state.pc == 0x08B2))
+            fb = (dev->clkc++ & 1);
 
         if (dev->rd == 0)
             dev->ready = 1;
@@ -806,14 +821,17 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             }
             /* 每块开头都重开起始序列：0xAB0 写 08、0xBA0 写 0A，
                否则第二块会接着上一块的 rd 继续，序列整体错位。 */
-            if (dev->cmdlat == 0x00) {
-                dev->ab0 = 1;
-                dev->ph  = 2;
-                dev->rd  = 0;
+            /* 只在进入该块时重置一次；块内还会多次写 0x1C2（04/09 等），
+               每次都重置会把序列在第 13 拍反复打断。 */
+            if ((dev->cmdlat == 0x00) && !dev->ab0) {
+                dev->ab0   = 1;
+                dev->ph    = 2;
+                dev->rd    = 0;
                 dev->fhunt = 0;
                 dev->fsync = 0;
                 dev->fbit  = 0;
                 dev->flast = 0;
+                dev->clkc  = 0;
             }
 
             if (val & 0x04) {
