@@ -133,6 +133,7 @@ struct ibm5250_t {
     int      fbit;        /* 0x720 已收的位数 0..14（对应 B14..B0） */
     int      flast;       /* 0x720 上一位的值（时钟读沿用） */
     int      clkc;        /* 块 0xAB0 时钟读计数（每次时钟读翻转） */
+    int      fseq;        /* 0x720 已收完的帧号（第 k 帧数据字节 = k+1） */
     int      samp;        /* pc 采样剩余次数（0xAB0 诊断） */
     int      b1;          /* 0x1C6.bit1 的选择器输出 */
     void   (*shared_clear)(void *priv);
@@ -295,13 +296,24 @@ ibm5250_base(ibm5250_t *dev)
 }
 
 static uint8_t
-ibm5250_ab0_frame_bit(int n)
+ibm5250_ab0_frame_bit(int n, int data)
 {
     int b = 14 - n;          /* n=0 → B14 … n=14 → B0 */
+    int ones;
 
-    if (b == 3)              /* B3 偶校验位（sync=1 使 1 的个数为奇数） */
-        return 1;
-    return 0;
+    /* 实测换算：0x740 的 rcr 链使 AL 取“最后收的 8 位”：
+       AL.bit0 = 第 14 拍、AL.bit7 = 第 7 拍，即 n=7..14，LSB 在后。 */
+    if ((b >= 0) && (b <= 7))              /* n=7..14 → 数据位 0..7 */
+        return (uint8_t) ((data >> b) & 1);
+    if ((b >= 11) && (b <= 13))            /* 站号（本命令不校验） */
+        return 0;
+    if (b == 10) {                         /* 偶校验位 */
+        ones = 1;
+        for (int t = 0; t < 8; t++)
+            ones += (data >> t) & 1;
+        return (uint8_t) (ones & 1);
+    }
+    return 0;                              /* 其余填充 */
 }
 
 static uint8_t
@@ -453,9 +465,21 @@ ibm5250_in_1c6(ibm5250_t *dev)
             uint32_t ssp = ((uint32_t) cpu_state.seg_ss.seg << 4) + SP;
             uint16_t r1  = (uint16_t) (mem_readb_phys(ssp) |
                                        (mem_readb_phys(ssp + 1) << 8));
+            uint16_t r2  = (uint16_t) (mem_readb_phys(ssp + 2) |
+                                       (mem_readb_phys(ssp + 3) << 8));
             int is_data  = ((cpu_state.pc == 0x08A7) || (cpu_state.pc == 0x08A8));
 
-            if (r1 == 0x072C) {
+            if ((r1 == 0x072C) || (r1 == 0x0743)) {   /* 0x729 搜寻 / 0x740 收帧 */
+                if (r1 == 0x0743)
+                    dev->fsync = 1;          /* 已进入 15 位收帧循环 */
+                if (dev->fsync && (dev->fbit >= 15)) {
+                    /* 上一帧收完，0x720 又回来搜寻下一帧 */
+                    if (r2 != 0x089D)      /* 0x840 内部那一帧不占序号 */
+                        dev->fseq++;
+                    dev->fsync = 0;
+                    dev->fhunt = 0;
+                    dev->fbit  = 0;
+                }
                 if (!dev->fsync) {
                     fb = (dev->fhunt >= 7) ? 1 : 0;
                     if (is_data) {
@@ -470,11 +494,18 @@ ibm5250_in_1c6(ibm5250_t *dev)
                         }
                     }
                 } else if (is_data) {
-                    fb         = ibm5250_ab0_frame_bit(dev->fbit);
+                    /* 0x840 自己那次 call 0x720(返回 0x89D) 必须给 0；
+                       块里 0xAE4 的调用才走递增序列 1,2,3… */
+                    fb = ibm5250_ab0_frame_bit(dev->fbit,
+                                               (r2 == 0x089D)
+                                                   ? 0
+                                                   : ((dev->fseq + 1) & 0xFF));
                     dev->flast = fb;
                     dev->fbit++;
-                    if (getenv("EPOCH5250_POLLOG") && (dev->fbit >= 14))
-                        pclog("5250: 720 BIT n=%d bit=%d\n", dev->fbit - 1, fb);
+                    if (getenv("EPOCH5250_POLLOG") && (dev->fbit >= 15))
+                        pclog("5250: 720 FRAME seq=%d data=%02X r2=%04X\n",
+                              dev->fseq, (r2 == 0x089D) ? 0
+                                                        : ((dev->fseq + 1) & 0xFF), r2);
                 } else {
                     fb = dev->flast;
                 }
@@ -496,8 +527,24 @@ ibm5250_in_1c6(ibm5250_t *dev)
         /* 同一拍里 0x8A7 是数据读、0x8B1 是时钟读，biphase 编码下两者互补：
            0x84E 用数据读的 CF 判“找到同步”，随后 0x865 用时钟读的 bit7
            判“线路仍为高则失败”，所以时钟读必须取反。 */
-        if ((cpu_state.pc == 0x08B1) || (cpu_state.pc == 0x08B2))
-            fb = (dev->clkc++ & 1);
+        if ((cpu_state.pc == 0x08B1) || (cpu_state.pc == 0x08B2)) {
+            /* 时钟读按位格推进：
+               c0..c2   0（0x865 要求线路静默）
+               c3..c10  1,0,1,0…（0x86C 的 8 拍交替）
+               c11..c13 1,1,1（0x882 违规正半位）
+               c14..c16 0,0,0（0x88F 违规负半位）
+               之后交给 0x720 的搜寻/收帧逻辑。 */
+            int c = dev->clkc++;
+
+            if ((c >= 3) && (c <= 10))
+                fb = ((c - 3) & 1) ? 0 : 1;
+            else if ((c >= 11) && (c <= 13))
+                fb = 1;
+            else
+                fb = 0;
+        } else {
+            fb = 1;              /* 数据读：一直为高，0x84E 首个循环即判到同步 */
+        }
 
         if (dev->rd == 0)
             dev->ready = 1;
@@ -832,6 +879,7 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                 dev->fbit  = 0;
                 dev->flast = 0;
                 dev->clkc  = 0;
+                dev->fseq  = 0;
             }
 
             if (val & 0x04) {
