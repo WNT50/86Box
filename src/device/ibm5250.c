@@ -127,6 +127,7 @@ struct ibm5250_t {
     int      w42;
     int      bit0;
     int      c3;          /* 0x1C3 写入值（块 0xAB0 写 0x08） */
+    int      ab0;         /* 处于块 0xAB0 的 0x840 收帧上下文 */
     int      samp;        /* pc 采样剩余次数（0xAB0 诊断） */
     int      b1;          /* 0x1C6.bit1 的选择器输出 */
     void   (*shared_clear)(void *priv);
@@ -366,7 +367,7 @@ ibm5250_in_1c6(ibm5250_t *dev)
            0x64 的 19 槽握手是实测拟合值，只用于它自己；其它命令（0x00/0x08…）
            给纯空闲，否则 0x840 的同步搜索会提前命中握手里的 1 而错位。 */
         ret = (uint8_t) ((base & 0x3f)
-                         | ((dev->cmdlat == 0x00) ? 0x00
+                         | (dev->ab0 ? 0x00
                                                   : ibm5250_handshake[dev->rd]));
         if (++dev->rd >= 19) {
             dev->ph = 2;
@@ -404,7 +405,7 @@ ibm5250_in_1c6(ibm5250_t *dev)
          rd=15..28  0       （0x720 等 sync，前 7 次尝试）
          rd=29      1       （第 8 次尝试 ⇒ [0x2D]=7）
          rd=30..59  15 位，s8=1、s7=0 ⇒ AL=(BL>>1)=1 */
-    if (dev->cmdlat == 0x00) {
+    if (dev->ab0) {
         int rd = dev->rd;
         int fb;
 
@@ -419,9 +420,11 @@ ibm5250_in_1c6(ibm5250_t *dev)
            同步位必须落在 rd=0；之后每拍翻转 = quiesce 的半位样本。 */
         /* rd=0 是 0x84B 前的 0x8AA 时钟读；rd=1 是 0x8A0 的数据读
            （0x84E 取这一次的 CF）；rd=2 是它的时钟读（0x865 判 bit6）。 */
-        if (rd <= 10)                      fb = ((rd & 1) == 0);
-        else if ((rd >= 11) && (rd <= 13)) fb = 1;
-        else if ((rd >= 14) && (rd <= 16)) fb = 0;
+        /* 预算实测 11 拍 = 8 拍 quiesce 交替 + 3 拍高：
+           rd=0 既是同步拍也是交替段首拍。 */
+        if (rd <= 7)                       fb = ((rd & 1) == 0);
+        else if ((rd >= 8) && (rd <= 10))  fb = 1;
+        else if ((rd >= 11) && (rd <= 13)) fb = 0;
         else if (rd == 29)                 fb = 1;
         else if ((rd >= 30) && (rd <= 59)) fb = (((rd - 30) / 2) == 8);
         else                               fb = 0;
@@ -627,7 +630,8 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
 
                 /* 0x00（块 0xAB0）：0x840 的搜寻样本本身就是这些读，
                    不能再叠加一层 19 槽握手，否则预算在找到 quiesce 前就耗尽。 */
-                dev->ph     = (dev->cmdlat == 0x00) ? 2 : 1;
+                dev->ab0    = ((dev->cmdlat == 0x00) && dev->ab0) ? 1 : 0;
+                dev->ph     = dev->ab0 ? 2 : 1;
                 dev->rd     = 0;
                 dev->serve  = 1;
                 dev->pre    = ((dev->cmdlat == 0x40) && getenv("EPOCH5250_PRE"))
@@ -737,6 +741,9 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                       mem_readb_phys(0xE4004), mem_readb_phys(0xE4005),
                       mem_readb_phys(0xE4006), mem_readb_phys(0xE4007));
             }
+            if ((val == 0x08) && (dev->cmdlat == 0x00))
+                dev->ab0 = 1;
+
             if (val & 0x04) {
                 dev->phase = dev->w42 ? 0 : 1;
                 dev->w42   = 0;
