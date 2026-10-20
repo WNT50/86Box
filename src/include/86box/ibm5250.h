@@ -29,5 +29,6 @@ void       ibm5250_set_shared_clear(ibm5250_t *dev,
 void       ibm5250_irq_ack(ibm5250_t *dev);
 void       ibm5250_close(ibm5250_t *dev);
 void       ibm5250_reset(ibm5250_t *dev);
+int        ibm5250_in_ab0(ibm5250_t *dev);
 
 #endif /* IBM5250_H */

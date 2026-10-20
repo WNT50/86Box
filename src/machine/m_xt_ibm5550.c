@@ -179,11 +179,15 @@ static int pb_flag[PB_N];
    EPOCH3477_ADAPTER_IRQ 选择（5550 IRQ 表里 IRQ5 空位最可能是它）。 */
 static int        epoch_adr_irq = -1;
 static pc_timer_t epoch_adr_timer;
+static ibm5250_t *epoch_adr_dev_handle;
 static void
 epoch_adr_irq_cb(void *priv)
 {
     (void) priv;
     if (epoch_adr_irq >= 0) {
+        if (getenv("EPOCH5250_AB0NOIRQ") && epoch_adr_dev_handle &&
+            ibm5250_in_ab0(epoch_adr_dev_handle))
+            return;
         pclog("3477: ADAPTER IRQ fired (irq=%d)\n", epoch_adr_irq);
         { static int ivt_done;
           if (!ivt_done && getenv("EPOCH3477_IVTDBG")) {

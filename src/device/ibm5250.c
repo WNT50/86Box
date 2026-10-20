@@ -900,6 +900,14 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
     }
 }
 
+/* 块 0xAB0 正在跑 0x840 的起始序列/收帧：此时不允许任何 IRQ 打断
+   （ISR 会覆盖 0x882 循环的 AL/CF，导致直接走 0x854 失败）。 */
+int
+ibm5250_in_ab0(ibm5250_t *dev)
+{
+    return (dev != NULL) && dev->ab0 && (dev->cmdlat == 0x00);
+}
+
 void
 ibm5250_reset(ibm5250_t *dev)
 {
