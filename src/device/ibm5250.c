@@ -137,7 +137,8 @@ struct ibm5250_t {
     int      clkc;        /* 块 0xAB0 时钟读计数（每次时钟读翻转） */
     int      fseq;        /* 0x720 已收完的帧号（第 k 帧数据字节 = k+1） */
     int      samp;        /* pc 采样剩余次数（0xAB0 诊断） */
-    int      b1;          /* 0x1C6.bit1 的选择器输出 */
+    int      b1;
+    int      b1_pulse;      /* 0x1C2=0x0A 后只喂 0xBB6 一次 bit1 */          /* 0x1C6.bit1 的选择器输出 */
     void   (*shared_clear)(void *priv);
     void    *shared_priv;
     int      poll_left;   /* 0x8C0 窗口轮询计数 */
@@ -280,6 +281,11 @@ ibm5250_base(ibm5250_t *dev)
        phase 不是 0x1C6 的内容，绝不映射到 bit1 —— 之前正是它让每个块
        的 `1C6 & 2` 判据直接失败（AH=0x03 / 0xA1 …）。 */
     uint8_t v = (uint8_t) (dev->latch & 0x7d);
+
+    if (dev->b1_pulse && (cpu_state.pc == 0x0BB6)) {
+        dev->b1_pulse = 0;
+        v |= 0x02;
+    }
 
     /* 0x8C0 的判据链证明 bit1 = phase（0x1C2 写入 0x04 时更新）：
        0x8E8 要求 bit1=1、0x904 在写 0x1C1=0x42 之后要求 bit1=0。 */
@@ -876,7 +882,18 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             }
 
             /* 块 0xBA0 在 0xBA5 写 0x1C2=0x0A，随后 0xBB6 读 0x1C6
-               要求 bit1=1。只认这个写点的 0x0A，别的块写 0x0A 不受影响。 */
+               要求 bit1=1；而且它自己要走一遍 0x840（0xBBF 的 call），
+               上一块已把 rd 用到 33，必须在这里重开序列。 */
+            if (((val & 0x0F) == 0x0A) && (dev->cmdlat == 0x00)) {
+                dev->rd      = 0;
+                dev->fhunt   = 0;
+                dev->fsync   = 0;
+                dev->fbit    = 0;
+                dev->flast   = 0;
+                dev->clkc    = 0;
+                dev->fseq    = 0;
+                dev->b1_pulse = 1;
+            }
             if (val & 0x04) {
                 dev->phase = dev->w42 ? 0 : 1;
                 dev->w42   = 0;
