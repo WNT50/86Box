@@ -448,7 +448,12 @@ ibm5250_in_1c6(ibm5250_t *dev)
            块内 0x71 检查等其它读不占位，否则同步位会错一拍。 */
         /* ISR(0x2D6) 读 0x1C6 并写入 [0x2A]；块 0xAB0 的 0xB03 要求
            ([0x2A] | 0xB7) + 1 == 0 ⇒ 至少要有 bit6 与 bit3。 */
-        if ((cpu_state.pc == 0x02D6) || (cpu_state.pc == 0x02D7))
+        /* ISR 两次读：0x2D6 读 0x1C1 → [0x2A]，0x2DE 读 0x1C6 → [0x2B]。
+           块 0x920 的 0x95E 要求 [0x2B]&2，所以这一次也要给 bit1。 */
+        if ((cpu_state.pc == 0x02D6) || (cpu_state.pc == 0x02D7) ||
+            (cpu_state.pc == 0x02DE) || (cpu_state.pc == 0x02DF) ||
+            (cpu_state.pc == 0x02F2) || (cpu_state.pc == 0x02F3) ||
+            (cpu_state.pc == 0x02FA) || (cpu_state.pc == 0x02FB))
             return 0x4A;
 
         if ((cpu_state.pc != 0x08A7) && (cpu_state.pc != 0x08A8) &&
