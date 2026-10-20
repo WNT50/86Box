@@ -112,6 +112,7 @@ struct ibm5250_t {
     uint8_t  data8;      /* 0x1C8 数据寄存器 */
     int      seq64;      /* 0x64 命令的帧序号 */
     int      fno;        /* frame counter (log only) */
+    int      u_bit0;     /* 收帧完成事件位（0x1C1 bit0，ISR 采样后清） */
     int      dummy;      /* optional leading idle read */
 
     uint32_t hist;       /* pulse history for the 0x2AA frame preamble */
@@ -304,9 +305,11 @@ ibm5250_base(ibm5250_t *dev)
 }
 
 static uint8_t
-ibm5250_ab0_frame_bit(int k, int data)
+ibm5250_ab0_frame_bit(ibm5250_t *dev, int k, int data)
 {
     /* 站号固定 7（EOM）：0xB11 的 (BH|0xF1)+1==0 要求 W8..W11 全 1。 */
+    if (k == 14)
+        dev->u_bit0 = 1;        /* 一帧收完 → 状态寄存器 bit0 事件 */
     return ibm5250_proto_frame_bit(k, data, 7);
 }
 
@@ -323,6 +326,9 @@ ibm5250_frame_bit(ibm5250_t *dev, int k)
 
     if (dev->cmdlat == 0x40 && getenv("EPOCH5250_D40"))   /* 实验覆盖 */
         d = (int) strtoul(getenv("EPOCH5250_D40"), NULL, 16);
+
+    if (k == 15)
+        dev->u_bit0 = 1;
 
     if (k == 0)                 return 1;                 /* B15 sync */
     if (k <= 8)                 return (uint8_t) ((d >> (k - 1)) & 1);  /* B14..B7 */
@@ -500,7 +506,7 @@ ibm5250_in_1c6(ibm5250_t *dev)
                 } else if (is_data) {
                     /* 0x840 自己那次 call 0x720(返回 0x89D) 必须给 0；
                        块里 0xAE4 的调用才走递增序列 1,2,3… */
-                    fb = ibm5250_ab0_frame_bit(dev->fbit,
+                    fb = ibm5250_ab0_frame_bit(dev, dev->fbit,
                                                (r2 == 0x089D)
                                                    ? 0
                                                    : ((dev->fseq + 1) & 0xFF));
@@ -691,7 +697,14 @@ ibm5250_in(uint16_t port, void *priv)
                       (cpu_state.pc == 0x2D7));
             /* 全部 0x1C1 判据的并集：bit7|6|4|3|1 = 1、bit2 = 0 ⇒ 0xDA
                （0x4AD 要 6|4、0x616 要 7、0x683 要 2=0、0x8D3 要 6|1、0xA17 要 6|3） */
-            return (uint8_t) (dev->latch | 0xDA);
+            {
+                uint8_t u = (uint8_t) (dev->latch | 0xDA);
+                if (dev->u_bit0 && (cpu_state.pc == 0x02D7)) {
+                    dev->u_bit0 = 0;
+                    u |= 0x01;
+                }
+                return u;
+            }
 
         case 0x1C2:
         case 0x1C3:
@@ -791,6 +804,18 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                     dev->cmdlat = val;
                     dev->ph     = 1;
                     dev->rd     = 0;
+                    /* 块 0x920 的命令写在 pc=0x0927；它要自己走一遍
+                       0x840，必须从干净序列开始（实测宽条件会误伤
+                       0x7A0 的 0x7C6）。 */
+                    if ((val == 0x00) && (cpu_state.pc == 0x0927)) {
+                        dev->fhunt = 0;
+                        dev->fsync = 0;
+                        dev->fbit  = 0;
+                        dev->flast = 0;
+                        dev->clkc  = 0;
+                        dev->fseq  = 0;
+                        dev->ab0   = 1;
+                    }
                     dev->serve  = 1;
                     dev->irq_burst = 0;
                     dev->pre    = ((val == 0x40) && getenv("EPOCH5250_PRE"))
@@ -1004,6 +1029,7 @@ ibm5250_reset(ibm5250_t *dev)
     dev->serve    = 1;
     dev->done40   = 0;
     dev->fno      = 0;
+    dev->u_bit0   = 0;
     dev->dummy    = 0;
     dev->hist     = 0;
     dev->inframe  = 0;
