@@ -668,7 +668,10 @@ ibm5250_in_1c6(ibm5250_t *dev)
                 pclog("5250: FRAMEDONE caller=%04X rd=%d seq=%d\n", caller, dev->rd, dev->seq64);
         }
 
-        if (dev->rd >= 32) {
+        /* 0x720 收帧期间不能按 rd>=32 清帧：块 0x500 的 8 次调用累计读早已
+           越过 32，中途清零会把 fbit 打回 0，15 位移位走不满，BL bit0 永远
+           是 0（实测 scanM4：k 只到 6~7 就重开）。 */
+        if ((dev->rd >= 32) && !(dev->fsync && (dev->fbit < 15))) {
             dev->rd = 0;
             if (dev->cmdlat == 0x40)
                 dev->done40 = 1;
