@@ -3235,29 +3235,12 @@ epoch_ibm3477_init(epoch_t *epoch)
                   epoch_mirror_outb, epoch_mirror_outw, NULL, epoch);
     io_sethandler(0x0390, 0x0001, epoch_misc_in, NULL, NULL,
                   epoch_misc_out, NULL, NULL, epoch);
+    /* Write-only memory-window selector (kept from the original 3477-S port). */
+    io_sethandler(0x1B2, 0x0001, epoch_misc_in, NULL, NULL,
+                  epoch_misc_out, NULL, NULL, epoch);
     io_sethandler(0x0400, 0x0001, epoch_misc_in, NULL, NULL,
                   epoch_misc_out, NULL, NULL, epoch);
 
-    /* 5250 adapter: one standby workstation on the twinax loop. */
-    {
-        const char *e_irq = getenv("EPOCH3477_ADAPTER_IRQ");
-        epoch_adr_irq = e_irq ? atoi(e_irq) : 5;
-
-        epoch->adapter = ibm5250_init(epoch_adr_irq, epoch_adr_dev_irq, epoch,
-                                      epoch_adr_dev_irq_clear, epoch);
-        epoch_adr_dev_handle = epoch->adapter;
-        ibm5250_set_shared_clear(epoch->adapter, epoch_adr_shared_clear, epoch);
-
-        io_sethandler(0x0722, 0x0002, NULL, NULL, NULL,
-                      epoch_adr_ack_out, NULL, NULL, epoch);
-        /* 0x1B0 (terminal type) and 0x1B6 (ICU release) are machine
-           resources, not adapter registers. */
-        io_sethandler(0x1B0, 0x0001, epoch_misc_in, NULL, NULL,
-                      epoch_misc_out, NULL, NULL, epoch);
-        io_sethandler(0x1B6, 0x0001, epoch_misc_in, NULL, NULL,
-                      epoch_misc_out, NULL, NULL, epoch);
-        pclog("3477: 5250 adapter on IRQ %d\n", epoch_adr_irq);
-    }
 }
 
 /* Display timing, memory and the ports every one of the three machines has. */
@@ -3320,6 +3303,26 @@ epoch_init(UNUSED(const device_t *info))
         epoch_ibm5550_init(epoch);
 
     epoch_common_init(epoch);
+
+    /* 3477-S: the 5250 adapter is created after the common machine init,
+       like the rest of the 3477-S port block. */
+    if (epoch_is_3477) {
+        const char *e_irq = getenv("EPOCH3477_ADAPTER_IRQ");
+        epoch_adr_irq = e_irq ? atoi(e_irq) : 5;
+
+        epoch->adapter = ibm5250_init(epoch_adr_irq, epoch_adr_dev_irq, epoch,
+                                      epoch_adr_dev_irq_clear, epoch);
+        epoch_adr_dev_handle = epoch->adapter;
+        ibm5250_set_shared_clear(epoch->adapter, epoch_adr_shared_clear, epoch);
+
+        io_sethandler(0x0722, 0x0002, NULL, NULL, NULL,
+                      epoch_adr_ack_out, NULL, NULL, epoch);
+        io_sethandler(0x1B0, 0x0001, epoch_misc_in, NULL, NULL,
+                      epoch_misc_out, NULL, NULL, epoch);
+        io_sethandler(0x1B6, 0x0001, epoch_misc_in, NULL, NULL,
+                      epoch_misc_out, NULL, NULL, epoch);
+        pclog("3477: 5250 adapter on IRQ %d\n", epoch_adr_irq);
+    }
 
     return epoch;
 }
