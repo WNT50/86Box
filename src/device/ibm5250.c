@@ -437,8 +437,16 @@ ibm5250_in_1c6(ibm5250_t *dev)
         if (getenv("EPOCH5250_POLLOG")) {
             static long an = 0; an++;
             if (an <= 200)
-                pclog("5250: AB0 n=%ld pc=%04X rd=%d bit=%d ph=%d\n",
-                      an, cpu_state.pc, dev->rd, fb, dev->ph);
+                {
+                    uint32_t ssp = ((uint32_t) cpu_state.seg_ss.seg << 4) + SP;
+                    uint16_t r1  = (uint16_t) (mem_readb_phys(ssp) |
+                                               (mem_readb_phys(ssp + 1) << 8));
+                    uint16_t r2  = (uint16_t) (mem_readb_phys(ssp + 2) |
+                                               (mem_readb_phys(ssp + 3) << 8));
+                    pclog("5250: AB0 n=%ld pc=%04X rd=%d bit=%d ph=%d "
+                          "r1=%04X r2=%04X\n",
+                          an, cpu_state.pc, dev->rd, fb, dev->ph, r1, r2);
+                }
         }
         dev->rd++;
         return (uint8_t) ((base & 0x3f) | (fb ? 0x80 : 0x00));
