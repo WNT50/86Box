@@ -815,6 +815,11 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                         dev->clkc  = 0;
                         dev->fseq  = 0;
                         dev->ab0   = 1;
+                        /* 必须同时把相位推进到 2：ph!=2 的读一律返回
+                           base&0x3f（bit7=0）且不推进 clkc，0x840 的 8 次
+                           同步搜寻会全部落空（实测 RD 日志 rd 0..18、
+                           clkc 恒 0、随后 OUT1B0 00/01）。 */
+                        dev->ph    = 2;
                     }
                     dev->serve  = 1;
                     dev->irq_burst = 0;
