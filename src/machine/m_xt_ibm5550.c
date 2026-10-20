@@ -2125,6 +2125,14 @@ epoch_misc_out(uint16_t port, uint8_t val, void *priv)
     if (port != 0x44)
         epoch_log("%04X:%04X I/O Out %02X: %02X\n", cs >> 4, cpu_state.pc, port, val);
 
+    /* EMDIAG 的判据上报：每次写 0x1B0 都带 AX（AH=判据码）与 [0x2F]/[0x28]。 */
+    if ((port == 0x1B0) && getenv("EPOCH5250_PCLOG")) {
+        uint32_t dsa = ((uint32_t) cpu_state.seg_ds.seg << 4);
+        pclog("3477: OUT1B0 %02X ax=%04X pc=%04X:%04X [2F]=%02X [28]=%02X\n", val, AX,
+              cs >> 4, cpu_state.pc,
+              mem_readb_phys(dsa + 0x2F), mem_readb_phys(dsa + 0x28));
+    }
+
     switch (port) {
         case 0x44:
             for (uint8_t i = 0; i < 3; i++) {
