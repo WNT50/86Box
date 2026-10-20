@@ -426,8 +426,10 @@ ibm5250_in_1c6(ibm5250_t *dev)
         if (rd <= 9)                       fb = ((rd & 1) == 0);
         else if ((rd >= 10) && (rd <= 12)) fb = 1;
         else if ((rd >= 13) && (rd <= 15)) fb = 0;
-        else if (rd == 29)                 fb = 1;
-        else if ((rd >= 30) && (rd <= 59)) fb = (((rd - 30) / 2) == 8);
+        /* 0x720：7 个空闲拍（每次 0x8A0 两拍）→ B15=1 → B14..B0。
+           B3 是偶校验位：sync=1、数据/站号全 0 时它必须为 1。 */
+        else if (rd == 30)                 fb = 1;
+        else if ((rd >= 32) && (rd <= 61)) fb = (((rd - 32) / 2) == 11);
         else                               fb = 0;
 
         if (dev->rd == 0)
@@ -742,8 +744,13 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                       mem_readb_phys(0xE4004), mem_readb_phys(0xE4005),
                       mem_readb_phys(0xE4006), mem_readb_phys(0xE4007));
             }
-            if ((val == 0x08) && (dev->cmdlat == 0x00))
+            /* 每块开头都重开起始序列：0xAB0 写 08、0xBA0 写 0A，
+               否则第二块会接着上一块的 rd 继续，序列整体错位。 */
+            if (dev->cmdlat == 0x00) {
                 dev->ab0 = 1;
+                dev->ph  = 2;
+                dev->rd  = 0;
+            }
 
             if (val & 0x04) {
                 dev->phase = dev->w42 ? 0 : 1;
