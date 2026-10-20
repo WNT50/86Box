@@ -47,3 +47,13 @@ if(BUILD_TESTING)
     include(GoogleTest)
     gtest_discover_tests(kbc_vectra_tests)
 endif()
+
+# Plain C, no gtest: builds and runs in milliseconds.
+if(BUILD_TESTING)
+    add_executable(ibm5250_proto_tests ibm5250_proto_test.c)
+
+    target_include_directories(ibm5250_proto_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/src
+    )
+    add_test(NAME ibm5250_proto COMMAND ibm5250_proto_tests)
+endif()

@@ -37,6 +37,8 @@
 #include <86box/io.h>
 #include <86box/mem.h>
 #include <86box/timer.h>
+
+#include "ibm5250_proto.h"
 #include "cpu.h"
 #include <86box/ibm5250.h>
 
@@ -298,25 +300,8 @@ ibm5250_base(ibm5250_t *dev)
 static uint8_t
 ibm5250_ab0_frame_bit(int k, int data)
 {
-    int ones;
-
-    /* k = 同步位之后的第 k 位（B14 是 k=0）。
-       0x740 的 rcr 链把新位移入 bit15、整体右移，收完 15 位后
-       第 k 位落在 W 的 bit(k+1)，而 AL 取 W 的 bit1..8 ⇒ AL = 最先 8 位。
-       所以数据字节就是 k=0..7（LSB 先），与手册 B14..B7 一致。 */
-    if ((k >= 0) && (k <= 7))
-        return (uint8_t) ((data >> k) & 1);
-    /* 站号 = 7（EOM）：0xB11 的 (BH|0xF1)+1==0 要求 BH 低 4 位全 1，
-       即 W8(数据 bit7) 与 W9..W11（站号三位）都必须为 1。 */
-    if ((k >= 8) && (k <= 10))
-        return 1;
-    if (k == 11) {                        /* B3 偶校验：覆盖 B15..B4 */
-        ones = 4;                         /* sync 位 + 站号三位 */
-        for (int t = 0; t < 8; t++)
-            ones += (data >> t) & 1;
-        return (uint8_t) (ones & 1);
-    }
-    return 0;                             /* B2..B0 填充 */
+    /* 站号固定 7（EOM）：0xB11 的 (BH|0xF1)+1==0 要求 W8..W11 全 1。 */
+    return ibm5250_proto_frame_bit(k, data, 7);
 }
 
 static uint8_t
@@ -549,12 +534,7 @@ ibm5250_in_1c6(ibm5250_t *dev)
                之后交给 0x720 的搜寻/收帧逻辑。 */
             int c = dev->clkc++;
 
-            if ((c >= 3) && (c <= 10))
-                fb = ((c - 3) & 1) ? 0 : 1;
-            else if ((c >= 11) && (c <= 13))
-                fb = 1;
-            else
-                fb = 0;
+            fb = ibm5250_proto_clk_bit(c);
         } else {
             fb = 1;              /* 数据读：一直为高，0x84E 首个循环即判到同步 */
         }
@@ -895,6 +875,8 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                 dev->fseq  = 0;
             }
 
+            /* 块 0xBA0 在 0xBA5 写 0x1C2=0x0A，随后 0xBB6 读 0x1C6
+               要求 bit1=1。只认这个写点的 0x0A，别的块写 0x0A 不受影响。 */
             if (val & 0x04) {
                 dev->phase = dev->w42 ? 0 : 1;
                 dev->w42   = 0;
@@ -922,6 +904,12 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                     dev->b1 = dev->phase;
                 }
             }
+
+            /* 必须放在选择器之后：0x0A 不在表里，上面的 else 会用 phase
+               覆盖。块 0xBA0 在 0xBA5（取指后报 0xBA8）写 0x0A，随后
+               0xBB6 读 0x1C6 要求 bit1=1。 */
+            if ((val == 0x0A) && (cpu_state.pc >= 0x0BA0) && (cpu_state.pc <= 0x0BB0))
+                dev->b1 = 1;
 
             /* 块 0x7A0 每次写 0x1C2 之后都会进 0x8C0：每次都重新武装
                中断窗口，否则第二次调用没有中断、[0x2B] 被 0xCA0 清掉。 */
