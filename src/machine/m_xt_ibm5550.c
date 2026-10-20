@@ -62,6 +62,7 @@
 #define EMU_DEVICE_H
 #include <86box/pit.h>
 #include <86box/mouse.h>
+#include <86box/ibm5250.h>
 
 #define EPOCH_VRAM_SBCS        0x38000
 #define EPOCH_VRAM_SBEX        0x30000
@@ -408,6 +409,9 @@ typedef struct epoch_t {
        error, so its NMI test at F800:01F7 sees exactly one interrupt per loop. */
     int parityarm;
 
+    /* [ADRDEV] standalone 5250 adapter instance. */
+    ibm5250_t *adapter;
+
 } epoch_t;
 
 /* Set by machine_xt_ibm5535_init() before the system unit is added: the IBM
@@ -459,6 +463,51 @@ epoch_rom_select(uint8_t val)
 }
 
 static void     epoch_reset(void *priv);
+/* --- 5250 adapter (standalone device, src/device/ibm5250.c) ---------------
+   The adapter is a separate device: ports, state machine and IRQ line all
+   live there.  The machine only owns the IRQ number and the 0x722 ack port. */
+static int        epoch_adr_irq = -1;
+static ibm5250_t *epoch_adr_dev_handle;
+
+static void
+epoch_adr_dev_irq(void *priv)
+{
+    (void) priv;
+    if (epoch_adr_irq >= 0)
+        picint((uint16_t) (1 << epoch_adr_irq));
+}
+
+/* Level-triggered: the line is dropped when the guest writes 0x722. */
+static void
+epoch_adr_dev_irq_clear(void *priv)
+{
+    (void) priv;
+    if (epoch_adr_irq >= 0)
+        picintc((uint16_t) (1 << epoch_adr_irq));
+}
+
+static void
+epoch_adr_ack_out(uint16_t port, uint8_t val, void *priv)
+{
+    (void) port; (void) val; (void) priv;
+    if (epoch_adr_dev_handle != NULL)
+        ibm5250_irq_ack(epoch_adr_dev_handle);
+}
+
+static void
+epoch_adr_shared_clear(void *priv)
+{
+    epoch_t *epoch = (epoch_t *) priv;
+    int      i;
+
+    /* 0x9D0 selects the adapter's shared RAM window and then expects the
+       bytes to read back as 0,1,2,... (cmp al,[bx] / inc al). */
+    if (epoch->hiram != NULL) {
+        for (i = 0; i < 0x100; i++)
+            epoch->hiram[0x3000 + i] = (uint8_t) i;
+    }
+}
+
 static void     epoch_recalctimings(epoch_t *epoch);
 static void     epoch_fontcard_set_page(epoch_t *epoch, uint32_t page);
 
@@ -3180,6 +3229,27 @@ epoch_ibm3477_init(epoch_t *epoch)
                   epoch_misc_out, NULL, NULL, epoch);
     io_sethandler(0x0400, 0x0001, epoch_misc_in, NULL, NULL,
                   epoch_misc_out, NULL, NULL, epoch);
+
+    /* 5250 adapter: one standby workstation on the twinax loop. */
+    {
+        const char *e_irq = getenv("EPOCH3477_ADAPTER_IRQ");
+        epoch_adr_irq = e_irq ? atoi(e_irq) : 5;
+
+        epoch->adapter = ibm5250_init(epoch_adr_irq, epoch_adr_dev_irq, epoch,
+                                      epoch_adr_dev_irq_clear, epoch);
+        epoch_adr_dev_handle = epoch->adapter;
+        ibm5250_set_shared_clear(epoch->adapter, epoch_adr_shared_clear, epoch);
+
+        io_sethandler(0x0722, 0x0002, NULL, NULL, NULL,
+                      epoch_adr_ack_out, NULL, NULL, epoch);
+        /* 0x1B0 (terminal type) and 0x1B6 (ICU release) are machine
+           resources, not adapter registers. */
+        io_sethandler(0x1B0, 0x0001, epoch_misc_in, NULL, NULL,
+                      epoch_misc_out, NULL, NULL, epoch);
+        io_sethandler(0x1B6, 0x0001, epoch_misc_in, NULL, NULL,
+                      epoch_misc_out, NULL, NULL, epoch);
+        pclog("3477: 5250 adapter on IRQ %d\n", epoch_adr_irq);
+    }
 }
 
 /* Display timing, memory and the ports every one of the three machines has. */
