@@ -296,24 +296,25 @@ ibm5250_base(ibm5250_t *dev)
 }
 
 static uint8_t
-ibm5250_ab0_frame_bit(int n, int data)
+ibm5250_ab0_frame_bit(int k, int data)
 {
-    int b = 14 - n;          /* n=0 → B14 … n=14 → B0 */
     int ones;
 
-    /* 实测换算：0x740 的 rcr 链使 AL 取“最后收的 8 位”：
-       AL.bit0 = 第 14 拍、AL.bit7 = 第 7 拍，即 n=7..14，LSB 在后。 */
-    if ((b >= 0) && (b <= 7))              /* n=7..14 → 数据位 0..7 */
-        return (uint8_t) ((data >> b) & 1);
-    if ((b >= 11) && (b <= 13))            /* 站号（本命令不校验） */
+    /* k = 同步位之后的第 k 位（B14 是 k=0）。
+       0x740 的 rcr 链把新位移入 bit15、整体右移，收完 15 位后
+       第 k 位落在 W 的 bit(k+1)，而 AL 取 W 的 bit1..8 ⇒ AL = 最先 8 位。
+       所以数据字节就是 k=0..7（LSB 先），与手册 B14..B7 一致。 */
+    if ((k >= 0) && (k <= 7))
+        return (uint8_t) ((data >> k) & 1);
+    if ((k >= 8) && (k <= 10))            /* B6..B4 站号 */
         return 0;
-    if (b == 10) {                         /* 偶校验位 */
-        ones = 1;
+    if (k == 11) {                        /* B3 偶校验：覆盖 B15..B4 */
+        ones = 1;                         /* sync 位 */
         for (int t = 0; t < 8; t++)
             ones += (data >> t) & 1;
         return (uint8_t) (ones & 1);
     }
-    return 0;                              /* 其余填充 */
+    return 0;                             /* B2..B0 填充 */
 }
 
 static uint8_t
@@ -446,6 +447,11 @@ ibm5250_in_1c6(ibm5250_t *dev)
 
         /* 只让 0x840 的两个读点（数据 0x8A7、时钟 0x8B1）推进序列；
            块内 0x71 检查等其它读不占位，否则同步位会错一拍。 */
+        /* ISR(0x2D6) 读 0x1C6 并写入 [0x2A]；块 0xAB0 的 0xB03 要求
+           ([0x2A] | 0xB7) + 1 == 0 ⇒ 至少要有 bit6 与 bit3。 */
+        if ((cpu_state.pc == 0x02D6) || (cpu_state.pc == 0x02D7))
+            return 0x4A;
+
         if ((cpu_state.pc != 0x08A7) && (cpu_state.pc != 0x08A8) &&
             (cpu_state.pc != 0x08B1) && (cpu_state.pc != 0x08B2))
             return (uint8_t) (base & 0x3f);
