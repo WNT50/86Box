@@ -1412,6 +1412,11 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                           mem_readb_phys(((uint32_t)cpu_state.seg_ds.seg << 4) + 0x26),
                           mem_readb_phys(((uint32_t)cpu_state.seg_ds.seg << 4) + 0x27));
             }
+            /* 0xCA0 每轮先发命令帧；发送期间把半位指针归零，
+               保证随后的 0x840 从起始序列第一个半位开始。 */
+            if (dev->p500_on && from_tx)
+                dev->txpos = 0;
+
             if (dev->p500_on && (rc4 == 0x0843)) {
                 dev->txpos    = 0;
                 dev->tx_reset = 1;
