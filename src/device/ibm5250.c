@@ -79,7 +79,7 @@ typedef struct {
 
 static const ibm5250_frame_desc_t ibm5250_frames[] = {
     /* 0x40 Clear Unit：实测用奇校验（手册写偶，待真机/ROM 复核） */
-    { 0x40, 7, 1, 1, { 0x55, 0x00, 0x00 } },
+    { 0x40, 5, 1, 1, { 0x55, 0x00, 0x00 } },
     /* 0x64：三帧，数据 14/AA/DB */
     { 0x64, 7, 0, 3, { 0x14, 0xAA, 0xDB } },
     /* 0x08 轮询：单帧 FF */
@@ -393,7 +393,7 @@ ibm5250_frame_bit(ibm5250_t *dev, int k)
     if (k == 0)                 return 1;                 /* B15 sync */
     /* nat-1992 3.1.1: 8-bit data byte (B7-B14), LSB first。
        位流从 B15 往 B0 发，所以 B14 = data bit0 ... B7 = data bit7。 */
-    if (k <= 8)                 return (uint8_t) ((d >> (8 - k)) & 1);  /* B14..B7 (LSB first) */
+    if (k <= 8)                 return (uint8_t) ((d >> (k - 1)) & 1);  /* B14..B7 */
     if (k <= 11)                return (uint8_t) ((f->station >> (k - 9)) & 1); /* B6..B4 */
     if (k == 12) {
         /* 0x820: bl 偶 -> 直接通过；bl 奇则要求 bh 奇。等价于 16 位
@@ -454,10 +454,17 @@ ibm5250_line_level(ibm5250_t *dev)
     {
         int m  = n - 20;
         int bi = m >> 1;
+        int  bit;
 
         if (bi >= 15)
             return 1;                       /* 帧后回到空闲 */
-        return ibm5250_frame_bit(dev, bi + 1) ^ (m & 1);
+        /* 实验：EMDIAG 0x820/0x597 要求 bh=bl=0xFF（data 全 1），
+           即轮询应答的 15 位全 1。协议上等同“无数据、全 1 空闲码”。 */
+        if (getenv("EPOCH5250_FRAMEFF") &&
+            ((dev->cmdlat == 0x00) || (dev->cmdlat == 0x08)))
+            return 1;
+        bit = ibm5250_frame_bit(dev, bi + 1);
+        return bit ^ (m & 1);
     }
 }
 
