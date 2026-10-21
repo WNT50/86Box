@@ -131,6 +131,12 @@ struct ibm5250_t {
     int      p500_round; /* 块 0x500 的 8 轮轮询计数：只让其中一轮应答 */
     int      p500_mark;  /* 本轮已计数（serve=0 时 rd 不前进，避免重复计） */
     int      p500_on;    /* 已进入块 0x500（0x505=08 + 0x515=00 标记） */
+    /* ── 协议线路模型（EPOCH5250_PROTO）：以半位为单位推进，读端口只返回线电平 ── */
+    int      txpos;      /* 起始序列/帧内的半位位置 */
+    int      respond;    /* 本轮收到的站地址 == 本机站号 */
+    int      rx_word;    /* 最近一次 0x1C6 写脉冲解码出的接收字 */
+    int      my_station; /* 本机站号（0..7） */
+    int      tx_reset;   /* 本轮已经由 0xCA0 发送重置过 txpos */
     int      serve;      /* this poll gets a reply */
     int      done40;     /* the 0x40 frame has been served once */
     int      pre;        /* 帧前空槽（每槽 2 读）*/
@@ -407,6 +413,47 @@ ibm5250_frame_bit(ibm5250_t *dev, int k)
     return 0;                                              /* B2..B0 fill */
 }
 
+/* 协议线路模型：每次 0x1C6 读采样一个半位。
+ *
+ *   n 0..2    0        暖机（0x845 两读 + 0x848 一读）
+ *   n 3..12   1,0,...  5 个 quiesce 位（半位交替，奇拍为 1）
+ *   n 13..15  1        编码违例正半位（1.5 位）
+ *   n 16..18  0        编码违例负半位（1.5 位）
+ *   n 19      1/0      sync：被寻址给 1，否则 0
+ *   n >= 20   B14..B0  每两个半位一位：电平 = 位值 ^ 半位号
+ *
+ * 0x840 正好消费 n 0..18，0x720 的搜寻读落在 n=19，随后 15 次
+ * call 0x8A0（每次两读）覆盖 30 个半位 = B14..B0。
+ */
+static int
+ibm5250_line_level(ibm5250_t *dev)
+{
+    int n = dev->txpos;
+
+    if (n < 3)
+        return 0;
+    if (n < 13)
+        return (n & 1);
+    if (n < 16)
+        return 1;
+    if (n < 19)
+        return 0;
+    if (n == 19)
+        return dev->respond ? 1 : 0;
+    if (!dev->respond)
+        return 0;
+
+    {
+        int m  = n - 20;
+        int bi = m >> 1;
+
+        if (bi >= 15)
+            return 1;                       /* 帧后回到空闲 */
+        return ibm5250_frame_bit(dev, bi + 1) ^ (m & 1);
+    }
+}
+
+
 static uint8_t
 ibm5250_in_1c6(ibm5250_t *dev)
 {
@@ -437,14 +484,6 @@ ibm5250_in_1c6(ibm5250_t *dev)
     /* 块 0x500 是 8 轮站地址轮询，只有一轮该应答；每轮的第一个数据读
        (0x845, pc=0x8A8) 作为轮次标记。必须放在 serve 检查之前：
        未被寻址的轮次 serve=0，否则计数永远不涨。 */
-    if ((dev->cmdlat == 0x00) && (dev->rd == 0) &&
-        (cpu_state.pc == 0x08A8)) {
-        /* EMDIAG 每轮结束后把 ch+1 写进 [0x29]；0x840 开始时 [0x29] 还是
-           上一轮的值，所以本轮站号 = [0x29] + 1（第一轮 0+1=1）。 */
-        uint32_t dsa = ((uint32_t) cpu_state.seg_ds.seg << 4);
-        dev->p500_round = ((dsa < 0x1000000) ? mem_readb_phys(dsa + 0x29) : 0) + 1;
-    }
-
     if (!dev->serve) {
         /* 只有 EMDIAG 的 0x40/0x64 收发要求静默期读回 0x00
            （0x720 超时返回 AL=(读值<<1)，必须为 0）；
@@ -452,6 +491,25 @@ ibm5250_in_1c6(ibm5250_t *dev)
         if ((dev->cmdlat == 0x40) || (dev->cmdlat == 0x64) || (dev->cmdlat == 0xAA))
             return 0x00;
         return ret;
+    }
+
+    /* 协议线路模型（块 0x500）：不查 pc、不查 rd，只按半位输出线电平。 */
+    if (dev->p500_on && !getenv("EPOCH5250_LEGACY")) {
+        int lvl;
+
+        if (ISR_PC(cpu_state.pc))
+            return (uint8_t) ((base & 0x3d) | (dev->ready ? 0x02 : 0x00));
+
+        /* 线路模型默认应答本轮；站地址匹配留给 0x1C6 解码出的 rx_word。 */
+        dev->respond = 1;
+        lvl = ibm5250_line_level(dev);
+        dev->txpos++;
+        if (dev->txpos >= 19)
+            dev->tx_reset = 0;
+        if (getenv("EPOCH5250_LOGPROTO"))
+            pclog("5250: PROTO n=%02d lvl=%d resp=%d pc=%04X\n",
+                  dev->txpos - 1, lvl, dev->respond, cpu_state.pc);
+        return (uint8_t) ((base & 0x3f) | (lvl ? 0x80 : 0x00));
     }
 
     /* 协议：0x64 的响应在 0x1C9 触发后才就绪；0xCA0 清 [0x2A] 之后、
@@ -1093,6 +1151,7 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                     if (getenv("EPOCH5250_PHSRC")) pclog("5250: PHSRC->1 pc=%04X lp=%02X lv=%02X\n", cpu_state.pc, dev->lastport, dev->lastval);
                     dev->ph     = 1;
                     dev->rd     = 0;
+                    dev->txpos  = 0;      /* 新一轮起始序列从半位 0 开始 */
                     /* 0x720 的收帧计数器必须跟着每轮命令一起复位，
                        否则上一轮停在 fbit=15，下一轮搜寻位从 0 位重新开始时错位。 */
                     if ((val == 0x08) && (cpu_state.pc == 0x0508)) {
@@ -1256,6 +1315,7 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                上一块已把 rd 用到 33，必须在这里重开序列。 */
             if (((val & 0x0F) == 0x0A) && (dev->cmdlat == 0x00)) {
                 dev->rd      = 0;
+                dev->txpos   = 0;
                 dev->p500_mark = 0;
                 dev->fhunt   = 0;
                 dev->fsync   = 0;
@@ -1314,7 +1374,28 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             break;
 
         case 0x1C6:
-            if ((val & 0x40) && (dev->ph == 2)) {
+            /* 只有 0xCA0 的命令帧发送（0xC70 循环 call 0xA70/0xA7E）才推进
+               帧解码；0x840 读期间的位时钟（call 0x8A0 → 0xA73）不算数据。 */
+            {
+            uint32_t sp1c6 = ((uint32_t) cpu_state.seg_ss.seg << 4) + SP;
+            uint16_t rc1c6 = (sp1c6 < 0x1000000) ? mem_readw_phys(sp1c6 + 2) : 0;
+            /* 0xC40 前导 (call 0xA70/0xA81/0xA73) 与 0xC70 帧发送
+               (call 0xA70/0xA7E) 的返回地址都在 0xC4D..0xC88。 */
+            int from_tx = (rc1c6 == 0x0C4D) || (rc1c6 == 0x0C56) ||
+                          (rc1c6 == 0x0C5F) || (rc1c6 == 0x0C83) ||
+                          (rc1c6 == 0x0C88) || (rc1c6 == 0x0A81);
+
+            /* 0xCA0 在每轮轮询前先发前导+命令帧；上一轮 0x840/0x720 已经把
+               txpos 推到 19 以上，所以这里就是协议上的轮次边界。 */
+            if (dev->p500_on && from_tx && (dev->txpos >= 19) && !dev->tx_reset) {
+                dev->txpos    = 0;
+                dev->tx_reset = 1;
+                dev->p500_round++;
+                if (getenv("EPOCH5250_LOGPROTO"))
+                    pclog("5250: ROUND %d (0xCA0 preamble)\n", dev->p500_round);
+            }
+
+            if ((val & 0x40) && from_tx) {
                 int d = (val >> 4) & 1;
 
                 dev->hist = ((dev->hist << 1) | (uint32_t) d) & 0x3FF;
@@ -1323,6 +1404,12 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                         dev->inframe = 1;
                         dev->pcnt    = 0;
                         dev->word    = 0;
+                        if (dev->p500_on) {
+                            /* 0xCA0 每次轮询先发前导，再发命令帧：这是新一轮的
+                               唯一协议边界（块内不写 0x1C0）。 */
+                            dev->txpos = 0;
+                            dev->p500_round++;
+                        }
                     }
                 } else {
                     if ((dev->pcnt >= 6) && (((dev->pcnt - 6) & 1) == 0)) {
@@ -1344,9 +1431,15 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                                        ? ((mem_readb_phys(dsa) == 1) ? (dev->word == 0x1221) : 1)
                                        : 1;
                         }
-                        pclog("5250: FRAME %04X serve=%d\n", dev->word, dev->serve);
+                        dev->rx_word = dev->word;
+                        dev->respond = dev->p500_on ? 1 : 0;
+                        dev->tx_reset = 1;
+                        pclog("5250: FRAME %04X serve=%d station=%d my=%d\n",
+                              dev->word, dev->serve, (dev->word >> 9) & 7,
+                              dev->my_station);
                     }
                 }
+            }
             }
             break;
 
@@ -1376,6 +1469,11 @@ ibm5250_reset(ibm5250_t *dev)
     dev->p500_round = 0;
     dev->p500_mark  = 0;
     dev->p500_on    = 0;
+    dev->txpos      = 0;
+    dev->respond    = 0;
+    dev->rx_word    = 0;
+    dev->my_station = getenv("EPOCH5250_STATION") ? atoi(getenv("EPOCH5250_STATION")) : 2;
+    dev->tx_reset   = 0;
     dev->serve    = 1;
     dev->done40   = 0;
     dev->fno      = 0;
