@@ -105,6 +105,8 @@ struct ibm5250_t {
     int      phase;      /* 0x1C6 bit1 for every command except 0x40 */
 
     int      ph;         /* 1 = handshake, 2 = frame */
+    uint8_t  lastport;
+    uint8_t  lastval;
     int      rd;         /* read index inside the current phase */
     int      serve;      /* this poll gets a reply */
     int      done40;     /* the 0x40 frame has been served once */
@@ -447,13 +449,18 @@ ibm5250_in_1c6(ibm5250_t *dev)
             }
         }
 
+        /* 一个位时间被读两次（数据 0x8A7 + 时钟 0x8B1），两次必须给同一位；
+           否则 0x84E 的 CF 与 0x865 的 CF 来自不同槽，同步永远判不出来。 */
+        int pair2 = getenv("EPOCH5250_PAIR2") ? 1 : 0;
+        int hsi = pair2 ? (dev->rd >> 1) : dev->rd;
+
         ret = (uint8_t) ((base & 0x3f)
                          | (dev->ab0 ? 0x00
-                                                  : ibm5250_handshake[dev->rd]));
+                                                  : ibm5250_handshake[hsi % 19]));
         if (dev->r8_arm && (dev->r8b_round < 8) && (ret & 0x80))
             ret &= (uint8_t) ~0x80;
 
-        if (++dev->rd >= 19) {
+        if (++dev->rd >= (pair2 ? 38 : 19)) {
             dev->ph = 2;
             dev->rd = 0;
             dev->dummy = 0;
@@ -834,6 +841,9 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
 {
     ibm5250_t *dev = (ibm5250_t *) priv;
 
+    dev->lastport = (uint8_t) (port & 0xFF);
+    dev->lastval  = val;
+
     if (getenv("EPOCH5250_LOGIO")) {
         static int n;
         if (n < 300) {
@@ -923,6 +933,7 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                 dev->r8_cnt++;
                 /* 每轮开始（22 次写）都把相位重置回握手态 */
                 if ((dev->r8_cnt % 22) == 1) {
+                    if (getenv("EPOCH5250_PHSRC")) pclog("5250: PHSRC->1 pc=%04X lp=%02X lv=%02X\n", cpu_state.pc, dev->lastport, dev->lastval);
                     dev->ph   = 1;
                     dev->rd   = 0;
                     dev->fsync = 0;
@@ -946,6 +957,7 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
 
                 if (!hold) {
                     dev->cmdlat = val;
+                    if (getenv("EPOCH5250_PHSRC")) pclog("5250: PHSRC->1 pc=%04X lp=%02X lv=%02X\n", cpu_state.pc, dev->lastport, dev->lastval);
                     dev->ph     = 1;
                     dev->rd     = 0;
                     /* 块 0x920 的命令写在 pc=0x0927；它要自己走一遍
@@ -1214,6 +1226,7 @@ ibm5250_reset(ibm5250_t *dev)
     dev->cmdlat   = 0x00;
     dev->phase    = 1;
     dev->b1       = 1;
+    if (getenv("EPOCH5250_PHSRC")) pclog("5250: PHSRC->1 pc=%04X lp=%02X lv=%02X\n", cpu_state.pc, dev->lastport, dev->lastval);
     dev->ph       = 1;
     dev->rd       = 0;
     dev->serve    = 1;
