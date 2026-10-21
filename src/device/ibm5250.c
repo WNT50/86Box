@@ -87,7 +87,7 @@ static const ibm5250_frame_desc_t ibm5250_frames[] = {
     /* 0x00：块 0x500 的 0x720 收帧要求第一位 B14=1（0x840 用 BL.bit0
        判"本站在线"），数据 0x00 会让 BL.bit0 恒 0；其它块走 ab0 分支
        自带 data 参数，不受这里影响。 */
-    { 0x00, 7, 0, 1, { 0x80, 0x00, 0x00 } },
+    { 0x00, 7, 0, 1, { 0xFF, 0x00, 0x00 } },
 };
 
 static const ibm5250_frame_desc_t *
@@ -391,7 +391,9 @@ ibm5250_frame_bit(ibm5250_t *dev, int k)
     }
 
     if (k == 0)                 return 1;                 /* B15 sync */
-    if (k <= 8)                 return (uint8_t) ((d >> (k - 1)) & 1);  /* B14..B7 */
+    /* nat-1992 3.1.1: 8-bit data byte (B7-B14), LSB first。
+       位流从 B15 往 B0 发，所以 B14 = data bit0 ... B7 = data bit7。 */
+    if (k <= 8)                 return (uint8_t) ((d >> (8 - k)) & 1);  /* B14..B7 (LSB first) */
     if (k <= 11)                return (uint8_t) ((f->station >> (k - 9)) & 1); /* B6..B4 */
     if (k == 12) {
         /* 0x820: bl 偶 -> 直接通过；bl 奇则要求 bh 奇。等价于 16 位
@@ -1394,6 +1396,14 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                txpos 推到 19 以上，所以这里就是协议上的轮次边界。 */
             /* 0x840 的第一条指令就是 call 0xb90（返回 0x843）：这是客人
                开始一轮轮询的协议边界，比任何读计数都可靠。 */
+            if (dev->p500_on && (rc4 == 0x0553) && getenv("EPOCH5250_LOG55A")) {
+                static int n55b;
+                if (n55b++ < 12)
+                    pclog("5250: RET bx=%04X bh=%02X bl=%02X [26]=%02X [27]=%02X\n",
+                          BX, BH, BL,
+                          mem_readb_phys(((uint32_t)cpu_state.seg_ds.seg << 4) + 0x26),
+                          mem_readb_phys(((uint32_t)cpu_state.seg_ds.seg << 4) + 0x27));
+            }
             if (dev->p500_on && (rc4 == 0x0843)) {
                 dev->txpos    = 0;
                 dev->tx_reset = 1;
