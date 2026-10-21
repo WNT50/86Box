@@ -113,6 +113,7 @@ struct ibm5250_t {
     int      seq64;      /* 0x64 命令的帧序号 */
     int      fno;        /* frame counter (log only) */
     int      u_bit0;     /* 收帧完成事件位（0x1C1 bit0，ISR 采样后清） */
+    int      t13n;       /* 实验：块 0x500 的帧位窗口剩余读次数 */
     int      dummy;      /* optional leading idle read */
 
     uint32_t hist;       /* pulse history for the 0x2AA frame preamble */
@@ -329,6 +330,9 @@ ibm5250_frame_bit(ibm5250_t *dev, int k)
     const ibm5250_frame_desc_t *f = ibm5250_frame_desc(dev->cmdlat);
     int d, ones, o12;
 
+    if (dev->t13n > 0)
+        dev->t13n--;
+
     if (f == NULL)
         f = ibm5250_frame_desc(0x08);
 
@@ -337,8 +341,12 @@ ibm5250_frame_bit(ibm5250_t *dev, int k)
     if (dev->cmdlat == 0x40 && getenv("EPOCH5250_D40"))   /* 实验覆盖 */
         d = (int) strtoul(getenv("EPOCH5250_D40"), NULL, 16);
 
-    if (k == 15)
+    if (k == 15) {
         dev->u_bit0 = 1;
+        /* 实验：块 0x500 的帧补位改成 1，让 15 次 rcr 后 BL.bit0=1 */
+        if (getenv("EPOCH5250_T13") && (dev->fno == 7) && (dev->cmdlat == 0x64))
+            return 1;
+    }
 
     if (k == 0)                 return 1;                 /* B15 sync */
     if (k <= 8)                 return (uint8_t) ((d >> (k - 1)) & 1);  /* B14..B7 */
@@ -353,7 +361,12 @@ ibm5250_frame_bit(ibm5250_t *dev, int k)
         if (dev->cmdlat == 0x40 && getenv("EPOCH5250_P40"))
             return (uint8_t) atoi(getenv("EPOCH5250_P40"));
         /* 偶校验：12 位里 1 的个数为奇数时补 1；奇校验反过来 */
-        return (uint8_t) (f->odd ? ((o12 & 1) ? 0 : 1) : ((o12 & 1) ? 1 : 0));
+        {
+            uint8_t p = (uint8_t) (f->odd ? ((o12 & 1) ? 0 : 1) : ((o12 & 1) ? 1 : 0));
+            if (getenv("EPOCH5250_T13") && (dev->fno == 7) && (dev->cmdlat == 0x64))
+                p ^= 1;
+            return p;
+        }
     }
     return 0;                                              /* B2..B0 fill */
 }
@@ -644,8 +657,8 @@ ibm5250_in_1c6(ibm5250_t *dev)
         if (getenv("EPOCH5250_TRACE")) {
             static int n;
             if (n < 200) {
-                pclog("5250: TRACE f=%d k=%2d fb=%d rd=%2d dt=%llu at=%04X:%04X bx=%04X bl=%02X bh=%02X\n",
-                      dev->fno, k, fb, dev->rd,
+                pclog("5250: TRACE f=%d cmd=%02X k=%2d fb=%d rd=%2d dt=%llu at=%04X:%04X bx=%04X bl=%02X bh=%02X\n",
+                      dev->fno, dev->cmdlat, k, fb, dev->rd,
                       (unsigned long long) (tsc - dev->last_tsc),
                       ((CS > 0xFFFF) ? (int) (CS >> 4) : (int) CS), cpu_state.pc,
                       BX, (unsigned) (BX & 0xff), (unsigned) ((BX >> 8) & 0xff));
@@ -810,6 +823,8 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
 
         case 0x1C9:      /* EMDIAG 的 [0x12]：写 0xAA 是“触发一帧应答”，命令号不变 */
         case 0x1CA:
+            if ((val == 0x01) && (cpu_state.pc == 0x051B) && getenv("EPOCH5250_T13"))
+                dev->t13n = 0;     /* 块 0x500 的收帧窗口（暂关） */
         case 0x1D0:
         case 0x1D1:
             if (val != 0xFF) {
