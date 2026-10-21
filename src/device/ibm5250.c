@@ -511,8 +511,10 @@ ibm5250_in_1c6(ibm5250_t *dev)
     if (dev->p500_on && !getenv("EPOCH5250_LEGACY")) {
         int lvl;
 
-        if (ISR_PC(cpu_state.pc))
+        if (ISR_PC(cpu_state.pc)) {
+            dev->txpos++;      /* 中断里的读同样消耗一个线上半位 */
             return (uint8_t) ((base & 0x3d) | (dev->ready ? 0x02 : 0x00));
+        }
 
         /* 线路模型默认应答本轮；站地址匹配留给 0x1C6 解码出的 rx_word。 */
         if (getenv("EPOCH5250_BITLOG") && (cpu_state.pc == 0x08A8)) {
@@ -520,6 +522,14 @@ ibm5250_in_1c6(ibm5250_t *dev)
             uint16_t rcb = (spb < 0x1000000) ? mem_readw_phys(spb) : 0;
             if (rcb == 0x0743)
                 pclog("5250: BIT n=%02d lvl=%d cmd=%02X\n", dev->txpos, ibm5250_line_level(dev), dev->cmdlat);
+        }
+        if (dev->p500_on && (dev->txpos == 0)) {
+            dev->p500_round++;                 /* 显式轮次：每轮第一个读 */
+            if (dev->p500_round > 8) {
+                dev->p500_on = 0;              /* 8 轮轮询结束 */
+                dev->txpos   = 0;
+                return (uint8_t) (base & 0x3f);
+            }
         }
         dev->respond = dev->p500_on ? 1 : dev->respond;   /* 块 0x500 内本机始终应答 */
         /* 一轮 = 0x840 的 19 读 + sync + 15 位×2 + 1 = 51 个读；
@@ -540,8 +550,10 @@ ibm5250_in_1c6(ibm5250_t *dev)
        0x840 开始收帧时拉 IRQ4，ISR 采样 0x1C1 写入 [0x2A]（0x6F8 检查）。 */
     if (dev->ph != 2) {
         /* ISR 的采样读不能消耗握手槽 */
-        if (ISR_PC(cpu_state.pc))
+        if (ISR_PC(cpu_state.pc)) {
+            dev->txpos++;      /* 中断里的读同样消耗一个线上半位 */
             return (uint8_t) ((base & 0x3d) | (dev->ready ? 0x02 : 0x00));
+        }
         /* 协议：接收方以 sync=1 对齐；帧前必须是空闲 0。
            0x64 的 19 槽握手是实测拟合值，只用于它自己；其它命令（0x00/0x08…）
            给纯空闲，否则 0x840 的同步搜索会提前命中握手里的 1 而错位。 */
@@ -1413,32 +1425,6 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
 
             /* 0xCA0 在每轮轮询前先发前导+命令帧；上一轮 0x840/0x720 已经把
                txpos 推到 19 以上，所以这里就是协议上的轮次边界。 */
-            /* 0x840 的第一条指令就是 call 0xb90（返回 0x843）：这是客人
-               开始一轮轮询的协议边界，比任何读计数都可靠。 */
-            if (dev->p500_on && (rc4 == 0x0553) && getenv("EPOCH5250_LOG55A")) {
-                static int n55b;
-                if (n55b++ < 24)
-                    pclog("5250: RET round=%d bx=%04X bh=%02X bl=%02X [26]=%02X [27]=%02X\n",
-                          dev->p500_round, BX, BH, BL,
-                          mem_readb_phys(((uint32_t)cpu_state.seg_ds.seg << 4) + 0x26),
-                          mem_readb_phys(((uint32_t)cpu_state.seg_ds.seg << 4) + 0x27));
-            }
-            /* 0xCA0 每轮先发命令帧；发送期间把半位指针归零，
-               保证随后的 0x840 从起始序列第一个半位开始。 */
-
-            if (dev->p500_on && ((rc4 == 0x0843) || (rc6 == 0x0843) || (rc8 == 0x0843))) {
-                dev->txpos    = 0;
-                dev->tx_reset = 1;
-                dev->p500_round++;
-                if (getenv("EPOCH5250_LOG55A"))
-                    pclog("5250: ENTER round=%d txpos=%d pc=%04X rc4=%04X rc6=%04X\n",
-                          dev->p500_round, dev->txpos, cpu_state.pc, rc4, rc6);
-                if (dev->p500_round > 8)
-                    dev->p500_on = 0;   /* 8 轮轮询结束，别影响后续块的 0x840 */
-                if (getenv("EPOCH5250_LOGPROTO"))
-                    pclog("5250: ROUND %d (0x840 entry)\n", dev->p500_round);
-            }
-
             if ((val & 0x40) && from_tx) {
                 int d = (val >> 4) & 1;
 
