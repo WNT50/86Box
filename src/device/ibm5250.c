@@ -498,7 +498,7 @@ ibm5250_in_1c6(ibm5250_t *dev)
     /* 块 0x500 是 8 轮站地址轮询，只有一轮该应答；每轮的第一个数据读
        (0x845, pc=0x8A8) 作为轮次标记。必须放在 serve 检查之前：
        未被寻址的轮次 serve=0，否则计数永远不涨。 */
-    if (!dev->serve) {
+    if (!dev->serve && !dev->p500_on) {
         /* 只有 EMDIAG 的 0x40/0x64 收发要求静默期读回 0x00
            （0x720 超时返回 AL=(读值<<1)，必须为 0）；
            其它情形（IPL 早期轮询）保持 base，否则 POST 会卡住。 */
@@ -531,7 +531,7 @@ ibm5250_in_1c6(ibm5250_t *dev)
                 return (uint8_t) (base & 0x3f);
             }
         }
-        dev->respond = dev->p500_on ? 1 : dev->respond;   /* 块 0x500 内本机始终应答 */
+        dev->respond = dev->p500_on && (dev->p500_round <= 3);   /* 实测 8 轮里应答 3 轮才对得上 [28] */
         /* 一轮 = 0x840 的 19 读 + sync + 15 位×2 + 1 = 51 个读；
            靠读计数闭环，不依赖客人写到哪个端口。 */
         if (dev->p500_on && (dev->txpos >= 51))
@@ -1502,7 +1502,7 @@ ibm5250_reset(ibm5250_t *dev)
     dev->txpos      = 0;
     dev->respond    = 0;
     dev->rx_word    = 0;
-    dev->my_station = getenv("EPOCH5250_STATION") ? atoi(getenv("EPOCH5250_STATION")) : 0;
+    dev->my_station = getenv("EPOCH5250_STATION") ? atoi(getenv("EPOCH5250_STATION")) : 7;
     dev->tx_reset   = 0;
     dev->serve    = 1;
     dev->done40   = 0;
