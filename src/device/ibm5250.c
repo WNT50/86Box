@@ -117,6 +117,7 @@ struct ibm5250_t {
     int      r8_arm;     /* 实验：块 0x500 的 8 轮轮询窗口 */
     int      r8_skip;    /* 需要压掉的同步机会数 */
     int      r8_cnt;     /* 窗口内 0x1C0 写计数（每轮 22 次） */
+    int      r8b_round;  /* 0x840 轮次（以栈返回地址 0x848 计） */
     int      dummy;      /* optional leading idle read */
 
     uint32_t hist;       /* pulse history for the 0x2AA frame preamble */
@@ -339,7 +340,14 @@ ibm5250_frame_bit(ibm5250_t *dev, int k)
     if (f == NULL)
         f = ibm5250_frame_desc(0x08);
 
-    d = f->data[(dev->cmdlat == 0x64) ? (dev->seq64 % f->nframes) : 0];
+    {
+        int fi = (dev->cmdlat == 0x64) ? (dev->seq64 % f->nframes) : 0;
+        d = f->data[fi];
+        /* 协议：多帧应答前 n-1 帧用本站地址，只有末帧用 7（EOM） */
+        if (getenv("EPOCH5250_EOM") && (f->nframes > 1))
+            f = &(ibm5250_frame_desc_t){ f->cmd, (uint8_t) ((fi == (f->nframes - 1)) ? 7 : 2),
+                                         f->odd, f->nframes, { f->data[0], f->data[1], f->data[2] } };
+    }
 
     if (dev->cmdlat == 0x40 && getenv("EPOCH5250_D40"))   /* 实验覆盖 */
         d = (int) strtoul(getenv("EPOCH5250_D40"), NULL, 16);
@@ -419,11 +427,32 @@ ibm5250_in_1c6(ibm5250_t *dev)
         /* 协议：接收方以 sync=1 对齐；帧前必须是空闲 0。
            0x64 的 19 槽握手是实测拟合值，只用于它自己；其它命令（0x00/0x08…）
            给纯空闲，否则 0x840 的同步搜索会提前命中握手里的 1 而错位。 */
+        /* 每轮 0x840 的第一次 0x8A0 调用：栈顶返回地址 = 0x848 */
+        if (dev->r8_arm && (cpu_state.pc == 0x8A8)) {
+            uint32_t spa = ((uint32_t) cpu_state.seg_ss.seg << 4) + SP;
+            if (mem_readw_phys(spa) == 0x848) {
+                dev->r8b_round++;
+                if (getenv("EPOCH5250_R8LOG") && (dev->r8b_round < 40))
+                    pclog("5250: R8 round=%d cnt=%d rd=%d ph=%d\n",
+                          dev->r8b_round, dev->r8_cnt, dev->rd, dev->ph);
+            }
+        }
+
+        if (getenv("EPOCH5250_RDPORT") && (port == 0x1C6)) {
+            static int rdp_n;
+            if (rdp_n < 200) {
+                rdp_n++;
+                pclog("5250: RDP pc=%04X port=%04X ph=%d rd=%d ab0=%d base=%02X\n",
+                      cpu_state.pc, port, dev->ph, dev->rd, dev->ab0, base);
+            }
+        }
+
         ret = (uint8_t) ((base & 0x3f)
                          | (dev->ab0 ? 0x00
                                                   : ibm5250_handshake[dev->rd]));
-        if (dev->r8_arm && (dev->r8_cnt < 154) && (ret & 0x80))
-            ret &= (uint8_t) ~0x80;   /* 前 7 轮不给同步，应答留到第 8 轮 */
+        if (dev->r8_arm && (dev->r8b_round < 8) && (ret & 0x80))
+            ret &= (uint8_t) ~0x80;
+
         if (++dev->rd >= 19) {
             dev->ph = 2;
             dev->rd = 0;
@@ -845,6 +874,7 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                 dev->r8_arm  = 1;
                 dev->r8_skip = 0;
                 dev->r8_cnt  = 0;  /* 从触发点开始按轮计数 */
+                dev->r8b_round = 0;
             }
         case 0x1D0:
         case 0x1D1:
@@ -882,6 +912,13 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             break;
 
         case 0x1C0:
+            /* 块 0x500 的第一条写（0x505 out dx,0x08）：记录入口状态 */
+            if (getenv("EPOCH5250_ENTRY") && (cpu_state.pc == 0x0508)) {
+                uint32_t dsa = ((uint32_t) cpu_state.seg_ds.seg << 4);
+                pclog("5250: ENTRY ph=%d rd=%d ab0=%d fsync=%d fbit=%d cmd=%02X [27]=%02X [28]=%02X\n",
+                      dev->ph, dev->rd, dev->ab0, dev->fsync, dev->fbit, dev->cmdlat,
+                      mem_readb_phys(dsa + 0x27), mem_readb_phys(dsa + 0x28));
+            }
             if (dev->r8_arm) {
                 dev->r8_cnt++;
                 /* 每轮开始（22 次写）都把相位重置回握手态 */

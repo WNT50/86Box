@@ -2125,6 +2125,10 @@ epoch_misc_out(uint16_t port, uint8_t val, void *priv)
     if (port != 0x44)
         epoch_log("%04X:%04X I/O Out %02X: %02X\n", cs >> 4, cpu_state.pc, port, val);
 
+    /* 取证：镜像把 ch 写到 0xB2（该机型未用此端口）。 */
+    if (port == 0x0B2)
+        pclog("3477: PROBE0B2 ch=%02X\n", val);
+
     /* 取证：0x1B2 是只写窗口选择器，镜像漏点用它输出 [0x28]。 */
     if ((port == 0x1B2) && getenv("EPOCH5250_PCLOG"))
         pclog("3477: PROBE1B2 %02X pc=%04X:%04X\n", val, cs >> 4, cpu_state.pc);
@@ -3238,6 +3242,8 @@ epoch_ibm3477_init(epoch_t *epoch)
     io_sethandler(0x02d0, 0x0020, epoch_mirror_inb, epoch_mirror_inw, NULL,
                   epoch_mirror_outb, epoch_mirror_outw, NULL, epoch);
     io_sethandler(0x0390, 0x0001, epoch_misc_in, NULL, NULL,
+                  epoch_misc_out, NULL, NULL, epoch);
+    io_sethandler(0x0B2, 0x0001, NULL, NULL, NULL,
                   epoch_misc_out, NULL, NULL, epoch);
     /* Write-only memory-window selector (kept from the original 3477-S port). */
     io_sethandler(0x1B2, 0x0001, epoch_misc_in, NULL, NULL,
