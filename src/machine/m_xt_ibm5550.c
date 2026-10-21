@@ -2125,6 +2125,10 @@ epoch_misc_out(uint16_t port, uint8_t val, void *priv)
     if (port != 0x44)
         epoch_log("%04X:%04X I/O Out %02X: %02X\n", cs >> 4, cpu_state.pc, port, val);
 
+    /* 取证：0x1B2 是只写窗口选择器，镜像漏点用它输出 [0x28]。 */
+    if ((port == 0x1B2) && getenv("EPOCH5250_PCLOG"))
+        pclog("3477: PROBE1B2 %02X pc=%04X:%04X\n", val, cs >> 4, cpu_state.pc);
+
     /* EMDIAG 的判据上报：每次写 0x1B0 都带 AX（AH=判据码）与 [0x2F]/[0x28]。 */
     if ((port == 0x1B0) && getenv("EPOCH5250_PCLOG")) {
         uint32_t dsa = ((uint32_t) cpu_state.seg_ds.seg << 4);

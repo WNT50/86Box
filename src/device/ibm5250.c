@@ -114,6 +114,8 @@ struct ibm5250_t {
     int      fno;        /* frame counter (log only) */
     int      u_bit0;     /* 收帧完成事件位（0x1C1 bit0，ISR 采样后清） */
     int      t13n;       /* 实验：块 0x500 的帧位窗口剩余读次数 */
+    int      r8_arm;     /* 实验：块 0x500 的 8 轮轮询窗口 */
+    int      r8_skip;    /* 需要压掉的同步机会数 */
     int      dummy;      /* optional leading idle read */
 
     uint32_t hist;       /* pulse history for the 0x2AA frame preamble */
@@ -419,6 +421,10 @@ ibm5250_in_1c6(ibm5250_t *dev)
         ret = (uint8_t) ((base & 0x3f)
                          | (dev->ab0 ? 0x00
                                                   : ibm5250_handshake[dev->rd]));
+        if (dev->r8_arm && (dev->r8_skip > 0) && (ret & 0x80)) {
+            dev->r8_skip--;
+            ret &= (uint8_t) ~0x80;   /* 这一轮的“同步”被压掉 */
+        }
         if (++dev->rd >= 19) {
             dev->ph = 2;
             dev->rd = 0;
@@ -724,6 +730,17 @@ ibm5250_in(uint16_t port, void *priv)
 {
     ibm5250_t *dev = (ibm5250_t *) priv;
 
+    /* HS 取证：块 0x500 的 0x8A0 数据读（pc=0x8A8）看握手表/ab0 实际返回。 */
+    if (getenv("EPOCH5250_HS") && (cpu_state.pc == 0x8A8)) {
+        static int hn;
+        if (hn < 60) {
+            pclog("5250: HS port=%03X rd=%d ab0=%d ph=%d cmd=%02X val=%02X\n",
+                  port, dev->rd, dev->ab0, dev->ph, dev->cmdlat,
+                  (unsigned) (((dev->ph != 2) ? ((dev->ab0 ? 0x00 : ibm5250_handshake[dev->rd % 19])) : 0) | 0));
+            hn++;
+        }
+    }
+
     /* ISR 取证：EMDIAG 的 0x2D2/0x2EE 用 mov dx,[0x6] 取中断状态口。 */
     if (getenv("EPOCH5250_ISR") && ((cpu_state.pc == 0x2D7) || (cpu_state.pc == 0x2F3)))
         pclog("5250: ISR read port=%03X pc=%04X\n", port, cpu_state.pc);
@@ -825,6 +842,10 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
         case 0x1CA:
             if ((val == 0x01) && (cpu_state.pc == 0x051B) && getenv("EPOCH5250_T13"))
                 dev->t13n = 0;     /* 块 0x500 的收帧窗口（暂关） */
+            if ((val == 0x01) && (cpu_state.pc == 0x051B) && getenv("EPOCH5250_R8")) {
+                dev->r8_arm  = 1;
+                dev->r8_skip = 7;  /* 前 7 轮不给同步，应答留到第 8 轮 */
+            }
         case 0x1D0:
         case 0x1D1:
             if (val != 0xFF) {
