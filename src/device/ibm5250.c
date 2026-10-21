@@ -502,6 +502,14 @@ ibm5250_in_1c6(ibm5250_t *dev)
 
         /* 线路模型默认应答本轮；站地址匹配留给 0x1C6 解码出的 rx_word。 */
         dev->respond = 1;
+        if (dev->txpos >= 50) {
+            /* 一轮 = 0x840 的 19 读 + 0x720 的 30 读；客人不写 0x1C0 时
+               靠读计数闭环，回到起始序列开头。 */
+            dev->txpos = 0;
+            dev->p500_round++;
+            if (getenv("EPOCH5250_LOGPROTO"))
+                pclog("5250: ROUND %d (read wrap)\n", dev->p500_round);
+        }
         lvl = ibm5250_line_level(dev);
         dev->txpos++;
         if (dev->txpos >= 19)
