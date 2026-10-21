@@ -521,6 +521,7 @@ ibm5250_in_1c6(ibm5250_t *dev)
             if (rcb == 0x0743)
                 pclog("5250: BIT n=%02d lvl=%d cmd=%02X\n", dev->txpos, ibm5250_line_level(dev), dev->cmdlat);
         }
+        dev->respond = dev->p500_on ? 1 : dev->respond;   /* 块 0x500 内本机始终应答 */
         lvl = ibm5250_line_level(dev);
         dev->txpos++;
         if (dev->txpos >= 19)
@@ -1402,7 +1403,7 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             /* 只有 0x840/0x720 的“读”会经 0x8A0 调 0xA73（返回地址
                0x8A3/0x8AD/0x8B4）；其余写脉冲都是 0xCA0 的发送。 */
             int from_tx = (rc1c6 != 0x08A3) && (rc1c6 != 0x08AD) &&
-                          (rc1c6 != 0x08B4);
+                          (rc1c6 != 0x08B4) && (rc1c6 != 0x0B95);
 
             /* 0xCA0 在每轮轮询前先发前导+命令帧；上一轮 0x840/0x720 已经把
                txpos 推到 19 以上，所以这里就是协议上的轮次边界。 */
@@ -1410,7 +1411,7 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                开始一轮轮询的协议边界，比任何读计数都可靠。 */
             if (dev->p500_on && (rc4 == 0x0553) && getenv("EPOCH5250_LOG55A")) {
                 static int n55b;
-                if (n55b++ < 12)
+                if (n55b++ < 24)
                     pclog("5250: RET bx=%04X bh=%02X bl=%02X [26]=%02X [27]=%02X\n",
                           BX, BH, BL,
                           mem_readb_phys(((uint32_t)cpu_state.seg_ds.seg << 4) + 0x26),
@@ -1418,8 +1419,12 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             }
             /* 0xCA0 每轮先发命令帧；发送期间把半位指针归零，
                保证随后的 0x840 从起始序列第一个半位开始。 */
-            if (dev->p500_on && from_tx)
+            if (dev->p500_on && from_tx) {
+                if (getenv("EPOCH5250_RESETLOG") && (dev->txpos > 0))
+                    pclog("5250: RESET txpos=%d pc=%04X rc=%04X\n",
+                          dev->txpos, cpu_state.pc, rc1c6);
                 dev->txpos = 0;
+            }
 
             if (dev->p500_on && (rc4 == 0x0843)) {
                 dev->txpos    = 0;
