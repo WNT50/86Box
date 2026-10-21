@@ -438,12 +438,12 @@ ibm5250_in_1c6(ibm5250_t *dev)
             }
         }
 
-        if (getenv("EPOCH5250_RDPORT") && (port == 0x1C6)) {
+        if (getenv("EPOCH5250_RDPORT")) {   /* 本函数即 0x1C6 读路径 */
             static int rdp_n;
             if (rdp_n < 200) {
                 rdp_n++;
-                pclog("5250: RDP pc=%04X port=%04X ph=%d rd=%d ab0=%d base=%02X\n",
-                      cpu_state.pc, port, dev->ph, dev->rd, dev->ab0, base);
+                pclog("5250: RDP pc=%04X port=1C6 ph=%d rd=%d ab0=%d base=%02X\n",
+                      cpu_state.pc, dev->ph, dev->rd, dev->ab0, base);
             }
         }
 
@@ -933,6 +933,14 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             /* 协议表：每个测试块都先写一条命令（0x00/0x08/0x10/0x40/0x64/0xAA…），
                之前只放行 0x40/0x08/0x64，导致 0x7A0 起步就被忽略。 */
             if (val != 0xFF) {
+                /* 相位黏着（实验）：已经进入帧相位时，位脉冲写不得把设备
+                   打回握手态，否则 0xCA0 每轮的 22 次 0x1C0 写会让
+                   ph 永远停在 1，0x720 拿不到任何帧。 */
+                if (getenv("EPOCH5250_PHSTICK")
+                    && (cpu_state.pc >= 0x0CA0) && (cpu_state.pc <= 0x0D20)) {
+                    dev->serve = 1;
+                    break;
+                }
                 /* keep the 0x40 reply in place while the subtest is running */
                 int hold = (val == 0x08) && (dev->cmdlat == 0x40) && !dev->done40;
 
