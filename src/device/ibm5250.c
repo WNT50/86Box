@@ -522,6 +522,10 @@ ibm5250_in_1c6(ibm5250_t *dev)
                 pclog("5250: BIT n=%02d lvl=%d cmd=%02X\n", dev->txpos, ibm5250_line_level(dev), dev->cmdlat);
         }
         dev->respond = dev->p500_on ? 1 : dev->respond;   /* 块 0x500 内本机始终应答 */
+        /* 一轮 = 0x840 的 19 读 + sync + 15 位×2 + 1 = 51 个读；
+           靠读计数闭环，不依赖客人写到哪个端口。 */
+        if (dev->p500_on && (dev->txpos >= 51))
+            dev->txpos = 0;
         lvl = ibm5250_line_level(dev);
         dev->txpos++;
         if (dev->txpos >= 19)
@@ -1419,12 +1423,6 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             }
             /* 0xCA0 每轮先发命令帧；发送期间把半位指针归零，
                保证随后的 0x840 从起始序列第一个半位开始。 */
-            if (dev->p500_on && from_tx) {
-                if (getenv("EPOCH5250_RESETLOG") && (dev->txpos > 0))
-                    pclog("5250: RESET txpos=%d pc=%04X rc=%04X\n",
-                          dev->txpos, cpu_state.pc, rc1c6);
-                dev->txpos = 0;
-            }
 
             if (dev->p500_on && (rc4 == 0x0843)) {
                 dev->txpos    = 0;
