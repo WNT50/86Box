@@ -79,7 +79,7 @@ typedef struct {
 
 static const ibm5250_frame_desc_t ibm5250_frames[] = {
     /* 0x40 Clear Unit：实测用奇校验（手册写偶，待真机/ROM 复核） */
-    { 0x40, 5, 1, 1, { 0x55, 0x00, 0x00 } },
+    { 0x40, 7, 1, 1, { 0x55, 0x00, 0x00 } },
     /* 0x64：三帧，数据 14/AA/DB */
     { 0x64, 7, 0, 3, { 0x14, 0xAA, 0xDB } },
     /* 0x08 轮询：单帧 FF */
@@ -453,7 +453,9 @@ ibm5250_line_level(ibm5250_t *dev)
 
     {
         /* sync 占 n=19,20 两个半位；B14 的第一个半位从 n=21 起。 */
-        int m  = n - 20;
+        /* 实测：0x720 的数据读落在 n=21,23,...（每次 call 的第二读），
+           sync 占 n=19,20，所以帧从 n=21 起。 */
+        int m  = n - 21;
         int bi = m >> 1;
         int  bit;
 
@@ -517,6 +519,12 @@ ibm5250_in_1c6(ibm5250_t *dev)
             return (uint8_t) ((base & 0x3d) | (dev->ready ? 0x02 : 0x00));
 
         /* 线路模型默认应答本轮；站地址匹配留给 0x1C6 解码出的 rx_word。 */
+        if (getenv("EPOCH5250_BITLOG") && (cpu_state.pc == 0x08A8)) {
+            uint32_t spb = ((uint32_t) cpu_state.seg_ss.seg << 4) + SP;
+            uint16_t rcb = (spb < 0x1000000) ? mem_readw_phys(spb) : 0;
+            if (rcb == 0x0743)
+                pclog("5250: BIT n=%02d lvl=%d cmd=%02X\n", dev->txpos, ibm5250_line_level(dev), dev->cmdlat);
+        }
         lvl = ibm5250_line_level(dev);
         dev->txpos++;
         if (dev->txpos >= 19)
