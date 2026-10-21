@@ -1404,6 +1404,8 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             uint32_t sp1c6 = ((uint32_t) cpu_state.seg_ss.seg << 4) + SP;
             uint16_t rc1c6 = (sp1c6 < 0x1000000) ? mem_readw_phys(sp1c6 + 2) : 0;
             uint16_t rc4   = (sp1c6 < 0x1000000) ? mem_readw_phys(sp1c6 + 4) : 0;
+            uint16_t rc6   = (sp1c6 < 0x1000000) ? mem_readw_phys(sp1c6 + 6) : 0;
+            uint16_t rc8   = (sp1c6 < 0x1000000) ? mem_readw_phys(sp1c6 + 8) : 0;
             /* 只有 0x840/0x720 的“读”会经 0x8A0 调 0xA73（返回地址
                0x8A3/0x8AD/0x8B4）；其余写脉冲都是 0xCA0 的发送。 */
             int from_tx = (rc1c6 != 0x08A3) && (rc1c6 != 0x08AD) &&
@@ -1424,13 +1426,15 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             /* 0xCA0 每轮先发命令帧；发送期间把半位指针归零，
                保证随后的 0x840 从起始序列第一个半位开始。 */
 
-            if (dev->p500_on && (rc4 == 0x0843)) {
+            if (dev->p500_on && ((rc4 == 0x0843) || (rc6 == 0x0843) || (rc8 == 0x0843))) {
                 dev->txpos    = 0;
                 dev->tx_reset = 1;
                 dev->p500_round++;
                 if (getenv("EPOCH5250_LOG55A"))
-                    pclog("5250: ENTER round=%d txpos=%d pc=%04X\n",
-                          dev->p500_round, dev->txpos, cpu_state.pc);
+                    pclog("5250: ENTER round=%d txpos=%d pc=%04X rc4=%04X rc6=%04X\n",
+                          dev->p500_round, dev->txpos, cpu_state.pc, rc4, rc6);
+                if (dev->p500_round > 8)
+                    dev->p500_on = 0;   /* 8 轮轮询结束，别影响后续块的 0x840 */
                 if (getenv("EPOCH5250_LOGPROTO"))
                     pclog("5250: ROUND %d (0x840 entry)\n", dev->p500_round);
             }
