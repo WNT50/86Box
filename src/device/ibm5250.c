@@ -398,15 +398,11 @@ ibm5250_frame_bit(ibm5250_t *dev, int k)
     if (k == 12) {
         /* 0x820: bl 偶 -> 直接通过；bl 奇则要求 bh 奇。等价于 16 位
            (sync + B14..B0) 偶数个 1，sync 参与校验。 */
-        ones = 0;                                          /* sync 不参与 0x820 */
+        ones = 1;                                          /* sync(B15) 参与 12 位校验 */
         for (int t = 0; t < 8; t++)
             ones += (d >> t) & 1;                          /* data */
         for (int t = 0; t < 3; t++)
             ones += (f->station >> t) & 1;                 /* station */
-        /* 0x08 轮询帧：0x820 只看 bh=B14..B7 与 bl=B6..B0+0，
-           总 1 数须为偶 -> 校验位 = data+station 的奇偶。 */
-        if (dev->cmdlat == 0x08)
-            return (uint8_t) (ones & 1);
         o12 = ones;
         if (dev->cmdlat == 0x40 && getenv("EPOCH5250_P40"))
             return (uint8_t) atoi(getenv("EPOCH5250_P40"));
