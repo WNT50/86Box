@@ -116,6 +116,7 @@ struct ibm5250_t {
     int      t13n;       /* 实验：块 0x500 的帧位窗口剩余读次数 */
     int      r8_arm;     /* 实验：块 0x500 的 8 轮轮询窗口 */
     int      r8_skip;    /* 需要压掉的同步机会数 */
+    int      r8_cnt;     /* 窗口内 0x1C0 写计数（每轮 22 次） */
     int      dummy;      /* optional leading idle read */
 
     uint32_t hist;       /* pulse history for the 0x2AA frame preamble */
@@ -421,10 +422,8 @@ ibm5250_in_1c6(ibm5250_t *dev)
         ret = (uint8_t) ((base & 0x3f)
                          | (dev->ab0 ? 0x00
                                                   : ibm5250_handshake[dev->rd]));
-        if (dev->r8_arm && (dev->r8_skip > 0) && (ret & 0x80)) {
-            dev->r8_skip--;
-            ret &= (uint8_t) ~0x80;   /* 这一轮的“同步”被压掉 */
-        }
+        if (dev->r8_arm && (dev->r8_cnt < 154) && (ret & 0x80))
+            ret &= (uint8_t) ~0x80;   /* 前 7 轮不给同步，应答留到第 8 轮 */
         if (++dev->rd >= 19) {
             dev->ph = 2;
             dev->rd = 0;
@@ -844,7 +843,8 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                 dev->t13n = 0;     /* 块 0x500 的收帧窗口（暂关） */
             if ((val == 0x01) && (cpu_state.pc == 0x051B) && getenv("EPOCH5250_R8")) {
                 dev->r8_arm  = 1;
-                dev->r8_skip = 7;  /* 前 7 轮不给同步，应答留到第 8 轮 */
+                dev->r8_skip = 0;
+                dev->r8_cnt  = 0;  /* 从触发点开始按轮计数 */
             }
         case 0x1D0:
         case 0x1D1:
@@ -882,6 +882,16 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             break;
 
         case 0x1C0:
+            if (dev->r8_arm) {
+                dev->r8_cnt++;
+                /* 每轮开始（22 次写）都把相位重置回握手态 */
+                if ((dev->r8_cnt % 22) == 1) {
+                    dev->ph   = 1;
+                    dev->rd   = 0;
+                    dev->fsync = 0;
+                    dev->fbit = 0;
+                }
+            }
             pclog("5250: CMDW %02X pc=%04X\n", val, cpu_state.pc);
             /* 协议表：每个测试块都先写一条命令（0x00/0x08/0x10/0x40/0x64/0xAA…），
                之前只放行 0x40/0x08/0x64，导致 0x7A0 起步就被忽略。 */
