@@ -83,11 +83,11 @@ static const ibm5250_frame_desc_t ibm5250_frames[] = {
     /* 0x64：三帧，数据 14/AA/DB */
     { 0x64, 7, 0, 3, { 0x14, 0xAA, 0xDB } },
     /* 0x08 轮询：单帧 FF */
-    { 0x08, 7, 0, 1, { 0xFF, 0x00, 0x00 } },
+    { 0x08, 7, 0, 1, { 0x00, 0x00, 0x00 } },
     /* 0x00：块 0x500 的 0x720 收帧要求第一位 B14=1（0x840 用 BL.bit0
        判"本站在线"），数据 0x00 会让 BL.bit0 恒 0；其它块走 ab0 分支
        自带 data 参数，不受这里影响。 */
-    { 0x00, 7, 0, 1, { 0xFF, 0x00, 0x00 } },
+    { 0x00, 7, 0, 1, { 0x00, 0x00, 0x00 } },
 };
 
 static const ibm5250_frame_desc_t *
@@ -452,6 +452,7 @@ ibm5250_line_level(ibm5250_t *dev)
         return 0;
 
     {
+        /* sync 占 n=19,20 两个半位；B14 的第一个半位从 n=21 起。 */
         int m  = n - 20;
         int bi = m >> 1;
         int  bit;
