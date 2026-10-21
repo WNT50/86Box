@@ -105,6 +105,7 @@ struct ibm5250_t {
     int      phase;      /* 0x1C6 bit1 for every command except 0x40 */
 
     int      ph;         /* 1 = handshake, 2 = frame */
+    int      hsk;
     uint8_t  lastport;
     uint8_t  lastval;
     int      rd;         /* read index inside the current phase */
@@ -452,8 +453,22 @@ ibm5250_in_1c6(ibm5250_t *dev)
         /* 一个位时间被读两次（数据 0x8A7 + 时钟 0x8B1），两次必须给同一位；
            否则 0x84E 的 CF 与 0x865 的 CF 来自不同槽，同步永远判不出来。 */
         int pair2 = getenv("EPOCH5250_PAIR2") ? 1 : 0;
+        int pair3 = getenv("EPOCH5250_PAIR3") ? 1 : 0;
         int hsi = pair2 ? (dev->rd >> 1) : dev->rd;
 
+        if (pair3) {
+            /* 数据读（pc=0x8A7）给握手位，时钟读（pc=0x8B1）给 0：
+               0x84E 判数据 bit7、0x865 判时钟 bit7，两者不能同时为 1。 */
+            if (cpu_state.pc == 0x08A7) {
+                ret = (uint8_t) ((base & 0x3f)
+                                 | (dev->ab0 ? 0x00 : ibm5250_handshake[dev->hsk % 19]));
+                dev->hsk++;
+                if (dev->hsk >= 19)
+                    dev->hsk = 0;
+            } else {
+                ret = (uint8_t) (base & 0x3f);
+            }
+        } else
         ret = (uint8_t) ((base & 0x3f)
                          | (dev->ab0 ? 0x00
                                                   : ibm5250_handshake[hsi % 19]));
