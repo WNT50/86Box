@@ -3803,5 +3803,11 @@ machine_xt_ibm3477_init(const machine_t *model)
     i8018x_pcb_set_irq_map(pcb, 1, 1); /* Keyboard */
     i8018x_pcb_set_irq_map(pcb, 4, 2); /* Floppy */
 
+    /* The 5250 adapter's line goes into the same controller instead of the
+       machine's 8259: the map pins the 8259 line and forwards its level to
+       the chip's INT3 input, which is how the 3477-S wires it. */
+    if (epoch_adr_irq >= 0)
+        i8018x_pcb_set_irq_map(pcb, epoch_adr_irq, 0); /* 5250 adapter -> INT0 */
+
     return ret;
 }

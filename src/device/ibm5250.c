@@ -711,6 +711,10 @@ ibm5250_in(uint16_t port, void *priv)
 {
     ibm5250_t *dev = (ibm5250_t *) priv;
 
+    /* ISR 取证：EMDIAG 的 0x2D2/0x2EE 用 mov dx,[0x6] 取中断状态口。 */
+    if (getenv("EPOCH5250_ISR") && ((cpu_state.pc == 0x2D7) || (cpu_state.pc == 0x2F3)))
+        pclog("5250: ISR read port=%03X pc=%04X\n", port, cpu_state.pc);
+
     if (getenv("EPOCH5250_LOGIO")) {
         static int n;
         if (n < 300) {
