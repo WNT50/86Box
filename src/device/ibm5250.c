@@ -42,10 +42,25 @@
 #include "cpu.h"
 #include <86box/ibm5250.h>
 
-/* 19-read handshake, measured on the real EMDIAG/0x840 sequence.  idx 18 must
-   stay 0: giving it the start bit breaks the 0x500 subtest (AH=0x13). */
+/* 19-read handshake, measured on the real EMDIAG/0x840 sequence.
+   0x8A0 falls through into 0x8AA, so ONE call 0x8A0 reads the data line
+   (0x8A7) and then the clock line (0x8B1); the CF from the data read
+   survives while AL is overwritten by the clock sample.
+   Slot layout, verified against the stack return address of every read:
+     rd 0     0x845 data   (warm-up; CF unused)
+     rd 1     0x845 clock  (warm-up)
+     rd 2     0x848 clock
+     rd 3     0x84B data   -> 0x84E jb: bit7=1
+     rd 4     0x84B clock  -> 0x865 jb: bit7 must be 0
+     rd 5..12 0x86C eight clock samples, adjacent samples must differ
+                            (first sample must be 1: [0x2E] holds 0)
+     rd 13..15 0x882 station bits, all bit7=1
+     rd 16..18 0x88F fill bits, all bit7=0
+   After the 19th read the device flips to the frame phase and 0x720
+   shifts its 15 bits out of the data line. */
 static const uint8_t ibm5250_handshake[19] = {
-    0x00, 0x00, 0x00, 0x80, 0x00,
+    0x00, 0x00, 0x00, 0x80,
+    0x00,
     0x80, 0x00, 0x80, 0x00, 0x80, 0x00, 0x80, 0x00,
     0x80, 0x80, 0x80,
     0x00, 0x00, 0x00
@@ -69,8 +84,10 @@ static const ibm5250_frame_desc_t ibm5250_frames[] = {
     { 0x64, 7, 0, 3, { 0x14, 0xAA, 0xDB } },
     /* 0x08 轮询：单帧 FF */
     { 0x08, 7, 0, 1, { 0xFF, 0x00, 0x00 } },
-    /* 0x00：块 0xAB0 / 0x920 需要一帧带 sync 的应答（数据待 0x840/0x720 反推） */
-    { 0x00, 7, 0, 1, { 0x00, 0x00, 0x00 } },
+    /* 0x00：块 0x500 的 0x720 收帧要求第一位 B14=1（0x840 用 BL.bit0
+       判"本站在线"），数据 0x00 会让 BL.bit0 恒 0；其它块走 ab0 分支
+       自带 data 参数，不受这里影响。 */
+    { 0x00, 7, 0, 1, { 0x80, 0x00, 0x00 } },
 };
 
 static const ibm5250_frame_desc_t *
@@ -106,9 +123,14 @@ struct ibm5250_t {
 
     int      ph;         /* 1 = handshake, 2 = frame */
     int      hsk;
+    int      cklevel;
+    int      cksync;
     uint8_t  lastport;
     uint8_t  lastval;
     int      rd;         /* read index inside the current phase */
+    int      p500_round; /* 块 0x500 的 8 轮轮询计数：只让其中一轮应答 */
+    int      p500_mark;  /* 本轮已计数（serve=0 时 rd 不前进，避免重复计） */
+    int      p500_on;    /* 已进入块 0x500（0x505=08 + 0x515=00 标记） */
     int      serve;      /* this poll gets a reply */
     int      done40;     /* the 0x40 frame has been served once */
     int      pre;        /* 帧前空槽（每槽 2 读）*/
@@ -412,6 +434,17 @@ ibm5250_in_1c6(ibm5250_t *dev)
     }
     uint8_t ret  = (uint8_t) (base & 0x3f);
 
+    /* 块 0x500 是 8 轮站地址轮询，只有一轮该应答；每轮的第一个数据读
+       (0x845, pc=0x8A8) 作为轮次标记。必须放在 serve 检查之前：
+       未被寻址的轮次 serve=0，否则计数永远不涨。 */
+    if ((dev->cmdlat == 0x00) && (dev->rd == 0) &&
+        (cpu_state.pc == 0x08A8)) {
+        /* EMDIAG 每轮结束后把 ch+1 写进 [0x29]；0x840 开始时 [0x29] 还是
+           上一轮的值，所以本轮站号 = [0x29] + 1（第一轮 0+1=1）。 */
+        uint32_t dsa = ((uint32_t) cpu_state.seg_ds.seg << 4);
+        dev->p500_round = ((dsa < 0x1000000) ? mem_readb_phys(dsa + 0x29) : 0) + 1;
+    }
+
     if (!dev->serve) {
         /* 只有 EMDIAG 的 0x40/0x64 收发要求静默期读回 0x00
            （0x720 超时返回 AL=(读值<<1)，必须为 0）；
@@ -454,9 +487,31 @@ ibm5250_in_1c6(ibm5250_t *dev)
            否则 0x84E 的 CF 与 0x865 的 CF 来自不同槽，同步永远判不出来。 */
         int pair2 = getenv("EPOCH5250_PAIR2") ? 1 : 0;
         int pair3 = getenv("EPOCH5250_PAIR3") ? 1 : 0;
+        int pair4 = getenv("EPOCH5250_PAIR4") ? 1 : 0;
         int hsi = pair2 ? (dev->rd >> 1) : dev->rd;
 
-        if (pair3) {
+        if (pair4) {
+            /* 数据线 / 时钟线分离：
+               - 0x8A7（数据）：按握手序列给出位，0x80 = 1
+               - 0x8B1（时钟）：逐拍翻转；紧跟同步位的那一拍给 0，
+                 使 0x865 的 CF=0 且 0x867 的 8 拍比较能看到变化 */
+            if (cpu_state.pc == 0x08A7) {
+                int b = dev->ab0 ? 0 : (ibm5250_handshake[dev->hsk % 19] ? 1 : 0);
+                ret = (uint8_t) ((base & 0x3f) | (b ? 0x80 : 0x00));
+                dev->hsk++;
+                if (dev->hsk >= 19)
+                    dev->hsk = 0;
+                dev->cksync = 1;
+            } else {
+                if (dev->cksync) {
+                    dev->cklevel = 0;
+                    dev->cksync  = 0;
+                } else {
+                    dev->cklevel ^= 1;
+                }
+                ret = (uint8_t) ((base & 0x3f) | (dev->cklevel ? 0x80 : 0x00));
+            }
+        } else if (pair3) {
             /* 数据读（pc=0x8A7）给握手位，时钟读（pc=0x8B1）给 0：
                0x84E 判数据 bit7、0x865 判时钟 bit7，两者不能同时为 1。 */
             if (cpu_state.pc == 0x08A7) {
@@ -475,9 +530,20 @@ ibm5250_in_1c6(ibm5250_t *dev)
         if (dev->r8_arm && (dev->r8b_round < 8) && (ret & 0x80))
             ret &= (uint8_t) ~0x80;
 
+        if (getenv("EPOCH5250_LOG19") && (dev->rd < 19)) {
+            static int l19;
+            uint32_t s19 = ((uint32_t) cpu_state.seg_ss.seg << 4) + SP;
+            uint16_t r19 = (s19 < 0x1000000) ? mem_readw_phys(s19) : 0;
+            l19++;
+            pclog("5250: L19 n=%d rd=%02d pc=%04X ret=%02X ph=%d r1=%04X rnd=%d [29]=%02X\n",
+                  l19, dev->rd, cpu_state.pc, ret, dev->ph, r19, dev->p500_round,
+                  (cpu_state.seg_ds.seg < 0x10000) ? mem_readb_phys(((uint32_t) cpu_state.seg_ds.seg << 4) + 0x29) : 0);
+        }
+
         if (++dev->rd >= (pair2 ? 38 : 19)) {
             dev->ph = 2;
             dev->rd = 0;
+            dev->p500_mark = 0;
             dev->dummy = 0;
         }
         return ret;
@@ -669,6 +735,58 @@ ibm5250_in_1c6(ibm5250_t *dev)
         }
         dev->rd++;
         return (uint8_t) ((base & 0x3f) | (fb ? 0x80 : 0x00));
+    }
+
+    {
+        /* 块 0x500（cmdlat=0x00）的 0x720 收帧：0x720 每个数据读就是一位，
+           不能再按 rd/2 折算，否则 15 位只走到 k=7，BL.bit0（=sync）永远是 0。
+           栈顶是 0x720 的返回地址：0x072C = 0x729 搜寻，0x0743 = 0x740 收帧。 */
+        uint32_t sp720 = ((uint32_t) cpu_state.seg_ss.seg << 4) + SP;
+        uint16_t rr1   = (sp720 < 0x1000000) ? mem_readw_phys(sp720) : 0;
+
+        if ((dev->cmdlat == 0x00) &&
+            ((rr1 == 0x072C) || (rr1 == 0x0743))) {
+            int fb;
+
+            if (getenv("EPOCH5250_LOG720") && (dev->fbit < 20))
+                pclog("5250: L720 r1=%04X fbit=%d rd=%d pc=%04X\n",
+                      rr1, dev->fbit, dev->rd, cpu_state.pc);
+
+            if (rr1 == 0x072C) {
+                dev->fbit  = 0;          /* 新一帧的搜寻位 */
+                dev->fsync = 0;
+                /* 8 轮轮询里只有一轮给同步位（本站被寻址） */
+                if (dev->p500_round != 1)
+                    return (uint8_t) (base & 0x3f);
+                return (uint8_t) ((base & 0x3f) | 0x80);
+            }
+
+            if (dev->p500_round != 1) {   /* 未被寻址：整轮无应答 */
+                dev->fsync = 0;
+                dev->rd++;
+                return (uint8_t) (base & 0x3f);
+            }
+
+            /* 一次 call 0x8A0 = 数据读(0x8A7) + 时钟读(0x8B1)，
+               只有数据读消耗一个位；时钟读重放同一位，否则 15 次
+               循环会吃掉 30 位、校验位错位。 */
+            if (cpu_state.pc == 0x08A8) {
+                /* 0x840 已经把 sync(B15) 消费掉；0x720 的 15 次循环收的是
+                   B14..B0，所以位索引从 1 开始（k=1 是数据 bit7）。 */
+                fb = ibm5250_frame_bit(dev, dev->fbit + 1);
+                dev->flast = (uint8_t) fb;
+                dev->fbit++;
+                if (getenv("EPOCH5250_LOG720") && (dev->fbit >= 15))
+                    pclog("5250: L720 DONE fbit=%d BX=%04X bh=%02X bl=%02X fb=%d\n",
+                          dev->fbit, BX, (unsigned) ((BX >> 8) & 0xff),
+                          (unsigned) (BX & 0xff), fb);
+            } else {
+                fb = dev->flast;
+            }
+            dev->fsync = 1;
+            dev->rd++;
+            return (uint8_t) ((base & 0x3f) | (fb ? 0x80 : 0x00));
+        }
     }
 
     {
@@ -975,6 +1093,16 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                     if (getenv("EPOCH5250_PHSRC")) pclog("5250: PHSRC->1 pc=%04X lp=%02X lv=%02X\n", cpu_state.pc, dev->lastport, dev->lastval);
                     dev->ph     = 1;
                     dev->rd     = 0;
+                    /* 0x720 的收帧计数器必须跟着每轮命令一起复位，
+                       否则上一轮停在 fbit=15，下一轮搜寻位从 0 位重新开始时错位。 */
+                    if ((val == 0x08) && (cpu_state.pc == 0x0508)) {
+                        dev->p500_round = 0;   /* 块 0x500 入口：轮询计数归零 */
+                        dev->p500_on    = 1;
+                    }
+                    if ((val != 0x00) && (val != 0x08))
+                        dev->p500_on    = 0;   /* 离开 0x500：别影响后续块 */
+                    dev->fbit   = 0;
+                    dev->fsync  = 0;
                     /* 块 0x920 的命令写在 pc=0x0927；它要自己走一遍
                        0x840，必须从干净序列开始（实测宽条件会误伤
                        0x7A0 的 0x7C6）。 */
@@ -1128,6 +1256,7 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                上一块已把 rd 用到 33，必须在这里重开序列。 */
             if (((val & 0x0F) == 0x0A) && (dev->cmdlat == 0x00)) {
                 dev->rd      = 0;
+                dev->p500_mark = 0;
                 dev->fhunt   = 0;
                 dev->fsync   = 0;
                 dev->fbit    = 0;
@@ -1185,7 +1314,7 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             break;
 
         case 0x1C6:
-            if (val & 0x40) {
+            if ((val & 0x40) && (dev->ph == 2)) {
                 int d = (val >> 4) & 1;
 
                 dev->hist = ((dev->hist << 1) | (uint32_t) d) & 0x3FF;
@@ -1244,6 +1373,9 @@ ibm5250_reset(ibm5250_t *dev)
     if (getenv("EPOCH5250_PHSRC")) pclog("5250: PHSRC->1 pc=%04X lp=%02X lv=%02X\n", cpu_state.pc, dev->lastport, dev->lastval);
     dev->ph       = 1;
     dev->rd       = 0;
+    dev->p500_round = 0;
+    dev->p500_mark  = 0;
+    dev->p500_on    = 0;
     dev->serve    = 1;
     dev->done40   = 0;
     dev->fno      = 0;
