@@ -1416,8 +1416,8 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             if (dev->p500_on && (rc4 == 0x0553) && getenv("EPOCH5250_LOG55A")) {
                 static int n55b;
                 if (n55b++ < 24)
-                    pclog("5250: RET bx=%04X bh=%02X bl=%02X [26]=%02X [27]=%02X\n",
-                          BX, BH, BL,
+                    pclog("5250: RET round=%d bx=%04X bh=%02X bl=%02X [26]=%02X [27]=%02X\n",
+                          dev->p500_round, BX, BH, BL,
                           mem_readb_phys(((uint32_t)cpu_state.seg_ds.seg << 4) + 0x26),
                           mem_readb_phys(((uint32_t)cpu_state.seg_ds.seg << 4) + 0x27));
             }
@@ -1428,6 +1428,9 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                 dev->txpos    = 0;
                 dev->tx_reset = 1;
                 dev->p500_round++;
+                if (getenv("EPOCH5250_LOG55A"))
+                    pclog("5250: ENTER round=%d txpos=%d pc=%04X\n",
+                          dev->p500_round, dev->txpos, cpu_state.pc);
                 if (getenv("EPOCH5250_LOGPROTO"))
                     pclog("5250: ROUND %d (0x840 entry)\n", dev->p500_round);
             }
