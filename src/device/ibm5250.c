@@ -88,6 +88,8 @@ static const ibm5250_frame_desc_t ibm5250_frames[] = {
        判"本站在线"），数据 0x00 会让 BL.bit0 恒 0；其它块走 ab0 分支
        自带 data 参数，不受这里影响。 */
     { 0x00, 7, 0, 1, { 0x00, 0x00, 0x00 } },
+    /* 0x61：0x440 组要求 BL&0x7C==0x54 -> station=5, p=0, B2=1 */
+    { 0x61, 5, 0, 1, { 0x00, 0x00, 0x00 } },
 };
 
 static const ibm5250_frame_desc_t *
@@ -414,6 +416,10 @@ ibm5250_frame_bit(ibm5250_t *dev, int k)
             return p;
         }
     }
+    if (dev->cmdlat == 0x61) {
+        if (k == 13) return 1;          /* B2=1 -> BL&0x7C==0x54 */
+        if (k == 15) return 1;          /* B0=1 -> 0x720 最后一次 in 返回 0 */
+    }
     return 0;                                              /* B2..B0 fill */
 }
 
@@ -498,7 +504,7 @@ ibm5250_in_1c6(ibm5250_t *dev)
     /* 块 0x500 是 8 轮站地址轮询，只有一轮该应答；每轮的第一个数据读
        (0x845, pc=0x8A8) 作为轮次标记。必须放在 serve 检查之前：
        未被寻址的轮次 serve=0，否则计数永远不涨。 */
-    if (!dev->serve && !dev->p500_on) {
+    if (!dev->serve && !(dev->p500_on && !getenv("EPOCH5250_LEGACY"))) {
         /* 只有 EMDIAG 的 0x40/0x64 收发要求静默期读回 0x00
            （0x720 超时返回 AL=(读值<<1)，必须为 0）；
            其它情形（IPL 早期轮询）保持 base，否则 POST 会卡住。 */
