@@ -1581,6 +1581,23 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             {
             uint32_t sp1c6 = ((uint32_t) cpu_state.seg_ss.seg << 4) + SP;
             uint16_t rc1c6 = (sp1c6 < 0x1000000) ? mem_readw_phys(sp1c6 + 2) : 0;
+            /* 镜像等长探针：patch_probe2b.py 把 0x8C7 改成
+               mov al,[0x2B]; out dx,al; nop nop，out 之后 pc=0x8CC。
+               这里把客人真实的 [0x2B] 打出来。 */
+            /* 0x8C0 每次被调用都会先走 0xC40 的起始序列（5 个 biphase 1，
+               首拍 pc=0x0A91 val=0x18 rc1=0x0A73）。数这些事件就能知道
+               0x8C0 一共被调几次、每次在哪条命令（cmdlat）下。 */
+            if (getenv("EPOCH5250_C40N") && (rc1c6 == 0x0A73) && (val == 0x18)) {
+                static int c40n;
+                pclog("5250: C40N #%d cmdlat=%02X pc=%04X serve=%d seq=%d\n",
+                      ++c40n, dev->cmdlat, cpu_state.pc, dev->serve, dev->seq64);
+            }
+            if (getenv("EPOCH5250_W2B") && (cpu_state.pc == 0x08CC))
+                pclog("5250: W2B val=%02X cmdlat=%02X serve=%d seq=%d\n",
+                      val, dev->cmdlat, dev->serve, dev->seq64);
+            if (getenv("EPOCH5250_W2B") && (cpu_state.pc == 0x08CF))
+                pclog("5250: W2BE val=%02X cmdlat=%02X serve=%d seq=%d\n",
+                      val, dev->cmdlat, dev->serve, dev->seq64);
             if (getenv("EPOCH5250_TOUT") && (dev->cmdlat == 0x64)) {
                 static int to;
                 if (to++ < 240)
