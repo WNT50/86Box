@@ -707,15 +707,27 @@ ibm5250_in_1c6(ibm5250_t *dev)
     if (getenv("EPOCH5250_PH2RD") && (dev->cmdlat == 0x30) && (dev->n720 >= 1) &&
         ((cpu_state.pc == 0x08A7) || (cpu_state.pc == 0x08A8) ||
          (cpu_state.pc == 0x08B1) || (cpu_state.pc == 0x08B2))) {
-        int h2 = dev->rd % 19;
-        uint8_t r2b = (uint8_t) ((base & 0x3f) | (ibm5250_handshake[h2] ? 0x80 : 0x00));
+        /* rd 0..29 = 第一次 0x720（0x840 内）：给 data=0x2A 的帧
+           rd >= 30 = 第二次 0x720（0x476）：整段 0 → 搜寻超时 → AL=0 */
+        int fb2 = 0;
+        if (dev->rd < 30) {
+            int k = (dev->rd >> 1) + 1;          /* B14..B0 */
+            int ones = 1;                        /* sync 计入偶校验 */
+            for (int i = 0; i < 8; i++) ones += (0x2A >> i) & 1;
+            if (k >= 1 && k <= 8)       fb2 = (0x2A >> (k - 1)) & 1;
+            else if (k >= 9 && k <= 11) fb2 = 0;                 /* station=0 */
+            else if (k == 12)           fb2 = ones & 1;          /* 偶校验位 */
+            else if (k >= 13 && k <= 15) fb2 = (0x03 >> (k - 13)) & 1; /* fill=011 */
+            else if (k == 0)            fb2 = 1;
+        }
+        uint8_t r2b = (uint8_t) ((base & 0x3f) | (fb2 ? 0x80 : 0x00));
         if (dev->rd < 40)
             dev->rd++;
         if (getenv("EPOCH5250_PH2LOG") && (dev->rd < 40)) {
             static int p2n;
             if (p2n++ < 80)
-                pclog("5250: PH2 rd=%d pc=%04X h2=%d ret=%02X\n",
-                      dev->rd, cpu_state.pc, h2, r2b);
+                pclog("5250: PH2 rd=%d pc=%04X fb=%d ret=%02X\n",
+                      dev->rd, cpu_state.pc, fb2, r2b);
         }
         return r2b;
     }
