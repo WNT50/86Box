@@ -495,6 +495,15 @@ ibm5250_in_1c6(ibm5250_t *dev)
 {
     uint8_t base = ibm5250_base(dev);
 
+    /* 0xBA0 的 AH=0x03 来自 0x8C7 的 [0x2B]&2，而 [0x2B] 是 ISR 里读 0x1C6
+       采样的。这里直接记录 ISR 的读点 pc 与返回值，别再猜地址。 */
+    if (getenv("EPOCH5250_ISRLOG") && (cpu_state.pc >= 0x02D0) && (cpu_state.pc <= 0x0300)) {
+        static int isn;
+        if (isn++ < 40)
+            pclog("5250: ISR pc=%04X base=%02X b1p=%d b1=%d serve=%d cmd=%02X\n",
+                  cpu_state.pc, base, dev->b1_pulse, dev->b1, dev->serve, dev->cmdlat);
+    }
+
     /* 0x440 的第二次 0x720（0x476 直接调用）：不给帧，让 0x720 的 255 次
        搜寻全部超时、走 0x732 ret，AL 保持 0 —— 0x479 的 `or al,al` 才能过。
        0x840 内部那次（sub30=0）仍然正常应答，供 0x45E/0x469 检查 bl。 */
