@@ -496,8 +496,14 @@ ibm5250_in_1c6(ibm5250_t *dev)
     /* 0x440 的第二次 0x720（0x476 直接调用）：不给帧，让 0x720 的 255 次
        搜寻全部超时、走 0x732 ret，AL 保持 0 —— 0x479 的 `or al,al` 才能过。
        0x840 内部那次（sub30=0）仍然正常应答，供 0x45E/0x469 检查 bl。 */
-    if ((dev->cmdlat == 0x30) && (dev->sub30 == 1))
+    if ((dev->cmdlat == 0x30) && (dev->sub30 == 1)) {
+        if (getenv("EPOCH5250_SUB30")) {
+            static int sn30;
+            if (sn30++ < 8)
+                pclog("5250: SUB30-ZERO pc=%04X rd=%d\n", cpu_state.pc, dev->rd);
+        }
         return 0x00;
+    }
 
     if (getenv("EPOCH5250_POLLOG") && (dev->cmdlat == 0x00) && (dev->c3 == 0x08)) {
         static long rn = 0; rn++;
@@ -774,6 +780,14 @@ ibm5250_in_1c6(ibm5250_t *dev)
             int is_data  = ((cpu_state.pc == 0x08A7) || (cpu_state.pc == 0x08A8));
 
             if ((r1 == 0x072C) || (r1 == 0x0743)) {   /* 0x729 搜寻 / 0x740 收帧 */
+                /* 来源必须在**搜寻阶段**就判定：0x476 的 0x720 先跑 255 次
+                   0x729，等进到 0x740 才判就晚了，前 255 读已经给出帧。 */
+                if (r1 == 0x072C) {
+                    dev->sub30 = (r2 == 0x0479) ? 1 : 0;
+                    if (getenv("EPOCH5250_SUB30"))
+                        pclog("5250: SUB30 r2=%04X -> %d cmd=%02X\n",
+                              r2, dev->sub30, dev->cmdlat);
+                }
                 if (r1 == 0x0743) {
                     dev->fsync = 1;          /* 已进入 15 位收帧循环 */
                     /* 0x440 的两次 0x720：0x840 内部（r2=0x89D）用第 0 帧，
