@@ -148,6 +148,7 @@ struct ibm5250_t {
     uint8_t  data8;      /* 0x1C8 数据寄存器 */
     int      seq64;      /* 0x64 命令的帧序号 */
     int      sub30;      /* 0x30 帧：0=0x840 内部那次，1=0x476 直接调用 */
+    int      n720;       /* 0x30 命令下 0x720 完成的握手轮数（ph 1->2 次数） */
     int      fno;        /* frame counter (log only) */
     int      u_bit0;     /* 收帧完成事件位（0x1C1 bit0，ISR 采样后清） */
     int      t13n;       /* 实验：块 0x500 的帧位窗口剩余读次数 */
@@ -692,8 +693,29 @@ ibm5250_in_1c6(ibm5250_t *dev)
             dev->rd = 0;
             dev->p500_mark = 0;
             dev->dummy = 0;
+            if (dev->cmdlat == 0x30)
+                dev->n720++;
         }
         return ret;
+    }
+
+    /* 0x440 的第二次 0x720（0x476）：ph 已经在第一次 0x840 里推到 2，
+       这里若继续给帧，0x720 会正常收出一条帧、AL 非 0（AH=0x23）。
+       让线路整段为 0，搜寻 255 次超时，0x732 ret 时 AL 保持 0。 */
+    if (getenv("EPOCH5250_CMD30") && (dev->cmdlat == 0x30)) {
+        static int c30;
+        if (c30++ < 60)
+            pclog("5250: CMD30 pc=%04X ph=%d rd=%d n720=%d sub30=%d serve=%d\n",
+                  cpu_state.pc, dev->ph, dev->rd, dev->n720, dev->sub30, dev->serve);
+    }
+    if ((dev->cmdlat == 0x30) && (dev->n720 >= 2)) {
+        if (getenv("EPOCH5250_SUB30")) {
+            static int sn30b;
+            if (sn30b++ < 6)
+                pclog("5250: SUB30-NOFEED pc=%04X n720=%d rd=%d\n",
+                      cpu_state.pc, dev->n720, dev->rd);
+        }
+        return 0x00;
     }
 
     if (dev->dummy) {
