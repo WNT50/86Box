@@ -90,6 +90,9 @@ static const ibm5250_frame_desc_t ibm5250_frames[] = {
     { 0x00, 7, 0, 1, { 0x00, 0x00, 0x00 } },
     /* 0x61：0x440 组要求 BL&0x7C==0x54 -> station=5, p=0, B2=1 */
     { 0x61, 0, 0, 1, { 0x2A, 0x00, 0x00 } },
+    /* 0x30：0xCA0 线上实际的数据字节（bl.bit0 被当 sync，0x61>>1=0x30）。
+       CMDSYNC 用 (word>>1)&0xFF 解出来的就是 0x30，必须能选到同一份帧内容。 */
+    { 0x30, 0, 0, 2, { 0x2A, 0x00, 0x00 } },
 };
 
 static const ibm5250_frame_desc_t *
@@ -144,6 +147,7 @@ struct ibm5250_t {
     int      pre;        /* 帧前空槽（每槽 2 读）*/
     uint8_t  data8;      /* 0x1C8 数据寄存器 */
     int      seq64;      /* 0x64 命令的帧序号 */
+    int      sub30;      /* 0x30 帧：0=0x840 内部那次，1=0x476 直接调用 */
     int      fno;        /* frame counter (log only) */
     int      u_bit0;     /* 收帧完成事件位（0x1C1 bit0，ISR 采样后清） */
     int      t13n;       /* 实验：块 0x500 的帧位窗口剩余读次数 */
@@ -374,7 +378,15 @@ ibm5250_frame_bit(ibm5250_t *dev, int k)
         f = ibm5250_frame_desc(0x08);
 
     {
-        int fi = (dev->cmdlat == 0x64) ? (dev->seq64 % f->nframes) : 0;
+        /* 0x30 也是两帧序列：第一次（0x840 内的 0x720）要 bl&0x7C==0x54，
+           第二次（0x476 的 0x720）要 al==0，即 bl 为 0/1。 */
+        int fi;
+        if (dev->cmdlat == 0x64)
+            fi = dev->seq64 % f->nframes;
+        else if (dev->cmdlat == 0x30)
+            fi = dev->sub30 % f->nframes;
+        else
+            fi = 0;
         d = f->data[fi];
         /* 协议：多帧应答前 n-1 帧用本站地址，只有末帧用 7（EOM） */
         if (getenv("EPOCH5250_EOM") && (f->nframes > 1))
@@ -481,6 +493,12 @@ ibm5250_in_1c6(ibm5250_t *dev)
 {
     uint8_t base = ibm5250_base(dev);
 
+    /* 0x440 的第二次 0x720（0x476 直接调用）：不给帧，让 0x720 的 255 次
+       搜寻全部超时、走 0x732 ret，AL 保持 0 —— 0x479 的 `or al,al` 才能过。
+       0x840 内部那次（sub30=0）仍然正常应答，供 0x45E/0x469 检查 bl。 */
+    if ((dev->cmdlat == 0x30) && (dev->sub30 == 1))
+        return 0x00;
+
     if (getenv("EPOCH5250_POLLOG") && (dev->cmdlat == 0x00) && (dev->c3 == 0x08)) {
         static long rn = 0; rn++;
         if (rn <= 200)
@@ -523,11 +541,15 @@ ibm5250_in_1c6(ibm5250_t *dev)
     /* 块 0x500 是 8 轮站地址轮询，只有一轮该应答；每轮的第一个数据读
        (0x845, pc=0x8A8) 作为轮次标记。必须放在 serve 检查之前：
        未被寻址的轮次 serve=0，否则计数永远不涨。 */
-    if (!dev->serve && !(dev->p500_on && !getenv("EPOCH5250_LEGACY"))) {
+    if (!dev->serve) {
         /* 只有 EMDIAG 的 0x40/0x64 收发要求静默期读回 0x00
            （0x720 超时返回 AL=(读值<<1)，必须为 0）；
            其它情形（IPL 早期轮询）保持 base，否则 POST 会卡住。 */
         if ((dev->cmdlat == 0x40) || (dev->cmdlat == 0x64) || (dev->cmdlat == 0xAA))
+            return 0x00;
+        /* 0x500 的未寻址轮次：读回 0 让 0x720 的搜寻超时（0x732 ret），
+           不进收帧分支 —— 否则会拿一条无效帧走 0x75C，整机报 AH=0x02 提前退出。 */
+        if (dev->p500_on && !getenv("EPOCH5250_LEGACY"))
             return 0x00;
         return ret;
     }
@@ -752,8 +774,15 @@ ibm5250_in_1c6(ibm5250_t *dev)
             int is_data  = ((cpu_state.pc == 0x08A7) || (cpu_state.pc == 0x08A8));
 
             if ((r1 == 0x072C) || (r1 == 0x0743)) {   /* 0x729 搜寻 / 0x740 收帧 */
-                if (r1 == 0x0743)
+                if (r1 == 0x0743) {
                     dev->fsync = 1;          /* 已进入 15 位收帧循环 */
+                    /* 0x440 的两次 0x720：0x840 内部（r2=0x89D）用第 0 帧，
+                       0x476 直接调用（r2=0x479）用第 1 帧。 */
+                    if (r2 == 0x089D)
+                        dev->sub30 = 0;
+                    else if (r2 != 0)
+                        dev->sub30 = 1;
+                }
                 if (dev->fsync && (dev->fbit >= 15)) {
                     /* 上一帧收完，0x720 又回来搜寻下一帧 */
                     if (r2 != 0x089D) {     /* 0x840 内部那一帧不占序号 */
@@ -1447,6 +1476,14 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                0x8A3/0x8AD/0x8B4）；其余写脉冲都是 0xCA0 的发送。 */
             int from_tx = (rc1c6 != 0x08A3) && (rc1c6 != 0x08AD) &&
                           (rc1c6 != 0x08B4) && (rc1c6 != 0x0B95);
+
+            if (getenv("EPOCH5250_TXLOG") && from_tx) {
+                static int tn;
+                if (tn < 400)
+                    pclog("5250: TXLOG %03d val=%02X rc1=%04X hist=%03X inf=%d pcnt=%d word=%04X cmd=%02X\n",
+                          tn++, val, rc1c6, dev->hist, dev->inframe, dev->pcnt,
+                          dev->word, dev->cmdlat);
+            }
 
             /* 0xCA0 在每轮轮询前先发前导+命令帧；上一轮 0x840/0x720 已经把
                txpos 推到 19 以上，所以这里就是协议上的轮次边界。 */
