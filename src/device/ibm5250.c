@@ -719,13 +719,13 @@ ibm5250_in_1c6(ibm5250_t *dev)
             r = dev->rd - 44;
             fdata = 0x00;
         }
-        int seg = (r < 12) ? 0 : (r < 14) ? 1 : (r < 44) ? 2 : 3;
-        if (dev->rd >= 44 && r < 494) {
-            fb2 = 0;                              /* 247 位搜寻失败 */
-        } else if (seg == 1) {
+        int sync_at = (dev->rd >= 44) ? 494 : 12;
+        int frm_at  = (dev->rd >= 44) ? 496 : 14;
+        int seg = (r < sync_at) ? 0 : (r < sync_at + 2) ? 1 : (r < frm_at + 30) ? 2 : 3;
+        if (seg == 1) {
             fb2 = is_data ? 1 : 0;                /* sync */
         } else if (seg == 2) {
-            int k = ((r - 14) >> 1) + 1;
+            int k = ((r - frm_at) >> 1) + 1;
             int ones = 1;
             for (int i = 0; i < 8; i++) ones += (fdata >> i) & 1;
             if (k >= 1 && k <= 8)        fb2 = (fdata >> (k - 1)) & 1;
@@ -737,9 +737,9 @@ ibm5250_in_1c6(ibm5250_t *dev)
         uint8_t r2b = (uint8_t) ((base & 0x3f) | (fb2 ? 0x80 : 0x00));
         if (dev->rd < 700)
             dev->rd++;
-        if (getenv("EPOCH5250_PH2LOG") && (dev->rd < 40)) {
+        if (getenv("EPOCH5250_PH2LOG") && (dev->rd < 700)) {
             static int p2n;
-            if (p2n++ < 80)
+            if (p2n++ < 240)
                 pclog("5250: PH2 rd=%d pc=%04X fb=%d ret=%02X\n",
                       dev->rd, cpu_state.pc, fb2, r2b);
         }
