@@ -495,6 +495,24 @@ ibm5250_in_1c6(ibm5250_t *dev)
 {
     uint8_t base = ibm5250_base(dev);
 
+    /* 0xBA0/AH=0x03 的时序线：0xC40 清 [0x2B] 是内存写，设备看不见，
+       但它前后必经这些 0x1C6 的 I/O 访问。按顺序记下来就能看出
+       0x8C7 之前最后一次写 [0x2B] 的是 ISR 还是 0xC40。 */
+    if (getenv("EPOCH5250_TLINE") && (dev->cmdlat == 0x64)) {
+        static int tl;
+        const char *ev = NULL;
+        switch (cpu_state.pc) {
+        case 0x0A73: ev = "C40-clear"; break;
+        case 0x0A81: ev = "C40-send1"; break;
+        case 0x0C4D: case 0x0C56: case 0x0C83: ev = "C90-tx"; break;
+        case 0x08A8: case 0x08B2: ev = "720-read"; break;
+        case 0x02D7: case 0x02DF: ev = "ISR-read"; break;
+        }
+        if (ev && (tl++ < 240))
+            pclog("5250: TLINE %-10s pc=%04X base=%02X serve=%d\n",
+                  ev, cpu_state.pc, base, dev->serve);
+    }
+
     /* 0xBA0 的 AH=0x03 来自 0x8C7 的 [0x2B]&2，而 [0x2B] 是 ISR 里读 0x1C6
        采样的。这里直接记录 ISR 的读点 pc 与返回值，别再猜地址。 */
     if (getenv("EPOCH5250_ISRLOG") && (cpu_state.pc >= 0x02D0) && (cpu_state.pc <= 0x0300)) {
@@ -1563,6 +1581,12 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             {
             uint32_t sp1c6 = ((uint32_t) cpu_state.seg_ss.seg << 4) + SP;
             uint16_t rc1c6 = (sp1c6 < 0x1000000) ? mem_readw_phys(sp1c6 + 2) : 0;
+            if (getenv("EPOCH5250_TOUT") && (dev->cmdlat == 0x64)) {
+                static int to;
+                if (to++ < 240)
+                    pclog("5250: TOUT pc=%04X val=%02X rc1=%04X txr=%d\n",
+                          cpu_state.pc, val, rc1c6, dev->tx_reset);
+            }
             uint16_t rc4   = (sp1c6 < 0x1000000) ? mem_readw_phys(sp1c6 + 4) : 0;
             uint16_t rc6   = (sp1c6 < 0x1000000) ? mem_readw_phys(sp1c6 + 6) : 0;
             uint16_t rc8   = (sp1c6 < 0x1000000) ? mem_readw_phys(sp1c6 + 8) : 0;
