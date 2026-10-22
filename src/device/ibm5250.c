@@ -507,12 +507,17 @@ ibm5250_in_1c6(ibm5250_t *dev)
         ((cpu_state.pc == 0x08A8) || (cpu_state.pc == 0x08B2))) {
         static long sn = 0;
         uint32_t spx = ((uint32_t) cpu_state.seg_ss.seg << 4) + SP;
-        if ((sn++ < 400) && (mem_readw_phys(spx) == 0x0743))
-            pclog("5250: STK720 n=%ld pc=%04X ph=%d serve=%d cmd=%02X "
-                  "r1=%04X r2=%04X r3=%04X r4=%04X\n",
-                  sn, cpu_state.pc, dev->ph, dev->serve, dev->cmdlat,
-                  mem_readw_phys(spx), mem_readw_phys(spx + 2),
-                  mem_readw_phys(spx + 4), mem_readw_phys(spx + 6));
+        {
+            uint16_t s0 = mem_readw_phys(spx);
+            uint16_t s2 = mem_readw_phys(spx + 2);
+            /* 0x440 组（0x476 call 0x720，返回 0x479）：栈顶 0x72C=搜寻读，
+               0x743=收帧读。0x500 的 0x840→0x720 栈顶 0x743、SP+2=0x89D。 */
+            if ((sn++ < 600) && ((s2 == 0x0479) || ((s0 == 0x0743) && (s2 == 0x089D))))
+                pclog("5250: STK720 n=%ld pc=%04X ph=%d serve=%d cmd=%02X "
+                      "r1=%04X r2=%04X r3=%04X r4=%04X\n",
+                      sn, cpu_state.pc, dev->ph, dev->serve, dev->cmdlat,
+                      s0, s2, mem_readw_phys(spx + 4), mem_readw_phys(spx + 6));
+        }
     }
 
     /* 块 0x500 是 8 轮站地址轮询，只有一轮该应答；每轮的第一个数据读
@@ -1484,6 +1489,19 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                         dev->rx_word = dev->word;
                         dev->respond = dev->p500_on;
                         dev->tx_reset = 1;
+                        /* 0xCA0 发的帧里低字节就是命令字节（0x500 是 0x21，
+                           0x440 是 0x61）。块内不写 0x1C0，cmdlat 只能从这里来，
+                           否则 0x840 内部的 0x720 会拿上一块的命令选错帧表。
+                           0x500 自己靠 0x1C0 的轮询语义，不动它的 cmdlat。 */
+                        if (!dev->p500_on) {
+                            uint8_t cmd = (uint8_t) (dev->word & 0xFF);
+                            if (cmd != dev->cmdlat) {
+                                if (getenv("EPOCH5250_CMDSYNC"))
+                                    pclog("5250: CMDSYNC %02X -> %02X (word=%04X)\n",
+                                          dev->cmdlat, cmd, dev->word);
+                                dev->cmdlat = cmd;
+                            }
+                        }
                         pclog("5250: FRAME %04X serve=%d station=%d my=%d\n",
                               dev->word, dev->serve, (dev->word >> 9) & 7,
                               dev->my_station);
