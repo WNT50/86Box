@@ -149,6 +149,7 @@ struct ibm5250_t {
     int      seq64;      /* 0x64 命令的帧序号 */
     int      sub30;      /* 0x30 帧：0=0x840 内部那次，1=0x476 直接调用 */
     int      n720;       /* 0x30 命令下 0x720 完成的握手轮数（ph 1->2 次数） */
+    int      p64;        /* 当前块自己 out 0x1C0=0x64（0x6A0）：cmdlat 不许被线上字节回填 */
     int      fno;        /* frame counter (log only) */
     int      u_bit0;     /* 收帧完成事件位（0x1C1 bit0，ISR 采样后清） */
     int      t13n;       /* 实验：块 0x500 的帧位窗口剩余读次数 */
@@ -1314,6 +1315,10 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                     break;
                 }
                 /* keep the 0x40 reply in place while the subtest is running */
+                /* 0x6A0 自己 out 0x1C0=0x64，块内 0xCA0 线上发的是 0x61(=0x30)，
+                   但 0x840 必须按 0x64 选帧表。p64 是粘滞标志，直到下一块
+                   写自己的 0x1C0 值才清掉。 */
+                dev->p64 = (val == 0x64) ? 1 : 0;
                 int hold = (val == 0x08) && (dev->cmdlat == 0x40) && !dev->done40;
 
                 if (!hold) {
@@ -1610,7 +1615,7 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                            0x440 是 0x61）。块内不写 0x1C0，cmdlat 只能从这里来，
                            否则 0x840 内部的 0x720 会拿上一块的命令选错帧表。
                            0x500 自己靠 0x1C0 的轮询语义，不动它的 cmdlat。 */
-                        if (!dev->p500_on && (dev->word & 1u)) {
+                        if (!dev->p500_on && !dev->p64 && (dev->word & 1u)) {
                             /* nat-1992 3.1.1.3：word 按接收顺序组装，bit0=B15(sync)，
                                所以命令字节在 (word>>1)&0xFF，不是 word&0xFF。 */
                             uint8_t cmd = (uint8_t) ((dev->word >> 1) & 0xFF);
