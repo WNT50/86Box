@@ -503,6 +503,18 @@ ibm5250_in_1c6(ibm5250_t *dev)
     }
     uint8_t ret  = (uint8_t) (base & 0x3f);
 
+    if (getenv("EPOCH5250_STK720") &&
+        ((cpu_state.pc == 0x08A8) || (cpu_state.pc == 0x08B2))) {
+        static long sn = 0;
+        uint32_t spx = ((uint32_t) cpu_state.seg_ss.seg << 4) + SP;
+        if ((sn++ < 400) && (mem_readw_phys(spx) == 0x0743))
+            pclog("5250: STK720 n=%ld pc=%04X ph=%d serve=%d cmd=%02X "
+                  "r1=%04X r2=%04X r3=%04X r4=%04X\n",
+                  sn, cpu_state.pc, dev->ph, dev->serve, dev->cmdlat,
+                  mem_readw_phys(spx), mem_readw_phys(spx + 2),
+                  mem_readw_phys(spx + 4), mem_readw_phys(spx + 6));
+    }
+
     /* 块 0x500 是 8 轮站地址轮询，只有一轮该应答；每轮的第一个数据读
        (0x845, pc=0x8A8) 作为轮次标记。必须放在 serve 检查之前：
        未被寻址的轮次 serve=0，否则计数永远不涨。 */
