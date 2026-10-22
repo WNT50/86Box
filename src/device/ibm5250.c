@@ -702,6 +702,24 @@ ibm5250_in_1c6(ibm5250_t *dev)
     /* 0x440 的第二次 0x720（0x476）：ph 已经在第一次 0x840 里推到 2，
        这里若继续给帧，0x720 会正常收出一条帧、AL 非 0（AH=0x23）。
        让线路整段为 0，搜寻 255 次超时，0x732 ret 时 AL 保持 0。 */
+    /* 实验：0x440 的 0x720 在 ph==2 时 rd 恒为 0，15 位窗口形不成。
+       这里按 pc 推进 rd，数据源沿用 19 槽握手数组（与握手期同构）。 */
+    if (getenv("EPOCH5250_PH2RD") && (dev->cmdlat == 0x30) && (dev->n720 >= 1) &&
+        ((cpu_state.pc == 0x08A7) || (cpu_state.pc == 0x08A8) ||
+         (cpu_state.pc == 0x08B1) || (cpu_state.pc == 0x08B2))) {
+        int h2 = dev->rd % 19;
+        uint8_t r2b = (uint8_t) ((base & 0x3f) | (ibm5250_handshake[h2] ? 0x80 : 0x00));
+        if (dev->rd < 40)
+            dev->rd++;
+        if (getenv("EPOCH5250_PH2LOG") && (dev->rd < 40)) {
+            static int p2n;
+            if (p2n++ < 80)
+                pclog("5250: PH2 rd=%d pc=%04X h2=%d ret=%02X\n",
+                      dev->rd, cpu_state.pc, h2, r2b);
+        }
+        return r2b;
+    }
+
     if (getenv("EPOCH5250_CMD30") && (dev->cmdlat == 0x30)) {
         static int c30;
         if (c30++ < 60)
