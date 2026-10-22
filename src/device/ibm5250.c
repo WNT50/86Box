@@ -1589,8 +1589,10 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                0x8C0 一共被调几次、每次在哪条命令（cmdlat）下。 */
             if (getenv("EPOCH5250_C40N") && (rc1c6 == 0x0A73) && (val == 0x18)) {
                 static int c40n;
-                pclog("5250: C40N #%d cmdlat=%02X pc=%04X serve=%d seq=%d\n",
-                      ++c40n, dev->cmdlat, cpu_state.pc, dev->serve, dev->seq64);
+                uint16_t rc4x = (sp1c6 < 0x1000000) ? mem_readw_phys(sp1c6 + 4) : 0;
+                uint16_t rc6x = (sp1c6 < 0x1000000) ? mem_readw_phys(sp1c6 + 6) : 0;
+                pclog("5250: C40N #%d cmdlat=%02X pc=%04X serve=%d seq=%d rc4=%04X rc6=%04X\n",
+                      ++c40n, dev->cmdlat, cpu_state.pc, dev->serve, dev->seq64, rc4x, rc6x);
             }
             if (getenv("EPOCH5250_W2B") && (cpu_state.pc == 0x08CC))
                 pclog("5250: W2B val=%02X cmdlat=%02X serve=%d seq=%d\n",
