@@ -1493,8 +1493,10 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                            0x440 是 0x61）。块内不写 0x1C0，cmdlat 只能从这里来，
                            否则 0x840 内部的 0x720 会拿上一块的命令选错帧表。
                            0x500 自己靠 0x1C0 的轮询语义，不动它的 cmdlat。 */
-                        if (!dev->p500_on) {
-                            uint8_t cmd = (uint8_t) (dev->word & 0xFF);
+                        if (!dev->p500_on && (dev->word & 1u)) {
+                            /* nat-1992 3.1.1.3：word 按接收顺序组装，bit0=B15(sync)，
+                               所以命令字节在 (word>>1)&0xFF，不是 word&0xFF。 */
+                            uint8_t cmd = (uint8_t) ((dev->word >> 1) & 0xFF);
                             if (cmd != dev->cmdlat) {
                                 if (getenv("EPOCH5250_CMDSYNC"))
                                     pclog("5250: CMDSYNC %02X -> %02X (word=%04X)\n",
@@ -1502,9 +1504,9 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                                 dev->cmdlat = cmd;
                             }
                         }
-                        pclog("5250: FRAME %04X serve=%d station=%d my=%d\n",
+                        pclog("5250: FRAME %04X serve=%d station=%d my=%d data=%02X\n",
                               dev->word, dev->serve, (dev->word >> 9) & 7,
-                              dev->my_station);
+                              dev->my_station, (dev->word >> 1) & 0xFF);
                     }
                 }
             }
