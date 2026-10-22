@@ -1969,8 +1969,13 @@ gdbstub_init(void)
     pclog("GDB Stub: Listening on port %d\n", port);
     thread_create(gdbstub_server_thread, NULL);
 
-    /* Start the CPU paused. */
-    gdbstub_step = GDBSTUB_BREAK;
+    /* Start the CPU paused（默认），GDBSTUB_NOBREAK=1 时直接自由运行：
+       本机这台机器若开机即暂停，PIT/DRAM 刷新仍在推进，continue 后启动时序
+       已被打破（实测 5/5 起不来）。跑批取证必须自由运行，只在单步取证时才暂停。 */
+    if (getenv("GDBSTUB_NOBREAK"))
+        gdbstub_step = GDBSTUB_EXEC;
+    else
+        gdbstub_step = GDBSTUB_BREAK;
 }
 
 void
