@@ -89,7 +89,7 @@ static const ibm5250_frame_desc_t ibm5250_frames[] = {
        自带 data 参数，不受这里影响。 */
     { 0x00, 7, 0, 1, { 0x00, 0x00, 0x00 } },
     /* 0x61：0x440 组要求 BL&0x7C==0x54 -> station=5, p=0, B2=1 */
-    { 0x61, 5, 0, 1, { 0x00, 0x00, 0x00 } },
+    { 0x61, 0, 0, 1, { 0x2A, 0x00, 0x00 } },
 };
 
 static const ibm5250_frame_desc_t *
@@ -417,8 +417,10 @@ ibm5250_frame_bit(ibm5250_t *dev, int k)
         }
     }
     if (dev->cmdlat == 0x61) {
-        if (k == 13) return 1;          /* B2=1 -> BL&0x7C==0x54 */
-        if (k == 15) return 1;          /* B0=1 -> 0x720 最后一次 in 返回 0 */
+        /* emu440.py 枚举结果：data=0x2A、station=0、fill=0b011
+           -> 0x720 返回 bh=0xC0 bl=0x55，四个判据同时成立 */
+        if (k == 14) return 1;
+        if (k == 15) return 1;
     }
     return 0;                                              /* B2..B0 fill */
 }
