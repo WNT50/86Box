@@ -711,20 +711,22 @@ ibm5250_in_1c6(ibm5250_t *dev)
            rd >= 30 = 第二次 0x720（0x476）：整段 0 → 搜寻超时 → AL=0
            位序按 emu440.py 已验证的 15 次 rcr 模型：第 i 次数据读送
            frame_bit(i+1)，紧跟着的时钟读送反相位（half_bit 的 m&1）。 */
+        int is_data = (cpu_state.pc == 0x08A7) || (cpu_state.pc == 0x08A8);
         int fb2 = 0;
-        if (dev->rd < 30) {
-            int k = (dev->rd >> 1) + 1;          /* 1..15 = B14..B0 */
+        if ((dev->rd >= 12) && (dev->rd <= 13)) {
+            fb2 = is_data ? 1 : 0;               /* sync：数据读 1，时钟读反相 0 */
+        } else if ((dev->rd >= 14) && (dev->rd < 44)) {
+            int k = ((dev->rd - 14) >> 1) + 1;   /* 1..15 = B14..B0 */
             int ones = 1;                        /* sync 计入偶校验 */
             for (int i = 0; i < 8; i++) ones += (0x2A >> i) & 1;
             if (k >= 1 && k <= 8)        fb2 = (0x2A >> (k - 1)) & 1;
-            else if (k >= 9 && k <= 11)  fb2 = 0;                   /* station=0 */
-            else if (k == 12)            fb2 = ones & 1;            /* 偶校验位 */
-            else if (k >= 13 && k <= 15) fb2 = (0x03 >> (15 - k)) & 1; /* fill=011, B2..B0 */
-            if ((cpu_state.pc != 0x08A7) && (cpu_state.pc != 0x08A8))
-                fb2 ^= 1;                                           /* 时钟读：反相 */
+            else if (k >= 9 && k <= 11)  fb2 = 0;
+            else if (k == 12)            fb2 = ones & 1;
+            else if (k >= 13 && k <= 15) fb2 = (0x03 >> (15 - k)) & 1;
+            if (!is_data) fb2 ^= 1;              /* 时钟读：反相 */
         }
         uint8_t r2b = (uint8_t) ((base & 0x3f) | (fb2 ? 0x80 : 0x00));
-        if (dev->rd < 40)
+        if (dev->rd < 70)
             dev->rd++;
         if (getenv("EPOCH5250_PH2LOG") && (dev->rd < 40)) {
             static int p2n;
