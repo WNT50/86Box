@@ -1089,7 +1089,14 @@ ibm5250_in_1c6(ibm5250_t *dev)
             /* 一次 call 0x8A0 = 数据读(0x8A7) + 时钟读(0x8B1)，
                只有数据读消耗一个位；时钟读重放同一位，否则 15 次
                循环会吃掉 30 位、校验位错位。 */
-            if (cpu_state.pc == 0x08A8) {
+            if (getenv("EPOCH5250_R4") && (cpu_state.pc >= 0x04B0) && (cpu_state.pc <= 0x04F8))
+                pclog("5250: R4 in pc=%04X poked=%d [4]=%04X\n", cpu_state.pc, dev->poked,
+                      mem_readw_phys(((uint32_t) cpu_state.seg_ds.seg << 4) + 4));
+            if (dev->poked && (cpu_state.pc >= 0x04B0) && (cpu_state.pc <= 0x04F8)) {
+        dev->poked = 0;
+        mem_writew_phys(((uint32_t) cpu_state.seg_ds.seg << 4) + 0x04, 0x1C0);
+    }
+    if (cpu_state.pc == 0x08A8) {
                 /* 0x840 已经把 sync(B15) 消费掉；0x720 的 15 次循环收的是
                    B14..B0，所以位索引从 1 开始（k=1 是数据 bit7）。 */
                 fb = ibm5250_frame_bit(dev, dev->fbit + 1);
@@ -1220,8 +1227,15 @@ ibm5250_in(uint16_t port, void *priv)
     if (cpu_state.pc == 0x08A8) {
         uint32_t d8 = ((uint32_t) cpu_state.seg_ds.seg << 4);
         uint32_t sp8 = ((uint32_t) cpu_state.seg_ss.seg << 4) + cpu_state.regs[4].w;
-        pclog("5250: RX840 [2F]=%02X ret=%04X caller_pc=%04X\n",
-              mem_readb_phys(d8 + 0x2F), mem_readw_phys(sp8 & 0xFFFFF), cpu_state.pc);
+        uint16_t r8 = mem_readw_phys(sp8 & 0xFFFFF);
+        if ((r8 != 0x084E) && (r8 != 0x0848)) {
+            /* 0x854 要求 [0x2F]!=0：块首的 0x544 在我们的重入路径上没跑到，
+               这里在收帧入口补齐（语义＝“本站被轮询”）。 */
+            if (mem_readb_phys(d8 + 0x2F) == 0)
+                mem_writeb_phys(d8 + 0x2F, 1);
+            if (getenv("EPOCH5250_RXLOG"))
+                pclog("5250: RX840 [2F]=%02X ret=%04X\n", mem_readb_phys(d8 + 0x2F), r8);
+        }
     }
     if (cpu_state.pc == 0x02D7 || cpu_state.pc == 0x02DF || cpu_state.pc == 0x02F3 || cpu_state.pc == 0x02FB)
         pclog("5250: ISR in port=%04X pc=%04X clr2b=%d\n", port, cpu_state.pc, ((ibm5250_t *) priv)->clr2b);
@@ -1256,6 +1270,11 @@ ibm5250_in(uint16_t port, void *priv)
 
     if (dev->clr2b && (port == 0x1C0))
         dev->clr2b = 0;
+    /* 0x440 组开始（0x4E1 out 之后）把 [0x4] 还原，别影响这个块 */
+    if (dev->poked && (cpu_state.pc == 0x04E2)) {
+        dev->poked = 0;
+        mem_writew_phys(((uint32_t) cpu_state.seg_ds.seg << 4) + 0x04, 0x1C0);
+    }
     switch (port) {
         case 0x1C1:
             /* bit1|bit6 are the adapter signature the ROM handshake checks */
@@ -1409,6 +1428,7 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                环境没提供，这里在入口补上，同时设备双基址注册以接收 0x100 段。 */
             if (getenv("EPOCH5250_POKE4") && (val == 0x08) && (cpu_state.pc == 0x0508))
                 mem_writew_phys(((uint32_t) cpu_state.seg_ds.seg << 4) + 0x04, 0x0100);
+                dev->poked = 1;
             if (dev->r8_arm) {
                 dev->r8_cnt++;
                 /* 每轮开始（22 次写）都把相位重置回握手态 */
