@@ -137,6 +137,9 @@ struct ibm5250_t {
     int      last18;     /* 上一次 0x1C6 写是 0x18（C40 起始脉冲） */
     int      p5resp;
     uint16_t base;       /* 适配器 I/O 基址（0x1C0 或 0x100） */
+    int      clr2b;     /* 等 ISR 采样落地后再清 [0x2B].bit0/1 */
+    uint32_t ds2b;
+    int      poked;
     int      stat_clear; /* 0x1C2=0xFF 之后的一次状态读要让 bit0/1 为 0（块 0x6A0 0x710） */
     int      lastrd_pc;
     int      p5hi;  /* 上一次 0x1C6 读的 pc（判定 0x840 新一轮起点） */     /* 0x500 被寻址轮：回一条能让 0x720 收下的应答帧 */
@@ -226,6 +229,7 @@ ibm5250_irq_cb(void *priv)
     ibm5250_t *dev = (ibm5250_t *) priv;
 
     dev->timer_armed = 0;
+
 
     if (dev->a7_pend) {
         dev->a7_pend = 0;
@@ -1213,6 +1217,8 @@ ibm5250_in_1c6(ibm5250_t *dev)
 static uint8_t
 ibm5250_in(uint16_t port, void *priv)
 {
+    if (cpu_state.pc == 0x02D7 || cpu_state.pc == 0x02DF || cpu_state.pc == 0x02F3 || cpu_state.pc == 0x02FB)
+        pclog("5250: ISR in port=%04X pc=%04X clr2b=%d\n", port, cpu_state.pc, ((ibm5250_t *) priv)->clr2b);
     ibm5250_t *dev = (ibm5250_t *) priv;
 
     if ((port >= 0x0100) && (port < 0x0120))
@@ -1242,6 +1248,8 @@ ibm5250_in(uint16_t port, void *priv)
         }
     }
 
+    if (dev->clr2b && (port == 0x1C0))
+        dev->clr2b = 0;
     switch (port) {
         case 0x1C1:
             /* bit1|bit6 are the adapter signature the ROM handshake checks */
@@ -1255,6 +1263,8 @@ ibm5250_in(uint16_t port, void *priv)
                （0x4AD 要 6|4、0x616 要 7、0x683 要 2=0、0x8D3 要 6|1、0xA17 要 6|3） */
             {
                 uint8_t u = (uint8_t) (dev->latch | 0xDA);
+                if (dev->clr2b)
+                    u &= (uint8_t) ~0x03;
                 if (dev->stat_clear) {
                     u &= (uint8_t) ~0x03;
                     dev->stat_clear = 0;
@@ -1535,6 +1545,17 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             /* 0x6A0 末尾：写 0x1C1=0xFF 之后要求 (0x1C6 & 3) == 0
                ⇒ 视为复位/静默，停止继续供帧，0x1C6 读回 0 */
             if (val == 0xFF) {
+                pclog("5250: OUT1C2 FF pc=%04X DS=%04X [2B]=%02X\n", cpu_state.pc,
+                      cpu_state.seg_ds.seg, mem_readb_phys(((uint32_t) cpu_state.seg_ds.seg << 4) + 0x2B));
+                dev->clr2b = 1;
+                {
+                    uint32_t dsa3 = ((uint32_t) cpu_state.seg_ds.seg << 4);
+                    mem_writeb_phys(dsa3 + 0x2B,
+                                    (uint8_t) (mem_readb_phys(dsa3 + 0x2B) & ~0x03));
+                    /* 同一次写之后 0x8D3 要 ([0x2A]|0xBD)+1==0 ⇒ bit6|bit1 */
+                    mem_writeb_phys(dsa3 + 0x2A,
+                                    (uint8_t) (mem_readb_phys(dsa3 + 0x2A) | 0x42));
+                }
                 if (getenv("EPOCH5250_SRVRST")) pclog("5250: SRV0 pc=%04X cmd=%02X (1C1=FF)\n", cpu_state.pc, dev->cmdlat);
                 dev->serve = 0;
                 dev->rd    = 0;
@@ -1544,10 +1565,6 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             break;
 
         case 0x1C2:
-            /* 块 0x6A0 的 A5（0x706 out dx,0xFF → 0x70D 读 [0x2B]）要求
-               之后一次状态读的 bit0/bit1 为 0。 */
-            if (val == 0xFF)
-                dev->stat_clear = 1;
             if (getenv("EPOCH5250_POLLOG")) {
                 int nz = 0, k, first = -1;
                 uint32_t dsa = ((uint32_t) cpu_state.seg_ds.seg << 4);
