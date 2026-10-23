@@ -134,6 +134,11 @@ struct ibm5250_t {
     uint8_t  lastval;
     int      rd;         /* read index inside the current phase */
     int      p500_round; /* 块 0x500 的 8 轮轮询计数：只让其中一轮应答 */
+    int      last18;     /* 上一次 0x1C6 写是 0x18（C40 起始脉冲） */
+    int      p5resp;
+    uint16_t base;       /* 适配器 I/O 基址（0x1C0 或 0x100） */
+    int      lastrd_pc;
+    int      p5hi;  /* 上一次 0x1C6 读的 pc（判定 0x840 新一轮起点） */     /* 0x500 被寻址轮：回一条能让 0x720 收下的应答帧 */
     int      p500_mark;  /* 本轮已计数（serve=0 时 rd 不前进，避免重复计） */
     int      p500_on;    /* 已进入块 0x500（0x505=08 + 0x515=00 标记） */
     /* ── 协议线路模型（EPOCH5250_PROTO）：以半位为单位推进，读端口只返回线电平 ── */
@@ -499,6 +504,15 @@ ibm5250_line_level(ibm5250_t *dev)
         if (getenv("EPOCH5250_FRAMEFF") &&
             ((dev->cmdlat == 0x00) || (dev->cmdlat == 0x08)))
             return 1;
+        /* 0x500 被寻址轮（站地址 0x1221）的应答帧：data=0x00、station=111、
+           parity=0、fill=0,0,1（离线枚举：15 位 00000000 111 0 001 经
+           15 次 rcr 得 bx=0x8E01，bl bit0=1（0x55A 计数），且
+           PF(bl)=1 odd != PF(bh)=4~ 的偶数 ⇒ 0x820 不翻位、0x75C 过）。真实终端的应答帧
+           内容还没从手册核出来，这里按两条判据反解。 */
+        if (dev->p5resp && dev->p500_on) {
+            static const uint8_t p5b[16] = { 0,0,0,0,0,0,0,0,0, 1,1,1,0, 0,0,0 };
+            return (uint8_t) (p5b[bi + 1] ^ (m & 1));
+        }
         bit = ibm5250_frame_bit(dev, bi + 1);
         return bit ^ (m & 1);
     }
@@ -620,20 +634,49 @@ ibm5250_in_1c6(ibm5250_t *dev)
             if (rcb == 0x0743)
                 pclog("5250: BIT n=%02d lvl=%d cmd=%02X\n", dev->txpos, ibm5250_line_level(dev), dev->cmdlat);
         }
-        if (dev->p500_on && (dev->txpos == 0)) {
-            dev->p500_round++;                 /* 显式轮次：每轮第一个读 */
-            if (dev->p500_round > 8) {
+        /* 0x500 的一轮 = 一次 0x840：它的同步搜寻循环头在 pc=0x0849。
+           上一读还在搜寻/移位（0x0849/0x08A8/0x08B2）时不动，否则就是
+           新的一轮开始 —— 用 51 读窗口对齐会与客人的轮次错拍。 */
+        if (dev->p500_on && (cpu_state.pc == 0x0849) &&
+            (dev->lastrd_pc != 0x0849) && (dev->lastrd_pc != 0x08A8) &&
+            (dev->lastrd_pc != 0x08B2)) {
+            dev->txpos = 0;
+            dev->p500_round++;
+        }
+        dev->lastrd_pc = cpu_state.pc;
+        if (dev->p500_on && (dev->txpos == 0) && (cpu_state.pc != 0x0849)) {
+            dev->p500_round++;                 /* 51 读窗口兜底（非 0x840 起点） */
+            if (dev->p500_round > 9) {
                 dev->p500_on = 0;              /* 8 轮轮询结束 */
                 dev->txpos   = 0;
                 return (uint8_t) (base & 0x3f);
             }
         }
-        dev->respond = dev->p500_on && (dev->p500_round <= 3);   /* 实测 8 轮里应答 3 轮才对得上 [28] */
+        /* 应答窗口：p5resp 命中的那一轮（0x580 要求它是第 8 轮，[0x30]==7），
+           再加上前 3 轮兼容旧路径。 */
+        dev->respond = dev->p500_on && (dev->p5resp || (dev->p500_round <= 3));
         /* 一轮 = 0x840 的 19 读 + sync + 15 位×2 + 1 = 51 个读；
            靠读计数闭环，不依赖客人写到哪个端口。 */
         if (dev->p500_on && (dev->txpos >= 51))
             dev->txpos = 0;
         lvl = ibm5250_line_level(dev);
+        if (getenv("EPOCH5250_P5R") && (cpu_state.pc == 0x08A8)) {
+            static int r5;
+            if (r5++ < 90)
+            {
+                uint32_t d3 = ((uint32_t) cpu_state.seg_ds.seg << 4);
+                pclog("5250: P5R tx=%d round=%d resp=%d serve=%d p5r=%d lvl=%d [26]=%04X [28]=%02X [2F]=%02X\n",
+                      dev->txpos, dev->p500_round, dev->respond, dev->serve, dev->p5resp,
+                      ibm5250_line_level(dev),
+                      mem_readw_phys(d3 + 0x26), mem_readb_phys(d3 + 0x28), mem_readb_phys(d3 + 0x2F));
+            }
+        }
+        if (getenv("EPOCH5250_P500SHIFT") && dev->serve &&
+            ((cpu_state.pc == 0x08A8) || (cpu_state.pc == 0x08B2))) {
+            static int sn5;
+            if (sn5++ < 130)
+                pclog("5250: P5S n=%d pc=%04X lvl=%d\n", dev->txpos, cpu_state.pc, lvl);
+        }
         dev->txpos++;
         if (dev->txpos >= 19)
             dev->tx_reset = 0;
@@ -1146,6 +1189,7 @@ ibm5250_in_1c6(ibm5250_t *dev)
             if (dev->cmdlat == 0x64) {
                 dev->seq64 = (dev->seq64 + 1) & 7;
                 if (dev->seq64 >= 3) {
+                    if (getenv("EPOCH5250_SRVRST")) pclog("5250: SRV0 pc=%04X cmd=%02X (三帧发完)\n", cpu_state.pc, dev->cmdlat);
                     dev->serve = 0;      /* 三帧发完再静默 */
                     /* 0x64 三帧结束：第二次采样 bit1=0（0x70D 要 [0x2B]&3==0） */
                     dev->ready = 0;
@@ -1156,6 +1200,7 @@ ibm5250_in_1c6(ibm5250_t *dev)
                     }
                 }
             } else if ((dev->cmdlat == 0x40) || (dev->cmdlat == 0xAA)) {
+                if (getenv("EPOCH5250_SRVRST")) pclog("5250: SRV0 pc=%04X cmd=%02X (40/AA)\n", cpu_state.pc, dev->cmdlat);
                 dev->serve = 0;
             }
         }
@@ -1168,6 +1213,9 @@ static uint8_t
 ibm5250_in(uint16_t port, void *priv)
 {
     ibm5250_t *dev = (ibm5250_t *) priv;
+
+    if ((port >= 0x0100) && (port < 0x0120))
+        port = (uint16_t) (0x1C0 + (port - 0x0100));
 
     /* HS 取证：块 0x500 的 0x8A0 数据读（pc=0x8A8）看握手表/ab0 实际返回。 */
     if (getenv("EPOCH5250_HS") && (cpu_state.pc == 0x8A8)) {
@@ -1244,6 +1292,9 @@ static void
 ibm5250_out(uint16_t port, uint8_t val, void *priv)
 {
     ibm5250_t *dev = (ibm5250_t *) priv;
+
+    if ((port >= 0x0100) && (port < 0x0120))
+        port = (uint16_t) (0x1C0 + (port - 0x0100));
 
     dev->lastport = (uint8_t) (port & 0xFF);
     dev->lastval  = val;
@@ -1326,6 +1377,12 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             break;
 
         case 0x1C0:
+            if (getenv("EPOCH5250_P5R") && (val == 0x08)) {
+                static int e5;
+                if (e5++ < 24)
+                    pclog("5250: W1C0 08 pc=%04X round=%d on=%d tsc=%08X\n",
+                          cpu_state.pc, dev->p500_round, dev->p500_on, (unsigned) tsc);
+            }
             /* 块 0x500 的第一条写（0x505 out dx,0x08）：记录入口状态 */
             if (getenv("EPOCH5250_ENTRY") && (cpu_state.pc == 0x0508)) {
                 uint32_t dsa = ((uint32_t) cpu_state.seg_ds.seg << 4);
@@ -1469,6 +1526,7 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             /* 0x6A0 末尾：写 0x1C1=0xFF 之后要求 (0x1C6 & 3) == 0
                ⇒ 视为复位/静默，停止继续供帧，0x1C6 读回 0 */
             if (val == 0xFF) {
+                if (getenv("EPOCH5250_SRVRST")) pclog("5250: SRV0 pc=%04X cmd=%02X (1C1=FF)\n", cpu_state.pc, dev->cmdlat);
                 dev->serve = 0;
                 dev->rd    = 0;
                 dev->ph    = 0;
@@ -1638,6 +1696,45 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             /* 0x8C0 每次被调用都会先走 0xC40 的起始序列（5 个 biphase 1，
                首拍 pc=0x0A91 val=0x18 rc1=0x0A73）。数这些事件就能知道
                0x8C0 一共被调几次、每次在哪条命令（cmdlat）下。 */
+            if (getenv("EPOCH5250_W1C6") && dev->p500_on) {
+                static int w5;
+                if (w5++ < 70)
+                    pclog("5250: W1C6 val=%02X pc=%04X rc=%04X pcnt=%d hist=%04X\n",
+                          val, cpu_state.pc, rc1c6, dev->pcnt, dev->hist);
+            }
+            /* 0x500 组的第二轮可能跳过 0x1C0 入口直接进 0x547，p500_on 因此
+               为 0、serve 永远不置 -> 计数 0 -> AH=0x13。这里按调用链识别：
+               C40 起始拍时栈上第 4 个字是 0x054D（0x54A call 0xCA0 的返址）。 */
+            if ((rc1c6 == 0x0A73) && (sp1c6 < 0x1000000)) {
+                uint16_t r6 = mem_readw_phys(sp1c6 + 8);
+                if (r6 == 0x054D) {
+                    if (!dev->p500_on || (dev->p500_round > 8)) {
+                        dev->p500_on    = 1;
+                        dev->p500_round = 0;
+                        dev->txpos      = 0;
+                    }
+                }
+            }
+            if (getenv("EPOCH5250_P5R") && (rc1c6 == 0x0A73)) {
+                static int s7;
+                if ((val & 0x10) && !dev->p5hi && (sp1c6 < 0x1000000) && (s7++ < 30))
+                    pclog("5250: STK5 on=%d 2=%04X 4=%04X 6=%04X 8=%04X A=%04X C=%04X\n",
+                          dev->p500_on, mem_readw_phys(sp1c6+2), mem_readw_phys(sp1c6+4),
+                          mem_readw_phys(sp1c6+6), mem_readw_phys(sp1c6+8),
+                          mem_readw_phys(sp1c6+10), mem_readw_phys(sp1c6+12));
+                dev->p5hi = (val & 0x10) ? 1 : 0;
+            }
+            if (getenv("EPOCH5250_P5R") && (rc1c6 == 0x0A73)) {
+                static int s6;
+                if ((val & 0x10) && !dev->p5hi) {
+                    uint32_t d6 = ((uint32_t) cpu_state.seg_ds.seg << 4);
+                    if (s6++ < 40)
+                        pclog("5250: SEND pc=%04X val=%02X on=%d [28]=%02X [29]=%02X [2F]=%02X\n",
+                              cpu_state.pc, val, dev->p500_on, mem_readb_phys(d6 + 0x28),
+                              mem_readb_phys(d6 + 0x29), mem_readb_phys(d6 + 0x2F));
+                }
+                dev->p5hi = (val & 0x10) ? 1 : 0;
+            }
             if (getenv("EPOCH5250_C40N") && (rc1c6 == 0x0A73) && (val == 0x18)) {
                 static int c40n;
                 uint16_t rc4x = (sp1c6 < 0x1000000) ? mem_readw_phys(sp1c6 + 4) : 0;
@@ -1695,12 +1792,13 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             /* 0xC40 起始序列首拍（val=0x18 即 [0x31]|0x10，调用点 0x0A73）：
                每次 0xCA0 发送的协议边界，帧解码器必须在这里重新对齐，否则
                上一块 19 拍握手的 hist/pcnt 残留会把命令字节解成噪声。 */
-            if ((val == 0x18) && (rc1c6 == 0x0A73)) {
+            if ((val == 0x18) && (rc1c6 == 0x0A73) && !dev->last18) {
                 dev->hist    = 0;
                 dev->inframe = 0;
                 dev->pcnt    = 0;
                 dev->word    = 0;
             }
+            dev->last18 = (val == 0x18) ? 1 : 0;
 
             /* 0xCA0 在每轮轮询前先发前导+命令帧；上一轮 0x840/0x720 已经把
                txpos 推到 19 以上，所以这里就是协议上的轮次边界。 */
@@ -1732,13 +1830,31 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                         dev->inframe = 0;
                         /* the 0x500 subtest polls eight stations and only
                            answers the one whose address word is 0x1221 */
-                        if (getenv("EPOCH5250_NODS")) {
+                        /* 0x580 之后要求 [0x30]==7：成功轮次必须是第 8 轮
+                           （0x568 把 ch 写进 [0x30]，0x586 与 7 比较）。
+                           实测按 word==0x1221 应答落在第 2 轮（[0x30]=01）。 */
+                        if (dev->p500_on)
+                            dev->serve = (dev->word == 0x1E21);   /* 第 8 轮：0x580 要求 [0x30]==7 */
+                        else if (getenv("EPOCH5250_NODS"))
                             dev->serve = (dev->word == 0x1221);
-                        } else {
+                        else {
                             uint32_t dsa = ((uint32_t) cpu_state.seg_ds.seg << 4) + 0x2F;
                             dev->serve = (dsa < 0x1000000)
                                        ? ((mem_readb_phys(dsa) == 1) ? (dev->word == 0x1221) : 1)
                                        : 1;
+                        }
+                        dev->p5resp = dev->p500_on && (dev->word == 0x1E21);
+                        if (getenv("EPOCH5250_P5R") && dev->p500_on)
+                            { uint32_t d4 = ((uint32_t) cpu_state.seg_ds.seg << 4);
+                              pclog("5250: P5RESP %d word=%04X [26]=%04X [28]=%02X [29]=%02X\n",
+                                    dev->p5resp, dev->word, mem_readw_phys(d4 + 0x26),
+                                    mem_readb_phys(d4 + 0x28), mem_readb_phys(d4 + 0x29)); }
+                        if (getenv("EPOCH5250_W1C6") && dev->p500_on) {
+                            uint32_t ds2 = ((uint32_t) cpu_state.seg_ds.seg << 4) + 0x2F;
+                            pclog("5250: P5W word=%04X serve=%d [2F]=%02X DS=%04X ds=%04X cmdlat=%02X round=%d\n",
+                                  dev->word, dev->serve,
+                                  (ds2 < 0x1000000) ? mem_readb_phys(ds2) : 0xFF,
+                                  cpu_state.seg_ds.seg, (unsigned) ds2, dev->cmdlat, dev->p500_round);
                         }
                         dev->rx_word = dev->word;
                         dev->respond = dev->p500_on;
@@ -1825,6 +1941,10 @@ ibm5250_init(int irq, ibm5250_irq_t irq_raise, void *irq_priv,
     if (dev == NULL)
         return NULL;
 
+    {
+        const char *eb = getenv("EPOCH5250_BASE");
+        dev->base = eb ? (uint16_t) strtol(eb, NULL, 0) : 0x1C0;
+    }
     dev->irq       = irq;
     dev->irq_raise = irq_raise;
     dev->irq_priv  = irq_priv;
@@ -1836,7 +1956,7 @@ ibm5250_init(int irq, ibm5250_irq_t irq_raise, void *irq_priv,
     timer_add(&dev->timer, ibm5250_irq_cb, dev, 0);
 
     for (int i = 0; i < (int) (sizeof(ibm5250_ports) / sizeof(ibm5250_ports[0])); i++)
-        io_sethandler(ibm5250_ports[i], 0x0001,
+        io_sethandler((uint16_t) (dev->base + (ibm5250_ports[i] - 0x1C0)), 0x0001,
                       ibm5250_in, NULL, NULL, ibm5250_out, NULL, NULL, dev);
 
     pclog("5250: adapter initialised (irq=%d, %d ports)\n",

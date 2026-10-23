@@ -2137,8 +2137,9 @@ epoch_misc_out(uint16_t port, uint8_t val, void *priv)
     if ((port == 0x1B0) && getenv("EPOCH5250_PCLOG")) {
         uint32_t dsa = ((uint32_t) cpu_state.seg_ds.seg << 4);
         uint32_t spx = ((uint32_t) cpu_state.seg_ss.seg << 4) + SP;
-        pclog("3477: OUT1B0 %02X ax=%04X pc=%04X:%04X [2F]=%02X [28]=%02X [26]=%02X [27]=%02X [30]=%02X stk=%04X/%04X/%04X/%04X\n", val, AX,
-              cs >> 4, cpu_state.pc,
+        pclog("3477: OUT1B0 %02X ax=%04X pc=%04X:%04X DS=%04X [4]=%04X [2F]=%02X [28]=%02X [26]=%02X [27]=%02X [30]=%02X stk=%04X/%04X/%04X/%04X\n", val, AX,
+              cs >> 4, cpu_state.pc, cpu_state.seg_ds.seg,
+              mem_readw_phys(dsa + 0x04),
               mem_readb_phys(dsa + 0x2F), mem_readb_phys(dsa + 0x28),
               mem_readb_phys(dsa + 0x26), mem_readb_phys(dsa + 0x27),
               mem_readb_phys(dsa + 0x30),
