@@ -171,6 +171,7 @@ struct ibm5250_t {
     void    *irq_clear_priv;
     int      irq_level;
     int      ready;
+    int      win_irq;      /* 0x8C0 判据链还要一次中断采样（块 0x7A0） */
     int      w42;
     int      bit0;
     int      c3;          /* 0x1C3 写入值（块 0xAB0 写 0x08） */
@@ -222,6 +223,14 @@ ibm5250_irq_cb(void *priv)
 
     if (dev->a7_pend) {
         dev->a7_pend = 0;
+        if (getenv("EPOCH5250_PCLOG"))
+            pclog("5250: A7PEND raise pc=%04X lvl=%d cmd=%02X\n",
+                  cpu_state.pc, dev->irq_level, dev->cmdlat);
+        /* 先真正拉低再拉高：上一轮中断若没走 0x722，8259 的 IRQ5 还在服务中，
+           直接 picint 不会产生新的边沿（0x7A0 的重武装也是这么做的）。 */
+        if (dev->irq_clear != NULL)
+            dev->irq_clear(dev->irq_clear_priv);
+        dev->irq_level = 1;
         if (dev->irq_raise != NULL)
             dev->irq_raise(dev->irq_priv);
         return;
@@ -246,7 +255,7 @@ ibm5250_irq_cb(void *priv)
     if (dev->irq_raise == NULL || dev->irq_level) {
         /* 线还高（等客人写 0x722 应答）：继续等窗口，别让轮询断掉。 */
         if (dev->irq_raise != NULL && getenv("EPOCH5250_LEVELIRQ") &&
-            ((dev->cmdlat == 0x00) || (dev->cmdlat == 0x10)) &&
+            ((dev->cmdlat == 0x00) || (dev->cmdlat == 0x10) || dev->win_irq) &&
             (dev->c3 != 0x08) && (dev->poll_left > 0)) {
             dev->timer_armed = 1;
             timer_set_delay_u64(&dev->timer, 1 * TIMER_USEC);
@@ -286,7 +295,7 @@ ibm5250_irq_cb(void *priv)
 
     /* 0x8C0 可能被同一块多次调用：保持窗口轮询，直到客人换命令。 */
     if (getenv("EPOCH5250_LEVELIRQ") &&
-        ((dev->cmdlat == 0x00) || (dev->cmdlat == 0x10)) &&
+        ((dev->cmdlat == 0x00) || (dev->cmdlat == 0x10) || dev->win_irq) &&
         (dev->c3 != 0x08)) {
         dev->poll_left = 2000;
         dev->timer_armed = 1;
@@ -455,6 +464,12 @@ static int
 ibm5250_line_level(ibm5250_t *dev)
 {
     int n = dev->txpos;
+
+    /* 实验（doc：槽位 0 起算 R=0x1C03 奇数→校验翻位；槽位 1 起算 R=0x0E01
+       偶数→通过）：把 sync 之后的整段（sync + 15 位）统一后移一个位槽，即
+       2 个半位，客人的 15 位窗口就从槽位 1 起算。 */
+    if (getenv("EPOCH5250_P500S2") && (n >= 19))
+        n -= 2;
 
     if (n < 3)
         return 0;
@@ -1333,6 +1348,10 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             /* 协议表：每个测试块都先写一条命令（0x00/0x08/0x10/0x40/0x64/0xAA…），
                之前只放行 0x40/0x08/0x64，导致 0x7A0 起步就被忽略。 */
             if (val != 0xFF) {
+                /* 只有块 0x7A0 自己的 0x1C0 写（pc≈0x7C6）才保留 0x8C0 链的
+                   中断窗口标记；别的块一写命令就清掉，避免轮询串块。 */
+                if ((cpu_state.pc < 0x07C0) || (cpu_state.pc > 0x07C8))
+                    dev->win_irq = 0;
                 /* 相位黏着（实验）：已经进入帧相位时，位脉冲写不得把设备
                    打回握手态，否则 0xCA0 每轮的 22 次 0x1C0 写会让
                    ph 永远停在 1，0x720 拿不到任何帧。 */
@@ -1410,6 +1429,7 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                [0x2B]&2（要 bit1=1）——按同一响应窗口投一次中断 */
             if ((val == 0x00) && (cpu_state.pc == 0x7C6) &&
                 getenv("EPOCH5250_LEVELIRQ") && dev->irq_raise) {
+                dev->win_irq     = 1;
                 dev->ready       = 1;
                 /* 上一次（0x64）的中断可能还挂在 8259 上：先真正拉低，
                    否则再拉高没有边沿，ISR 不会进。 */
@@ -1485,6 +1505,16 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                                   (cpu_state.pc == 0x05D6))) {
                 dev->ready = 1;
                 dev->ph    = 2;
+                /* 块 0x5B0 的 A2（0x5F2）要求 [0x2A]&0x80，而 [0x2A] 只能由
+                   ISR 采样 0x1C1 写回；紧随其后的 0x5DD call 0xCA0 会先清 [0x2A]。
+                   在这个写点后 ~150µs 投一次中断：落在 0xCA0 之后（清已完成）、
+                   0x5F2 判据之前。A1 的 0x1C6 读点不受影响（ISR 读不消耗位）。 */
+                if (!dev->a7_pend && (dev->irq_raise != NULL) &&
+                    getenv("EPOCH5250_LEVELIRQ")) {
+                    dev->a7_pend     = 1;
+                    dev->timer_armed = 1;
+                    timer_set_delay_u64(&dev->timer, 150 * TIMER_USEC);
+                }
             }
 
             /* 块 0x920 第二阶段：0x999 写 1C2=04 之后紧跟 0x9A2 call 0x840，
@@ -1527,6 +1557,20 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                 dev->fseq    = 0;
                 dev->b1_pulse = 1;
             }
+            /* 块 0xBA0 的 0x84 判据（0xBED）要求 [0x2A] 同时带 0x40|0x08，而
+               [0x2A] 只能由 ISR 采样 0x1C1 写回；0xCA0 的 0xC40 又会把它清零。
+               在 0x1C2=0x0A 写点后 ~300µs 投一次延迟中断：落点必在 0xC40 之后、
+               0xBED 之前。注意不能用 cmdlat==0x00 门控——0xAB0 的帧会把 cmdlat
+               解成 0x10。 */
+            if ((val == 0x0A) && (cpu_state.pc >= 0x0BA0) && (cpu_state.pc <= 0x0BB0) &&
+                (dev->irq_raise != NULL) && getenv("EPOCH5250_LEVELIRQ")) {
+                dev->a7_pend     = 1;
+                dev->timer_armed = 1;
+                if (getenv("EPOCH5250_PCLOG"))
+                    pclog("5250: BA0 arm irq 300us pc=%04X lvl=%d cmd=%02X\n",
+                          cpu_state.pc, dev->irq_level, dev->cmdlat);
+                timer_set_delay_u64(&dev->timer, 300 * TIMER_USEC);
+            }
             if (val & 0x04) {
                 dev->phase = dev->w42 ? 0 : 1;
                 dev->w42   = 0;
@@ -1562,8 +1606,15 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                 dev->b1 = 1;
 
             /* 块 0x7A0 每次写 0x1C2 之后都会进 0x8C0：每次都重新武装
-               中断窗口，否则第二次调用没有中断、[0x2B] 被 0xCA0 清掉。 */
-            if ((dev->cmdlat == 0x00) && getenv("EPOCH5250_LEVELIRQ") &&
+               中断窗口，否则第二次调用没有中断、[0x2B] 被 0xCA0 清掉。
+               注意 0xCA0 发帧会把 cmdlat 覆写成帧里的命令字节（0x1203→0x01），
+               所以这里不能只看 cmdlat==0x00，要看块 0x7A0 的窗口标记。 */
+            if (((cpu_state.pc >= 0x07C0) && (cpu_state.pc <= 0x0812)) ||
+                ((cpu_state.pc >= 0x0B6F) && (cpu_state.pc <= 0x0B95)))
+                dev->win_irq = 1;
+            else
+                dev->win_irq = 0;   /* 离开 0x8C0 的两个调用块：别把窗口轮询带进下一块 */
+            if (dev->win_irq && getenv("EPOCH5250_LEVELIRQ") &&
                 dev->irq_raise) {
                 dev->ready = 1;
                 if (dev->irq_clear != NULL)
@@ -1609,6 +1660,7 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             uint16_t rc4   = (sp1c6 < 0x1000000) ? mem_readw_phys(sp1c6 + 4) : 0;
             uint16_t rc6   = (sp1c6 < 0x1000000) ? mem_readw_phys(sp1c6 + 6) : 0;
             uint16_t rc8   = (sp1c6 < 0x1000000) ? mem_readw_phys(sp1c6 + 8) : 0;
+            uint16_t rcA   = (sp1c6 < 0x1000000) ? mem_readw_phys(sp1c6 + 10) : 0;
             /* 只有 0x840/0x720 的“读”会经 0x8A0 调 0xA73（返回地址
                0x8A3/0x8AD/0x8B4）；其余写脉冲都是 0xCA0 的发送。 */
             int from_tx = (rc1c6 != 0x08A3) && (rc1c6 != 0x08AD) &&
@@ -1620,6 +1672,34 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                     pclog("5250: TXLOG %03d val=%02X rc1=%04X hist=%03X inf=%d pcnt=%d word=%04X cmd=%02X\n",
                           tn++, val, rc1c6, dev->hist, dev->inframe, dev->pcnt,
                           dev->word, dev->cmdlat);
+            }
+
+            /* 块 0x920：0x93E call 0xC40 之后紧跟 16 位发送（0xC70），0x944 sti，
+               0x952 检查 [0x2A]&1。在起始序列（val 是 [0x31]|0x10，此块为 0x10，
+               不是 0x7A0 的 0x18）任一拍就置"发送完成"事件位并拉线：中断会等到
+               0x944 的 sti 才进，ISR 采样 0x1C1 就带 bit0。栈返回地址 0x0941/
+               0x0944 锁定块，避免影响其它同样调 0xC40 的路径。 */
+            if ((rc4 == 0x0941) || (rc6 == 0x0941) || (rc8 == 0x0941) ||
+                (rc4 == 0x0944) || (rc6 == 0x0944) || (rc8 == 0x0944)) {
+                /* 每一拍都补事件位（0x720 收帧也会置它，会被 ISR 采样清掉）；
+                   线只武装一次，避免把 30µs 定时器反复推后。 */
+                dev->u_bit0 = 1;
+                if (!dev->a7_pend && (dev->irq_raise != NULL) &&
+                    getenv("EPOCH5250_LEVELIRQ")) {
+                    dev->a7_pend     = 1;
+                    dev->timer_armed = 1;
+                    timer_set_delay_u64(&dev->timer, 30 * TIMER_USEC);
+                }
+            }
+
+            /* 0xC40 起始序列首拍（val=0x18 即 [0x31]|0x10，调用点 0x0A73）：
+               每次 0xCA0 发送的协议边界，帧解码器必须在这里重新对齐，否则
+               上一块 19 拍握手的 hist/pcnt 残留会把命令字节解成噪声。 */
+            if ((val == 0x18) && (rc1c6 == 0x0A73)) {
+                dev->hist    = 0;
+                dev->inframe = 0;
+                dev->pcnt    = 0;
+                dev->word    = 0;
             }
 
             /* 0xCA0 在每轮轮询前先发前导+命令帧；上一轮 0x840/0x720 已经把
