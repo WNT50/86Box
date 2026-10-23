@@ -1217,6 +1217,12 @@ ibm5250_in_1c6(ibm5250_t *dev)
 static uint8_t
 ibm5250_in(uint16_t port, void *priv)
 {
+    if (cpu_state.pc == 0x08A8) {
+        uint32_t d8 = ((uint32_t) cpu_state.seg_ds.seg << 4);
+        uint32_t sp8 = ((uint32_t) cpu_state.seg_ss.seg << 4) + cpu_state.regs[4].w;
+        pclog("5250: RX840 [2F]=%02X ret=%04X caller_pc=%04X\n",
+              mem_readb_phys(d8 + 0x2F), mem_readw_phys(sp8 & 0xFFFFF), cpu_state.pc);
+    }
     if (cpu_state.pc == 0x02D7 || cpu_state.pc == 0x02DF || cpu_state.pc == 0x02F3 || cpu_state.pc == 0x02FB)
         pclog("5250: ISR in port=%04X pc=%04X clr2b=%d\n", port, cpu_state.pc, ((ibm5250_t *) priv)->clr2b);
     ibm5250_t *dev = (ibm5250_t *) priv;
@@ -1840,6 +1846,14 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                                唯一协议边界（块内不写 0x1C0）。 */
                             dev->txpos = 0;
                             dev->p500_round++;
+                            if (dev->p500_round == 1) {
+                                /* 0x544 的 [0x2F]=1：0x854 判据要求轮询期间该标记为 1 */
+                                uint32_t dp = ((uint32_t) cpu_state.seg_ds.seg << 4) + 0x2F;
+                                mem_writeb_phys(dp, 1);
+                            }
+                            /* 其它块的轮询循环同样要求 [0x2F]!=0（0x840 的 0x854） */
+                            if (!dev->p500_on)
+                                mem_writeb_phys(((uint32_t) cpu_state.seg_ds.seg << 4) + 0x2F, 1);
                         }
                     }
                 } else {
