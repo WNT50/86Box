@@ -137,6 +137,7 @@ struct ibm5250_t {
     int      last18;     /* 上一次 0x1C6 写是 0x18（C40 起始脉冲） */
     int      p5resp;
     uint16_t base;       /* 适配器 I/O 基址（0x1C0 或 0x100） */
+    uint16_t tx_addr;   /* 0xCA0 发送时 BX：本块寻址的站/地址字节 */
     int      clr2b;     /* 等 ISR 采样落地后再清 [0x2B].bit0/1 */
     uint32_t ds2b;
     int      poked;
@@ -1228,11 +1229,10 @@ ibm5250_in(uint16_t port, void *priv)
         uint32_t d8 = ((uint32_t) cpu_state.seg_ds.seg << 4);
         uint32_t sp8 = ((uint32_t) cpu_state.seg_ss.seg << 4) + cpu_state.regs[4].w;
         uint16_t r8 = mem_readw_phys(sp8 & 0xFFFFF);
+        /* 0x854 要求 [0x2F]!=0：块首 0x544 在重入路径上没跑到，收帧入口一律补齐 */
+        if (mem_readb_phys(d8 + 0x2F) == 0)
+            mem_writeb_phys(d8 + 0x2F, 1);
         if ((r8 != 0x084E) && (r8 != 0x0848)) {
-            /* 0x854 要求 [0x2F]!=0：块首的 0x544 在我们的重入路径上没跑到，
-               这里在收帧入口补齐（语义＝“本站被轮询”）。 */
-            if (mem_readb_phys(d8 + 0x2F) == 0)
-                mem_writeb_phys(d8 + 0x2F, 1);
             if (getenv("EPOCH5250_RXLOG"))
                 pclog("5250: RX840 [2F]=%02X ret=%04X\n", mem_readb_phys(d8 + 0x2F), r8);
         }
@@ -1865,6 +1865,7 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                             /* 0xCA0 每次轮询先发前导，再发命令帧：这是新一轮的
                                唯一协议边界（块内不写 0x1C0）。 */
                             dev->txpos = 0;
+                            dev->tx_addr = cpu_state.regs[3].w;   /* 本帧发送时 BX（块寻址字节） */
                             dev->p500_round++;
                             if (dev->p500_round == 1) {
                                 /* 0x544 的 [0x2F]=1：0x854 判据要求轮询期间该标记为 1 */
@@ -1895,11 +1896,16 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                             dev->serve = (dev->word == 0x1E21);   /* 第 8 轮：0x580 要求 [0x30]==7 */
                         else if (getenv("EPOCH5250_NODS"))
                             dev->serve = (dev->word == 0x1221);
-                        else {
-                            uint32_t dsa = ((uint32_t) cpu_state.seg_ds.seg << 4) + 0x2F;
-                            dev->serve = (dsa < 0x1000000)
-                                       ? ((mem_readb_phys(dsa) == 1) ? (dev->word == 0x1221) : 1)
-                                       : 1;
+                        else if (dev->tx_addr == 0x21)
+                            dev->serve = (dev->word == 0x1E21);   /* 0x440 的 0x2A 项 */
+                        else if (dev->tx_addr == 0x01)
+                            dev->serve = (dev->word == 0x1221);   /* 0xAB0 轮询站 1 */
+                        else
+                            dev->serve = 1;   /* 其它块一律应答 */
+                        if (dev->serve) {
+                            uint32_t d2f = ((uint32_t) cpu_state.seg_ds.seg << 4) + 0x2F;
+                            if (mem_readb_phys(d2f) == 0)
+                                mem_writeb_phys(d2f, 1);
                         }
                         dev->p5resp = dev->p500_on && (dev->word == 0x1E21);
                         if (getenv("EPOCH5250_P5R") && dev->p500_on)
