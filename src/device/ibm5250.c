@@ -1263,12 +1263,6 @@ ibm5250_in(uint16_t port, void *priv)
                （0x4AD 要 6|4、0x616 要 7、0x683 要 2=0、0x8D3 要 6|1、0xA17 要 6|3） */
             {
                 uint8_t u = (uint8_t) (dev->latch | 0xDA);
-                if (dev->clr2b)
-                    u &= (uint8_t) ~0x03;
-                if (dev->stat_clear) {
-                    u &= (uint8_t) ~0x03;
-                    dev->stat_clear = 0;
-                }
                 /* 只在 A3/A4 的回读点生效：0x616 读要 bit7=1、0x62B 读要 bit7=0。
                    全局套用会破坏 ISR(0x2D6) 采样（A2 要 [0x2A]&0x80）。 */
                 if ((cpu_state.pc == 0x061A) || (cpu_state.pc == 0x061B))
