@@ -47,6 +47,19 @@
 static int ibm5250_is_a1_sample(uint16_t pc);
 static int ibm5250_is_b1_pulse_pc(uint16_t pc);
 
+
+/* 0x840 的两个读点类别：1=数据读(0x8A7/0x8A8)，2=时钟读(0x8B1/0x8B2)，
+   0=其它读（块内 0x71 检查等，不推进序列）。 */
+static int
+ibm5250_read_kind(uint16_t pc)
+{
+    if ((pc == 0x08A7) || (pc == 0x08A8))
+        return 1;
+    if ((pc == 0x08B1) || (pc == 0x08B2))
+        return 2;
+    return 0;
+}
+
 /* 块 0x5B0 的 A1 读点（0x1C6 必须 bit1=1）。 */
 static int
 ibm5250_is_a1_sample(uint16_t pc)
@@ -514,8 +527,7 @@ ibm5250_in_1c6(ibm5250_t *dev)
                时，ISR 采样带上 bit2；其它情形仍是 0x4A。 */
             return (uint8_t) (0x4A | (dev->c1_ff ? 0x00 : 0x04));
 
-        if ((cpu_state.pc != 0x08A7) && (cpu_state.pc != 0x08A8) &&
-            (cpu_state.pc != 0x08B1) && (cpu_state.pc != 0x08B2))
+        if (ibm5250_read_kind(cpu_state.pc) == 0)
             return (uint8_t) (base & 0x3f);
 
         /* 实测读序：rd=0 是 0x8A7 的数据读（0x84E 取它的 CF），
@@ -537,7 +549,7 @@ ibm5250_in_1c6(ibm5250_t *dev)
                                        (mem_readb_phys(ssp + 3) << 8));
             uint16_t r3  = (uint16_t) (mem_readb_phys(ssp + 4) |
                                        (mem_readb_phys(ssp + 5) << 8));
-            int is_data  = ((cpu_state.pc == 0x08A7) || (cpu_state.pc == 0x08A8));
+            int is_data  = (ibm5250_read_kind(cpu_state.pc) == 1);
 
             if ((r1 == 0x072C) || (r1 == 0x0743)) {   /* 0x729 搜寻 / 0x740 收帧 */
                 if (r1 == 0x0743)
