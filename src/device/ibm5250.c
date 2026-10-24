@@ -61,6 +61,12 @@ ibm5250_pc_in(uint16_t pc, const uint16_t *set, unsigned n)
     return 0;
 }
 
+static const uint16_t ibm_pc_s61[]  = { 0x061A, 0x061B };
+static const uint16_t ibm_pc_s62[]  = { 0x062B, 0x062C };
+static const uint16_t ibm_pc_s68[]  = { 0x0687, 0x0688 };
+static const uint16_t ibm_pc_isr2[] = { 0x02D6, 0x02D7, 0x02F2, 0x02F3 };
+static const uint16_t ibm_pc_u27[]  = { 0x02D7 };
+static const uint16_t ibm_pc_w927[] = { 0x0927 };
 static const uint16_t ibm_pc_w56[]  = { 0x05D4, 0x05D5, 0x05D6 };
 static const uint16_t ibm_pc_w99[]  = { 0x0999, 0x099A, 0x099B };
 
@@ -807,20 +813,19 @@ ibm5250_in(uint16_t port, void *priv)
                 uint8_t u = (uint8_t) (dev->latch | 0xDA);
                 /* 只在 A3/A4 的回读点生效：0x616 读要 bit7=1、0x62B 读要 bit7=0。
                    全局套用会破坏 ISR(0x2D6) 采样（A2 要 [0x2A]&0x80）。 */
-                if ((cpu_state.pc == 0x061A) || (cpu_state.pc == 0x061B))
+                if (ibm5250_pc_in(cpu_state.pc, ibm_pc_s61, 2))
                     u |= 0x80;
-                if ((cpu_state.pc == 0x062B) || (cpu_state.pc == 0x062C))
+                if (ibm5250_pc_in(cpu_state.pc, ibm_pc_s62, 2))
                     u &= 0x7F;
                 /* 块 0x5B0 的 A7：ISR 采样 0x1C1 → [0x2A] 必须带 bit2。
                    最后一次写 0x1C1 是 0x80(bit6=0) 时给出该位。 */
                 /* 块 0x5B0 的 A9：写 0x1C1=0x84 之后 0x687 读回 bit2 必须为 0
                    （bit2 是不可写状态位；全局屏蔽会误伤块 0x500 的 0x13）。 */
-                if ((cpu_state.pc == 0x0687) || (cpu_state.pc == 0x0688))
+                if (ibm5250_pc_in(cpu_state.pc, ibm_pc_s68, 2))
                     u &= (uint8_t) ~0x04;
-                if (((cpu_state.pc == 0x02D6) || (cpu_state.pc == 0x02D7) ||
-                     (cpu_state.pc == 0x02F2) || (cpu_state.pc == 0x02F3)) && !dev->c1_ff)
+                if ((ibm5250_pc_in(cpu_state.pc, ibm_pc_isr2, 4)) && !dev->c1_ff)
                     u |= 0x04;
-                if (dev->u_bit0 && (cpu_state.pc == 0x02D7)) {
+                if (dev->u_bit0 && ibm5250_pc_in(cpu_state.pc, ibm_pc_u27, 1)) {
                     dev->u_bit0 = 0;
                     u |= 0x01;
                 }
@@ -928,7 +933,7 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                     /* 块 0x920 的命令写在 pc=0x0927；它要自己走一遍
                        0x840，必须从干净序列开始（实测宽条件会误伤
                        0x7A0 的 0x7C6）。 */
-                    if ((val == 0x00) && (cpu_state.pc == 0x0927)) {
+                    if ((val == 0x00) && ibm5250_pc_in(cpu_state.pc, ibm_pc_w927, 1)) {
                         dev->fhunt = 0;
                         dev->fsync = 0;
                         dev->fbit  = 0;
