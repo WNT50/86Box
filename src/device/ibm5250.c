@@ -364,6 +364,23 @@ ibm5250_frame_bit(ibm5250_t *dev, int k)
     return 0;                                              /* B2..B0 fill */
 }
 
+/* 中断服务内的 4 组采样读写对（0x1C1→[0x2A]、0x1C6→[0x2B] 等）。
+   收进一个具名判据：行为代码里不再出现裸 pc，后续可整体换成
+   「ISR 进行中」状态位，而不再依赖 EMDIAG 的地址。 */
+static int
+ibm5250_is_isr_sample(uint16_t pc)
+{
+    switch (pc) {
+        case 0x02D6: case 0x02D7:
+        case 0x02DE: case 0x02DF:
+        case 0x02F2: case 0x02F3:
+        case 0x02FA: case 0x02FB:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
 static uint8_t
 ibm5250_in_1c6(ibm5250_t *dev)
 {
@@ -470,10 +487,7 @@ ibm5250_in_1c6(ibm5250_t *dev)
         if ((cpu_state.pc == 0x05E8) || (cpu_state.pc == 0x05E9))
             return (uint8_t) ((base & 0x3f) | 0x02);
 
-        if ((cpu_state.pc == 0x02D6) || (cpu_state.pc == 0x02D7) ||
-            (cpu_state.pc == 0x02DE) || (cpu_state.pc == 0x02DF) ||
-            (cpu_state.pc == 0x02F2) || (cpu_state.pc == 0x02F3) ||
-            (cpu_state.pc == 0x02FA) || (cpu_state.pc == 0x02FB))
+        if (ibm5250_is_isr_sample(cpu_state.pc))
             /* 块 0x5B0 的 A7 要求 [0x2A]&4：最后一次写 0x1C1 是 0x80(bit6=0)
                时，ISR 采样带上 bit2；其它情形仍是 0x4A。 */
             return (uint8_t) (0x4A | (dev->c1_ff ? 0x00 : 0x04));
