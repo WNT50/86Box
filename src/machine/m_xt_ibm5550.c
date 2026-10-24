@@ -2637,9 +2637,13 @@ epoch_misc_out(uint16_t port, uint8_t val, void *priv)
         pclog("3477: TESTID %02X pc=%04X:%04X\n", val,
               (CS > 0xFFFF) ? (int) (CS >> 4) : (int) CS, cpu_state.pc);
     if (port == 0x1B0)
-        pclog("3477: OUT1B0 %02X ax=%04X pc=%04X:%04X [2F]=%02X [28]=%02X\n", val, AX,
+        /* 判据通过计数器：EMDIAG 顺序跑 55 项，每项通过写一次 OUT1B0 00/ax=0000 */
+        { static int out1b0_pass = 0;
+        if ((val == 0x00) && ((AX & 0xFFFF) == 0x0000))
+            out1b0_pass++;
+        pclog("3477: OUT1B0 %02X ax=%04X pc=%04X:%04X [2F]=%02X [28]=%02X n=%d/55\n", val, AX,
               (CS > 0xFFFF) ? (int) (CS >> 4) : (int) CS, cpu_state.pc, epoch_adr_latch,
-              mem_readb_phys(((uint32_t) DS << 4) + 0x28));
+              mem_readb_phys(((uint32_t) DS << 4) + 0x28), out1b0_pass); }
     if (getenv("EPOCH3477_ADR_RW")) {
         if (port == 0x1C0) {
             if ((val == 0x40) || (val == 0x08)) {
