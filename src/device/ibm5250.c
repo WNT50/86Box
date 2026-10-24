@@ -167,7 +167,8 @@ struct ibm5250_t {
     int      ph;         /* 1 = handshake, 2 = frame */
     int      rd;         /* read index inside the current phase */
     int      serve;
-    int      isr_active;   /* IRQ 已投递、尚未 ack：ISR 采样窗口 */
+    int      isr_active;
+    uint8_t  c1_wval;      /* 最后一次写 0x1C1 的值 */   /* IRQ 已投递、尚未 ack：ISR 采样窗口 */
     int      txn_station;   /* 本帧站号（协议事务层） */
     int      txn_cmd;       /* 本帧命令字 */      /* this poll gets a reply */
     int      done40;     /* the 0x40 frame has been served once */
@@ -817,15 +818,17 @@ ibm5250_in(uint16_t port, void *priv)
                 uint8_t u = (uint8_t) (dev->latch | IBMR_ST_READY);
                 /* 只在 A3/A4 的回读点生效：0x616 读要 bit7=1、0x62B 读要 bit7=0。
                    全局套用会破坏 ISR(0x2D6) 采样（A2 要 [0x2A]&0x80）。 */
-                if (ibm5250_pc_in(cpu_state.pc, ibm_pc_s61, 2))
+                /* 读点由最后一次写入 0x1C1 的值区分（0xC0 读要 bit7=1、
+                   0x80 读要 bit7=0），不再依赖 EMDIAG 的读指令地址。 */
+                if (dev->c1_wval & 0x80)
                     u |= 0x80;
-                if (ibm5250_pc_in(cpu_state.pc, ibm_pc_s62, 2))
-                    u &= 0x7F;
+                else
+                    u &= (uint8_t) ~0x80;
                 /* 块 0x5B0 的 A7：ISR 采样 0x1C1 → [0x2A] 必须带 bit2。
                    最后一次写 0x1C1 是 0x80(bit6=0) 时给出该位。 */
                 /* 块 0x5B0 的 A9：写 0x1C1=0x84 之后 0x687 读回 bit2 必须为 0
                    （bit2 是不可写状态位；全局屏蔽会误伤块 0x500 的 0x13）。 */
-                if (ibm5250_pc_in(cpu_state.pc, ibm_pc_s68, 2))
+                if (dev->c1_wval & 0x04)
                     u &= (uint8_t) ~0x04;
                 if ((ibm5250_pc_in(cpu_state.pc, ibm_pc_isr2, 4)) && !dev->c1_ff)
                     u |= 0x04;
@@ -995,6 +998,7 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             break;
 
         case 0x1C1:
+            dev->c1_wval = val;
             /* 块 0x5B0 的 A3/A4：写 0xC0 后读回 bit7=1、写 0x80 后读回 bit7=0
                ⇒ bit6 是 bit7 回读的“置位/清除”控制。 */
             dev->c1_ff = ((val & 0x40) != 0);
