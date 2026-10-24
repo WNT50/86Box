@@ -299,7 +299,7 @@ ibm5250_base(ibm5250_t *dev)
        的 `1C6 & 2` 判据直接失败（AH=0x03 / 0xA1 …）。 */
     uint8_t v = (uint8_t) (dev->latch & 0x7d);
 
-    if (dev->b1_pulse && (cpu_state.pc == 0x0BB6)) {
+    if (dev->b1_pulse && ibm5250_is_b1_pulse_pc(cpu_state.pc)) {
         dev->b1_pulse = 0;
         v |= 0x02;
     }
@@ -367,6 +367,20 @@ ibm5250_frame_bit(ibm5250_t *dev, int k)
 /* 中断服务内的 4 组采样读写对（0x1C1→[0x2A]、0x1C6→[0x2B] 等）。
    收进一个具名判据：行为代码里不再出现裸 pc，后续可整体换成
    「ISR 进行中」状态位，而不再依赖 EMDIAG 的地址。 */
+/* 块 0x5B0 的 A1 读点（0x1C6 必须 bit1=1）。 */
+static int
+ibm5250_is_a1_sample(uint16_t pc)
+{
+    return (pc == 0x05E8) || (pc == 0x05E9);
+}
+
+/* 块 0xBA0 的一次性 bit1 脉冲读点。 */
+static int
+ibm5250_is_b1_pulse_pc(uint16_t pc)
+{
+    return (pc == 0x0BB6);
+}
+
 static int
 ibm5250_is_isr_sample(uint16_t pc)
 {
@@ -484,7 +498,7 @@ ibm5250_in_1c6(ibm5250_t *dev)
         /* ISR 两次读：0x2D6 读 0x1C1 → [0x2A]，0x2DE 读 0x1C6 → [0x2B]。
            块 0x920 的 0x95E 要求 [0x2B]&2，所以这一次也要给 bit1。 */
         /* 块 0x5B0 的 A1：0x5E8 读 0x1C6 必须 bit1=1。 */
-        if ((cpu_state.pc == 0x05E8) || (cpu_state.pc == 0x05E9))
+        if (ibm5250_is_a1_sample(cpu_state.pc))
             return (uint8_t) ((base & 0x3f) | 0x02);
 
         if (ibm5250_is_isr_sample(cpu_state.pc))
