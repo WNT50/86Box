@@ -1051,14 +1051,14 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                每次都重置会把序列在第 13 拍反复打断。 */
             /* 块 0x5B0：0x5B7 写 1C2=10、0x5D4 写 1C2=00，随后 0x5E9 要求
                0x1C6 bit1=1（否则 AH=0xA1）。 */
-            if ((val == 0x00) && ibm5250_pc_in(cpu_state.pc, ibm_pc_w56, 3)) {
+            if ((val == 0x00)) {
                 dev->ready = 1;
                 dev->ph    = 2;
             }
 
             /* 块 0x920 第二阶段：0x999 写 1C2=04 之后紧跟 0x9A2 call 0x840，
                此时 rd 已经走到 51，不重开起始序列就必然 AH=01。 */
-            if ((val == 0x04) && ibm5250_pc_in(cpu_state.pc, ibm_pc_w99, 3)) {
+            if ((val == 0x04)) {
                 dev->rd    = 0;
                 dev->clkc  = 0;
                 dev->fhunt = 0;
