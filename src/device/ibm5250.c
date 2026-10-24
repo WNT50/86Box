@@ -138,6 +138,10 @@ struct ibm5250_t {
     int      p5resp;
     uint16_t base;       /* 适配器 I/O 基址（0x1C0 或 0x100） */
     uint16_t tx_addr;   /* 0xCA0 发送时 BX：本块寻址的站/地址字节 */
+    /* ---- 协议事务（结构性：取代按 pc 的判据） ---- */
+    int      txn_active;   /* 客人刚发起一次轮询/命令 */
+    int      txn_station;  /* 本次帧的站号 */
+    int      txn_cmd;      /* 本次帧的命令字节 */
     int      clr2b;     /* 等 ISR 采样落地后再清 [0x2B].bit0/1 */
     uint32_t ds2b;
     int      poked;
@@ -1892,16 +1896,12 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                         /* 0x580 之后要求 [0x30]==7：成功轮次必须是第 8 轮
                            （0x568 把 ch 写进 [0x30]，0x586 与 7 比较）。
                            实测按 word==0x1221 应答落在第 2 轮（[0x30]=01）。 */
-                        if (dev->p500_on)
-                            dev->serve = (dev->word == 0x1E21);   /* 第 8 轮：0x580 要求 [0x30]==7 */
-                        else if (getenv("EPOCH5250_NODS"))
-                            dev->serve = (dev->word == 0x1221);
-                        else if (dev->tx_addr == 0x21)
-                            dev->serve = (dev->word == 0x1E21);   /* 0x440 的 0x2A 项 */
-                        else if (dev->tx_addr == 0x01)
-                            dev->serve = (dev->word == 0x1221);   /* 0xAB0 轮询站 1 */
-                        else
-                            dev->serve = 1;   /* 其它块一律应答 */
+                        /* 协议：只有帧的站号等于本机站号才应答。
+                           0x500 的 8 轮里只有第 8 轮（0x1E21，站 7）命中 ->
+                           [0x30]=7 自然成立；0x440 的 0E61 同样命中。 */
+                        dev->txn_station = (dev->word >> 9) & 7;
+                        dev->txn_cmd     = (dev->word >> 1) & 0xFF;
+                        dev->serve       = (dev->txn_station == dev->my_station);
                         if (dev->serve) {
                             uint32_t d2f = ((uint32_t) cpu_state.seg_ds.seg << 4) + 0x2F;
                             if (mem_readb_phys(d2f) == 0)
@@ -1921,7 +1921,8 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                                   cpu_state.seg_ds.seg, (unsigned) ds2, dev->cmdlat, dev->p500_round);
                         }
                         dev->rx_word = dev->word;
-                        dev->respond = dev->p500_on;
+                        /* 只要本站在听就发 sync；是否给帧体由 serve 决定 */
+                        dev->respond = 1;
                         dev->tx_reset = 1;
                         /* 0xCA0 发的帧里低字节就是命令字节（0x500 是 0x21，
                            0x440 是 0x61）。块内不写 0x1C0，cmdlat 只能从这里来，
