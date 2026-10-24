@@ -47,6 +47,20 @@
 static int ibm5250_is_a1_sample(uint16_t pc);
 static int ibm5250_is_b1_pulse_pc(uint16_t pc);
 
+/* 块 0x5B0 的 A1 读点（0x1C6 必须 bit1=1）。 */
+static int
+ibm5250_is_a1_sample(uint16_t pc)
+{
+    return (pc == 0x05E8) || (pc == 0x05E9);
+}
+
+/* 块 0xBA0 的一次性 bit1 脉冲读点。 */
+static int
+ibm5250_is_b1_pulse_pc(uint16_t pc)
+{
+    return (pc == 0x0BB6);
+}
+
 static const uint8_t ibm5250_handshake[19] = {
     0x00, 0x00, 0x00, 0x80, 0x00,
     0x80, 0x00, 0x80, 0x00, 0x80, 0x00, 0x80, 0x00,
@@ -114,6 +128,7 @@ struct ibm5250_t {
     int      ph;         /* 1 = handshake, 2 = frame */
     int      rd;         /* read index inside the current phase */
     int      serve;
+    int      isr_active;   /* IRQ 已投递、尚未 ack：ISR 采样窗口 */
     int      txn_station;   /* 本帧站号（协议事务层） */
     int      txn_cmd;       /* 本帧命令字 */      /* this poll gets a reply */
     int      done40;     /* the 0x40 frame has been served once */
@@ -167,6 +182,7 @@ struct ibm5250_t {
 void
 ibm5250_irq_ack(ibm5250_t *dev)
 {
+    dev->isr_active = 0;
     if (dev == NULL || !dev->irq_level)
         return;
 
@@ -188,6 +204,7 @@ ibm5250_irq_cb(void *priv)
     if (dev->a7_pend) {
         dev->a7_pend = 0;
         if (dev->irq_raise != NULL)
+            dev->isr_active = 1;
             dev->irq_raise(dev->irq_priv);
         return;
     }
@@ -245,7 +262,8 @@ ibm5250_irq_cb(void *priv)
     }
 
     dev->irq_level = 1;
-    dev->irq_raise(dev->irq_priv);
+    dev->isr_active = 1;
+            dev->irq_raise(dev->irq_priv);
     if (getenv("EPOCH5250_PCLOG"))
         pclog("5250: IRQ ASSERT (level) after trigger\n");
 
@@ -290,7 +308,8 @@ ibm5250_arm_irq(ibm5250_t *dev)
         return;
 
     dev->irq_level = 1;
-    dev->irq_raise(dev->irq_priv);
+    dev->isr_active = 1;
+            dev->irq_raise(dev->irq_priv);
 }
 
 static uint8_t
@@ -367,22 +386,8 @@ ibm5250_frame_bit(ibm5250_t *dev, int k)
     return 0;                                              /* B2..B0 fill */
 }
 
-/* 中断服务内的 4 组采样读写对（0x1C1→[0x2A]、0x1C6→[0x2B] 等）。
-   收进一个具名判据：行为代码里不再出现裸 pc，后续可整体换成
-   「ISR 进行中」状态位，而不再依赖 EMDIAG 的地址。 */
-/* 块 0x5B0 的 A1 读点（0x1C6 必须 bit1=1）。 */
-static int
-ibm5250_is_a1_sample(uint16_t pc)
-{
-    return (pc == 0x05E8) || (pc == 0x05E9);
-}
 
 /* 块 0xBA0 的一次性 bit1 脉冲读点。 */
-static int
-ibm5250_is_b1_pulse_pc(uint16_t pc)
-{
-    return (pc == 0x0BB6);
-}
 
 static int
 ibm5250_is_isr_sample(uint16_t pc)
@@ -504,7 +509,7 @@ ibm5250_in_1c6(ibm5250_t *dev)
         if (ibm5250_is_a1_sample(cpu_state.pc))
             return (uint8_t) ((base & 0x3f) | 0x02);
 
-        if (ibm5250_is_isr_sample(cpu_state.pc))
+        if (dev->isr_active)
             /* 块 0x5B0 的 A7 要求 [0x2A]&4：最后一次写 0x1C1 是 0x80(bit6=0)
                时，ISR 采样带上 bit2；其它情形仍是 0x4A。 */
             return (uint8_t) (0x4A | (dev->c1_ff ? 0x00 : 0x04));
@@ -544,7 +549,8 @@ ibm5250_in_1c6(ibm5250_t *dev)
                         /* 255 帧收完：补投一次中断，让 ISR 从 0x1C1(=0xDA)
                            采到 [0x2A]，0xB03 的 (al|0xB7)+1==0 才能成立。 */
                         if ((dev->fseq == 255) && (dev->irq_raise != NULL))
-                            dev->irq_raise(dev->irq_priv);
+                            dev->isr_active = 1;
+            dev->irq_raise(dev->irq_priv);
                     }
                     dev->fsync = 0;
                     dev->fhunt = 0;
@@ -730,7 +736,8 @@ ibm5250_in_1c6(ibm5250_t *dev)
                     dev->ready = 0;
                     if (getenv("EPOCH5250_LEVELIRQ") && dev->irq_raise) {
                         dev->irq_level = 0;
-                        dev->irq_raise(dev->irq_priv);
+                        dev->isr_active = 1;
+            dev->irq_raise(dev->irq_priv);
                         dev->irq_level = 1;
                     }
                 }
