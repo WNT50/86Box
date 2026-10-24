@@ -110,7 +110,9 @@ struct ibm5250_t {
 
     int      ph;         /* 1 = handshake, 2 = frame */
     int      rd;         /* read index inside the current phase */
-    int      serve;      /* this poll gets a reply */
+    int      serve;
+    int      txn_station;   /* 本帧站号（协议事务层） */
+    int      txn_cmd;       /* 本帧命令字 */      /* this poll gets a reply */
     int      done40;     /* the 0x40 frame has been served once */
     int      pre;        /* 帧前空槽（每槽 2 读）*/
     uint8_t  data8;      /* 0x1C8 数据寄存器 */
@@ -1089,14 +1091,12 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                         dev->inframe = 0;
                         /* the 0x500 subtest polls eight stations and only
                            answers the one whose address word is 0x1221 */
-                        if (getenv("EPOCH5250_NODS")) {
-                            dev->serve = (dev->word == 0x1221);
-                        } else {
-                            uint32_t dsa = ((uint32_t) cpu_state.seg_ds.seg << 4) + 0x2F;
-                            dev->serve = (dsa < 0x1000000)
-                                       ? ((mem_readb_phys(dsa) == 1) ? (dev->word == 0x1221) : 1)
-                                       : 1;
-                        }
+                        /* 事务层：按命令字区分轮询语义
+                           0x21 = 扫描（0x500 的 8 站轮询）-> 只答本机站 7
+                           其它（0x30/0x61 单站命令）-> 地址解析到本机即答 */
+                        dev->txn_station = (dev->word >> 9) & 7;
+                        dev->txn_cmd     = (dev->word >> 1) & 0xFF;
+                        dev->serve = (dev->txn_cmd == 0x21) ? (dev->txn_station == 7) : 1;
                         pclog("5250: FRAME %04X serve=%d\n", dev->word, dev->serve);
                     }
                 }
