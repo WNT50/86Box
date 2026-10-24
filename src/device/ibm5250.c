@@ -44,6 +44,9 @@
 
 /* 19-read handshake, measured on the real EMDIAG/0x840 sequence.  idx 18 must
    stay 0: giving it the start bit breaks the 0x500 subtest (AH=0x13). */
+static int ibm5250_is_a1_sample(uint16_t pc);
+static int ibm5250_is_b1_pulse_pc(uint16_t pc);
+
 static const uint8_t ibm5250_handshake[19] = {
     0x00, 0x00, 0x00, 0x80, 0x00,
     0x80, 0x00, 0x80, 0x00, 0x80, 0x00, 0x80, 0x00,
