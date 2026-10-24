@@ -44,6 +44,10 @@
 
 /* 19-read handshake, measured on the real EMDIAG/0x840 sequence.  idx 18 must
    stay 0: giving it the start bit breaks the 0x500 subtest (AH=0x13). */
+/* 0x1C1 状态位：各判据链要求的并集
+   bit7|bit6 = 完成/服务可用，bit4|bit3 = 命令就绪，bit1 = 本机被轮询，bit2 = 0 */
+#define IBMR_ST_READY  (0x80 | 0x40 | 0x10 | 0x08 | 0x02)
+
 static int ibm5250_is_a1_sample(uint16_t pc);
 static int ibm5250_is_b1_pulse_pc(uint16_t pc);
 
@@ -810,7 +814,7 @@ ibm5250_in(uint16_t port, void *priv)
             /* 全部 0x1C1 判据的并集：bit7|6|4|3|1 = 1、bit2 = 0 ⇒ 0xDA
                （0x4AD 要 6|4、0x616 要 7、0x683 要 2=0、0x8D3 要 6|1、0xA17 要 6|3） */
             {
-                uint8_t u = (uint8_t) (dev->latch | 0xDA);
+                uint8_t u = (uint8_t) (dev->latch | IBMR_ST_READY);
                 /* 只在 A3/A4 的回读点生效：0x616 读要 bit7=1、0x62B 读要 bit7=0。
                    全局套用会破坏 ISR(0x2D6) 采样（A2 要 [0x2A]&0x80）。 */
                 if (ibm5250_pc_in(cpu_state.pc, ibm_pc_s61, 2))
