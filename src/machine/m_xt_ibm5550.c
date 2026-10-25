@@ -2642,6 +2642,13 @@ epoch_misc_out(uint16_t port, uint8_t val, void *priv)
         { static int out1b0_pass = 0;
         if ((val == 0x00) && ((AX & 0xFFFF) == 0x0000))
             out1b0_pass++;
+        if ((val == 0x01) || (AX != 0x0000)) {
+            uint32_t ssp = ((uint32_t) SS << 4) + SP;
+            pclog("3477: STK ax=%04X ss:sp=%04X:%04X %04X %04X %04X %04X\n", AX,
+                  (unsigned) SS, (unsigned) SP,
+                  mem_readw_phys(ssp), mem_readw_phys(ssp + 2),
+                  mem_readw_phys(ssp + 4), mem_readw_phys(ssp + 6));
+        }
         pclog("3477: OUT1B0 %02X ax=%04X pc=%04X:%04X [2F]=%02X [28]=%02X pass=%d\n", val, AX,
               (CS > 0xFFFF) ? (int) (CS >> 4) : (int) CS, cpu_state.pc, epoch_adr_latch,
               mem_readb_phys(((uint32_t) DS << 4) + 0x28), out1b0_pass); }

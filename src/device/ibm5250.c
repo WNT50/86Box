@@ -170,6 +170,7 @@ struct ibm5250_t {
     int      isr_active;
     uint8_t  c1_wval;
     int      c1_42;        /* 写 0x1C1=0x42 后，下一次 0x1C6 读 bit1=0（一次性） */
+    int      b0_pend;      /* 0x1C2=0x08 后 0x1C6 bit0=1；=0x01 后为 0 */
     int      c2_rst;       /* 写完 0x1C2=0x04 后 0x1C1 bit1 必须读 0 */      /* 最后一次写 0x1C1 的值 */   /* IRQ 已投递、尚未 ack：ISR 采样窗口 */
     int      txn_station;   /* 本帧站号（协议事务层） */
     int      txn_cmd;       /* 本帧命令字 */      /* this poll gets a reply */
@@ -449,8 +450,23 @@ ibm5250_is_isr_sample(uint16_t pc)
 static unsigned long g_rd_n;
 static unsigned long g_isr_n;
 
+static uint8_t ibm5250_in_1c6_impl(ibm5250_t *dev);
+
 static uint8_t
 ibm5250_in_1c6(ibm5250_t *dev)
+{
+    uint8_t v = ibm5250_in_1c6_impl(dev);
+    /* 0x1C2=0x08 的位流应答：0x7A0 的三次采样都要求 bit0=1，
+       内部分支（含 0x4A 的那条）会把它盖掉，故在出口统一补。 */
+    if (dev->b0_pend && !ISR_PC(cpu_state.pc) &&
+        ((cpu_state.pc == 0x07D7) || (cpu_state.pc == 0x07D8) ||
+         (cpu_state.pc == 0x0805) || (cpu_state.pc == 0x0806)))
+        v |= 0x01;
+    return v;
+}
+
+static uint8_t
+ibm5250_in_1c6_impl(ibm5250_t *dev)
 {
     {
         g_rd_n++;
@@ -484,12 +500,37 @@ ibm5250_in_1c6(ibm5250_t *dev)
     }
     uint8_t ret  = (uint8_t) (base & 0x3f);
 
+    /* 0x1C2 写值的位流语义：写 0x08 → 0x1C6 bit0=1（有位可读）；
+       写 0x01 → bit0=0。0x7A0 的三次采样（0x7D7/0x7EA/0x805）都靠这个位。
+       必须写在早退路径之前，否则 !serve 时会漏掉。 */
+    if ((cpu_state.pc >= 0x07C0) && (cpu_state.pc <= 0x0815))
+    {
+        uint32_t d = (uint32_t) cpu_state.seg_ds.seg << 4;
+        pclog("5250: B0RD pc=%04X pend=%d ret=%02X AH=%02X ds=%04X [20]=%02X%02X%02X%02X%02X%02X%02X%02X\n",
+              cpu_state.pc, dev->b0_pend, ret, (unsigned) (cpu_state.regs[0].w >> 8),
+              (unsigned) cpu_state.seg_ds.seg,
+              mem_readb_phys(d + 0x20), mem_readb_phys(d + 0x21),
+              mem_readb_phys(d + 0x22), mem_readb_phys(d + 0x23),
+              mem_readb_phys(d + 0x24), mem_readb_phys(d + 0x25),
+              mem_readb_phys(d + 0x26), mem_readb_phys(d + 0x27));
+    }
+    if (dev->b0_pend && !ISR_PC(cpu_state.pc) &&
+        ((cpu_state.pc == 0x07D7) || (cpu_state.pc == 0x07D8) ||
+         (cpu_state.pc == 0x0805) || (cpu_state.pc == 0x0806)))
+        ret |= 0x01;
+
     if (!dev->serve) {
         /* 只有 EMDIAG 的 0x40/0x64 收发要求静默期读回 0x00
            （0x720 超时返回 AL=(读值<<1)，必须为 0）；
            其它情形（IPL 早期轮询）保持 base，否则 POST 会卡住。 */
-        if ((dev->cmdlat == 0x40) || (dev->cmdlat == 0x64) || (dev->cmdlat == 0xAA))
+        if ((dev->cmdlat == 0x40) || (dev->cmdlat == 0x64) || (dev->cmdlat == 0xAA)) {
+            /* 静默期也要尊重 0x1C2 的位流应答：0x7A0 的 0x805 读在此路径上 */
+            if (dev->b0_pend && !ISR_PC(cpu_state.pc) &&
+                ((cpu_state.pc == 0x07D7) || (cpu_state.pc == 0x07D8) ||
+                 (cpu_state.pc == 0x0805) || (cpu_state.pc == 0x0806)))
+                return 0x01;
             return 0x00;
+        }
         return ret;
     }
 
@@ -915,6 +956,11 @@ ibm5250_in(uint16_t port, void *priv)
 
     if ((cpu_state.pc >= 0x0906) && (cpu_state.pc <= 0x090A))
         pclog("5250: IN@%04X port=%03X\n", cpu_state.pc, port);
+    if ((port & 0x0F8) == 0x0C0 || (port & 0x0F8) == 0x000) {
+        static long pn;
+        pn++;
+        pclog("5250: PRD#%ld pc=%04X port=%03X\n", pn, cpu_state.pc, port);
+    }
     switch (port) {
         case 0x1C1:
             /* bit1|bit6 are the adapter signature the ROM handshake checks */
@@ -1184,6 +1230,14 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                每次都重置会把序列在第 13 拍反复打断。 */
             /* 块 0x5B0：0x5B7 写 1C2=10、0x5D4 写 1C2=00，随后 0x5E9 要求
                0x1C6 bit1=1（否则 AH=0xA1）。 */
+            if (cpu_state.pc >= 0x0780 && cpu_state.pc <= 0x0820)
+                pclog("5250: W1C2=%02X pc=%04X pend=%d\n", val, cpu_state.pc, dev->b0_pend);
+            if (val == 0x08) {
+                dev->b0_pend = 1;
+                pclog("5250: B0SET pc=%04X\n", cpu_state.pc);
+            }
+            else if (val == 0x01)
+                dev->b0_pend = 0;
             if ((val == 0x00)) {
                 dev->ready = 1;
                 dev->ph    = 2;
