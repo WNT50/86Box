@@ -168,7 +168,9 @@ struct ibm5250_t {
     int      rd;         /* read index inside the current phase */
     int      serve;
     int      isr_active;
-    uint8_t  c1_wval;      /* 最后一次写 0x1C1 的值 */   /* IRQ 已投递、尚未 ack：ISR 采样窗口 */
+    uint8_t  c1_wval;
+    int      c1_42;        /* 写 0x1C1=0x42 后，下一次 0x1C6 读 bit1=0（一次性） */
+    int      c2_rst;       /* 写完 0x1C2=0x04 后 0x1C1 bit1 必须读 0 */      /* 最后一次写 0x1C1 的值 */   /* IRQ 已投递、尚未 ack：ISR 采样窗口 */
     int      txn_station;   /* 本帧站号（协议事务层） */
     int      txn_cmd;       /* 本帧命令字 */      /* this poll gets a reply */
     int      done40;     /* the 0x40 frame has been served once */
@@ -444,9 +446,20 @@ ibm5250_is_isr_sample(uint16_t pc)
     }
 }
 
+static unsigned long g_rd_n;
+static unsigned long g_isr_n;
+
 static uint8_t
 ibm5250_in_1c6(ibm5250_t *dev)
 {
+    {
+        g_rd_n++;
+        if (dev->isr_active)
+            g_isr_n++;
+        if (dev->isr_active || (cpu_state.pc == 0x02DF) || (cpu_state.pc == 0x02D7))
+            pclog("5250: RD#%lu pc=%04X isr=%d ph=%d serve=%d\n",
+                  g_rd_n, cpu_state.pc, dev->isr_active, dev->ph, dev->serve);
+    }
     uint8_t base = ibm5250_base(dev);
 
     if (getenv("EPOCH5250_POLLOG") && (dev->cmdlat == 0x00) && (dev->c3 == 0x08)) {
@@ -485,7 +498,17 @@ ibm5250_in_1c6(ibm5250_t *dev)
     if (dev->ph != 2) {
         /* ISR 的采样读不能消耗握手槽 */
         if (ISR_PC(cpu_state.pc))
-            return (uint8_t) ((base & 0x3d) | (dev->ready ? 0x02 : 0x00));
+            { uint8_t r = (uint8_t) ((base & 0x3d) | (dev->ready ? 0x02 : 0x00));
+            /* 0x1C6 bit1 = 状态可读：写过 0x1C1 且 bit6=1（c1_ff）后
+               表示服务位已被取走 → 读 0；否则读 1。0x8EC 要 1、0x908 要 0。 */
+            if (ISR_PC(cpu_state.pc))
+                r |= 0x02;                            /* ISR 采样：服务位在 */
+            else if (dev->c1_42) {
+                r &= (uint8_t) ~0x02;                 /* 0x1C1=0x42 的应答：读 0 */
+                dev->c1_42 = 0;
+            } else
+                r |= 0x02;
+            return r; }
         /* 协议：接收方以 sync=1 对齐；帧前必须是空闲 0。
            0x64 的 19 槽握手是实测拟合值，只用于它自己；其它命令（0x00/0x08…）
            给纯空闲，否则 0x840 的同步搜索会提前命中握手里的 1 而错位。 */
@@ -508,7 +531,17 @@ ibm5250_in_1c6(ibm5250_t *dev)
                第 2 拍给 0（成为客人 15 位移位窗口的第 1 位）。
                这样窗口整体后移一位，BL.bit1 由起始位 1 变成数据 d0。 */
             dev->dummy--;
-            return (uint8_t) ((dev->dummy == 1) ? (ret | 0x80) : (ret & 0x7f));
+            { uint8_t r = (uint8_t) ((dev->dummy == 1) ? (ret | 0x80) : (ret & 0x7f));
+            /* 0x1C6 bit1 = 状态可读：写过 0x1C1 且 bit6=1（c1_ff）后
+               表示服务位已被取走 → 读 0；否则读 1。0x8EC 要 1、0x908 要 0。 */
+            if (ISR_PC(cpu_state.pc))
+                r |= 0x02;                            /* ISR 采样：服务位在 */
+            else if (dev->c1_42) {
+                r &= (uint8_t) ~0x02;                 /* 0x1C1=0x42 的应答：读 0 */
+                dev->c1_42 = 0;
+            } else
+                r |= 0x02;
+            return r; }
         }
         dev->dummy = 0;
         return ret;
@@ -516,7 +549,17 @@ ibm5250_in_1c6(ibm5250_t *dev)
 
     if (dev->pre > 0) {
         dev->pre--;
-        return (uint8_t) (base & 0x3f);
+        { uint8_t r = (uint8_t) (base & 0x3f);
+            /* 0x1C6 bit1 = 状态可读：写过 0x1C1 且 bit6=1（c1_ff）后
+               表示服务位已被取走 → 读 0；否则读 1。0x8EC 要 1、0x908 要 0。 */
+            if (ISR_PC(cpu_state.pc))
+                r |= 0x02;                            /* ISR 采样：服务位在 */
+            else if (dev->c1_42) {
+                r &= (uint8_t) ~0x02;                 /* 0x1C1=0x42 的应答：读 0 */
+                dev->c1_42 = 0;
+            } else
+                r |= 0x02;
+            return r; }
     }
 
     /* 块 0xAB0：按手册的起始序列（5 quiesce 位 + 3 位违规 + 帧）。
@@ -548,7 +591,17 @@ ibm5250_in_1c6(ibm5250_t *dev)
            块 0x920 的 0x95E 要求 [0x2B]&2，所以这一次也要给 bit1。 */
         /* 块 0x5B0 的 A1：0x5E8 读 0x1C6 必须 bit1=1。 */
         if (ibm5250_is_a1_sample(cpu_state.pc))
-            return (uint8_t) ((base & 0x3f) | 0x02);
+            { uint8_t r = (uint8_t) ((base & 0x3f) | 0x02);
+            /* 0x1C6 bit1 = 状态可读：写过 0x1C1 且 bit6=1（c1_ff）后
+               表示服务位已被取走 → 读 0；否则读 1。0x8EC 要 1、0x908 要 0。 */
+            if (ISR_PC(cpu_state.pc))
+                r |= 0x02;                            /* ISR 采样：服务位在 */
+            else if (dev->c1_42) {
+                r &= (uint8_t) ~0x02;                 /* 0x1C1=0x42 的应答：读 0 */
+                dev->c1_42 = 0;
+            } else
+                r |= 0x02;
+            return r; }
 
         if (dev->isr_active)
             /* 块 0x5B0 的 A7 要求 [0x2A]&4：最后一次写 0x1C1 是 0x80(bit6=0)
@@ -558,7 +611,17 @@ ibm5250_in_1c6(ibm5250_t *dev)
             pclog("5250: ISRRD pc=%04X ret=%02X isr=%d serve=%d ph=%d rd=%d\n",
                   cpu_state.pc, (unsigned) (0x4A | (dev->c1_ff ? 0x00 : 0x04)), dev->isr_active,
                   dev->serve, dev->ph, dev->rd);
-            return (uint8_t) (0x4A | (dev->c1_ff ? 0x00 : 0x04));
+            { uint8_t r = (uint8_t) (0x4A | (dev->c1_ff ? 0x00 : 0x04));
+            /* 0x1C6 bit1 = 状态可读：写过 0x1C1 且 bit6=1（c1_ff）后
+               表示服务位已被取走 → 读 0；否则读 1。0x8EC 要 1、0x908 要 0。 */
+            if (ISR_PC(cpu_state.pc))
+                r |= 0x02;                            /* ISR 采样：服务位在 */
+            else if (dev->c1_42) {
+                r &= (uint8_t) ~0x02;                 /* 0x1C1=0x42 的应答：读 0 */
+                dev->c1_42 = 0;
+            } else
+                r |= 0x02;
+            return r; }
 
         if (ibm5250_read_kind(cpu_state.pc) == 0)
             
@@ -600,6 +663,7 @@ ibm5250_in_1c6(ibm5250_t *dev)
                     dev->fsync = 0;
                     dev->fhunt = 0;
                     dev->fbit  = 0;
+
                 }
                 if (!dev->fsync) {
                     /* 块 0x920 的 0x970 那次调用必须立刻给出同步位，
@@ -640,7 +704,17 @@ ibm5250_in_1c6(ibm5250_t *dev)
                 }
 
                 dev->rd++;
-                return (uint8_t) ((base & 0x3f) | (fb ? 0x80 : 0x00));
+                { uint8_t r = (uint8_t) ((base & 0x3f) | (fb ? 0x80 : 0x00));
+            /* 0x1C6 bit1 = 状态可读：写过 0x1C1 且 bit6=1（c1_ff）后
+               表示服务位已被取走 → 读 0；否则读 1。0x8EC 要 1、0x908 要 0。 */
+            if (ISR_PC(cpu_state.pc))
+                r |= 0x02;                            /* ISR 采样：服务位在 */
+            else if (dev->c1_42) {
+                r &= (uint8_t) ~0x02;                 /* 0x1C1=0x42 的应答：读 0 */
+                dev->c1_42 = 0;
+            } else
+                r |= 0x02;
+            return r; }
             }
         }
 
@@ -687,7 +761,17 @@ ibm5250_in_1c6(ibm5250_t *dev)
                 }
         }
         dev->rd++;
-        return (uint8_t) ((base & 0x3f) | (fb ? 0x80 : 0x00));
+        { uint8_t r = (uint8_t) ((base & 0x3f) | (fb ? 0x80 : 0x00));
+            /* 0x1C6 bit1 = 状态可读：写过 0x1C1 且 bit6=1（c1_ff）后
+               表示服务位已被取走 → 读 0；否则读 1。0x8EC 要 1、0x908 要 0。 */
+            if (ISR_PC(cpu_state.pc))
+                r |= 0x02;                            /* ISR 采样：服务位在 */
+            else if (dev->c1_42) {
+                r &= (uint8_t) ~0x02;                 /* 0x1C1=0x42 的应答：读 0 */
+                dev->c1_42 = 0;
+            } else
+                r |= 0x02;
+            return r; }
     }
 
     {
@@ -710,8 +794,18 @@ ibm5250_in_1c6(ibm5250_t *dev)
                       dev->cmdlat, dev->ph, dev->rd);
             /* 0x8CC `jnz` → 帧前采样 bit1=1（数据有效）；0x712 要求帧后
                采样 bit1=0 ⇒ 由 dev->ready 决定 */
-            return (uint8_t) ((base & 0x3d) | (dev->ready ? 0x02 : 0x00)
+            { uint8_t r = (uint8_t) ((base & 0x3d) | (dev->ready ? 0x02 : 0x00)
                                            | (fb ? 0x80 : 0x00));
+            /* 0x1C6 bit1 = 状态可读：写过 0x1C1 且 bit6=1（c1_ff）后
+               表示服务位已被取走 → 读 0；否则读 1。0x8EC 要 1、0x908 要 0。 */
+            if (ISR_PC(cpu_state.pc))
+                r |= 0x02;                            /* ISR 采样：服务位在 */
+            else if (dev->c1_42) {
+                r &= (uint8_t) ~0x02;                 /* 0x1C1=0x42 的应答：读 0 */
+                dev->c1_42 = 0;
+            } else
+                r |= 0x02;
+            return r; }
         }
 
         /* 读配对：0x8A0 每个位槽连读两次（同一 bit），而 ISR(0x2D0) 只单读一次。
@@ -724,7 +818,17 @@ ibm5250_in_1c6(ibm5250_t *dev)
             if (!paired) {
                 dev->pair_pend = 1;
                 dev->pair_tsc  = tsc;
-                return (uint8_t) ((base & 0x3f) | (fb ? 0x80 : 0x00));
+                { uint8_t r = (uint8_t) ((base & 0x3f) | (fb ? 0x80 : 0x00));
+            /* 0x1C6 bit1 = 状态可读：写过 0x1C1 且 bit6=1（c1_ff）后
+               表示服务位已被取走 → 读 0；否则读 1。0x8EC 要 1、0x908 要 0。 */
+            if (ISR_PC(cpu_state.pc))
+                r |= 0x02;                            /* ISR 采样：服务位在 */
+            else if (dev->c1_42) {
+                r &= (uint8_t) ~0x02;                 /* 0x1C1=0x42 的应答：读 0 */
+                dev->c1_42 = 0;
+            } else
+                r |= 0x02;
+            return r; }
             }
             dev->pair_pend = 0;
         }
@@ -809,6 +913,8 @@ ibm5250_in(uint16_t port, void *priv)
         }
     }
 
+    if ((cpu_state.pc >= 0x0906) && (cpu_state.pc <= 0x090A))
+        pclog("5250: IN@%04X port=%03X\n", cpu_state.pc, port);
     switch (port) {
         case 0x1C1:
             /* bit1|bit6 are the adapter signature the ROM handshake checks */
@@ -836,12 +942,19 @@ ibm5250_in(uint16_t port, void *priv)
                    （bit2 是不可写状态位；全局屏蔽会误伤块 0x500 的 0x13）。 */
                 if (dev->c1_wval & 0x04)
                     u &= (uint8_t) ~0x04;
+                if (dev->c2_rst)
+                    u &= (uint8_t) ~0x02;
                 if (dev->isr_active && !dev->c1_ff)
                     u |= 0x04;
                 if (dev->u_bit0) {
                     dev->u_bit0 = 0;
                     u |= 0x01;
                 }
+                if (((u & 0x02) == 0) && (cpu_state.pc >= 0x0800) &&
+                    (cpu_state.pc <= 0x0A00))
+                    pclog("5250: NOBIT1 pc=%04X v=%02X latch=%02X c1w=%02X isr=%d serve=%d ph=%d rd=%d\n",
+                          cpu_state.pc, u, dev->latch, dev->c1_wval,
+                          dev->isr_active, dev->serve, dev->ph, dev->rd);
                 return u;
             }
 
@@ -895,6 +1008,13 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             break;
 
         case 0x1C9:      /* EMDIAG 的 [0x12]：写 0xAA 是“触发一帧应答”，命令号不变 */
+            if (val == 0xAA) {   /* 触发一次收发：发送完成即拉中断，
+                                    ISR 在 0xB90 延时窗口内写 [0x2A]/[0x2B] */
+                if (dev->irq_raise != NULL) {
+                    dev->isr_active = 1;
+                    dev->irq_raise(dev->irq_priv);
+                }
+            }
         case 0x1CA:
         case 0x1D0:
         case 0x1D1:
@@ -1005,6 +1125,9 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
 
         case 0x1C1:
             dev->c1_wval = val;
+            if (val == 0x42)
+                dev->c1_42 = 1;
+            dev->c2_rst   = 0;
             /* 块 0x5B0 的 A3/A4：写 0xC0 后读回 bit7=1、写 0x80 后读回 bit7=0
                ⇒ bit6 是 bit7 回读的“置位/清除”控制。 */
             dev->c1_ff = ((val & 0x40) != 0);
@@ -1069,6 +1192,9 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             /* 块 0x920 第二阶段：0x999 写 1C2=04 之后紧跟 0x9A2 call 0x840，
                此时 rd 已经走到 51，不重开起始序列就必然 AH=01。 */
             if ((val == 0x04)) {
+                pclog("5250: BOUND 1C2=04 rd=%lu isr=%lu pc=%04X\n", g_rd_n, g_isr_n, cpu_state.pc);
+                dev->c2_rst = 1;
+
                 dev->rd    = 0;
                 dev->clkc  = 0;
                 dev->fhunt = 0;
