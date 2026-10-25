@@ -243,9 +243,10 @@ ibm5250_irq_cb(void *priv)
 
     if (dev->a7_pend) {
         dev->a7_pend = 0;
-        if (dev->irq_raise != NULL)
+        if (dev->irq_raise != NULL) {
             dev->isr_active = 1;
             dev->irq_raise(dev->irq_priv);
+        }
         return;
     }
 
