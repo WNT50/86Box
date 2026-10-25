@@ -832,7 +832,7 @@ ibm5250_in(uint16_t port, void *priv)
                     u &= (uint8_t) ~0x04;
                 if (dev->isr_active && !dev->c1_ff)
                     u |= 0x04;
-                if (dev->u_bit0 && ibm5250_pc_in(cpu_state.pc, ibm_pc_u27, 1)) {
+                if (dev->u_bit0) {
                     dev->u_bit0 = 0;
                     u |= 0x01;
                 }
