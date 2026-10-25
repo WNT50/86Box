@@ -553,10 +553,15 @@ ibm5250_in_1c6(ibm5250_t *dev)
         if (dev->isr_active)
             /* 块 0x5B0 的 A7 要求 [0x2A]&4：最后一次写 0x1C1 是 0x80(bit6=0)
                时，ISR 采样带上 bit2；其它情形仍是 0x4A。 */
+        if (dev->isr_active || (cpu_state.pc == 0x02D7) ||
+            (cpu_state.pc == 0x02DF) || (cpu_state.pc == 0x02FB))
+            pclog("5250: ISRRD pc=%04X ret=%02X isr=%d serve=%d ph=%d rd=%d\n",
+                  cpu_state.pc, (unsigned) (0x4A | (dev->c1_ff ? 0x00 : 0x04)), dev->isr_active,
+                  dev->serve, dev->ph, dev->rd);
             return (uint8_t) (0x4A | (dev->c1_ff ? 0x00 : 0x04));
 
         if (ibm5250_read_kind(cpu_state.pc) == 0)
-            return (uint8_t) (base & 0x3f);
+            
 
         /* 实测读序：rd=0 是 0x8A7 的数据读（0x84E 取它的 CF），
            rd=1 是 0x8B1 的时钟读，rd=2 起是 0x8AA。
