@@ -830,7 +830,7 @@ ibm5250_in(uint16_t port, void *priv)
                    （bit2 是不可写状态位；全局屏蔽会误伤块 0x500 的 0x13）。 */
                 if (dev->c1_wval & 0x04)
                     u &= (uint8_t) ~0x04;
-                if ((ibm5250_pc_in(cpu_state.pc, ibm_pc_isr2, 4)) && !dev->c1_ff)
+                if (dev->isr_active && !dev->c1_ff)
                     u |= 0x04;
                 if (dev->u_bit0 && ibm5250_pc_in(cpu_state.pc, ibm_pc_u27, 1)) {
                     dev->u_bit0 = 0;
