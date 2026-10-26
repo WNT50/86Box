@@ -195,6 +195,7 @@ struct ibm5250_t {
     int      aa_latch;   /* 块级锁存：直到下一条 0x1C0 命令 */
     int      h00;        /* cmd=0x00 的 0x840 搜寻计数 */
     int      q00;        /* cmd=0x00 的 quiesce 交替位 */
+    int      blk920;    /* 0x920 块：ISR 采样要 bit0=1（0x952 判据） */
     int      rx_on;      /* 0xAB0 块的接收序列在用 */
     int      rx_phase;   /* 0 = 0x840 头，1 = 0x720 收帧 */
     int      rx_d;       /* 头：数据读计数 */
@@ -1070,7 +1071,11 @@ ibm5250_in_real(uint16_t port, void *priv)
                    其它触发 → 0x02（0x8D3 要求 [0x2A] ⊆ 0x42，不能有 0x40/0x04）。 */
                 if (cpu_state.pc == 0x02D7)
                     /* 0x8D3 要 bit6|bit1；0x9D0 的 0xA17 还要 bit3（选了共享窗口） */
-                    u = dev->irq_from_aa ? 0xDA : (uint8_t)(0x42 | (dev->st3 ? 0x08 : 0));
+                    /* 0x8D3 要 bit6|bit1；0x9D0 的 0xA17 还要 bit3（选了共享窗口）；
+                       0x920 的 0x952 要 bit0=1，而 0x7A0 的 0x8D3 明确要 bit0=0。 */
+                    u = dev->irq_from_aa ? 0xDA
+                                         : (uint8_t) ((dev->blk920 ? 0x43 : 0x42) |
+                                                      (dev->st3 ? 0x08 : 0));
                 if (((u & 0x02) == 0) && (cpu_state.pc >= 0x0800) &&
                     (cpu_state.pc <= 0x0A00))
                     pclog("5250: NOBIT1 pc=%04X v=%02X latch=%02X c1w=%02X isr=%d serve=%d ph=%d rd=%d\n",
@@ -1134,8 +1139,15 @@ ibm5250_in_real(uint16_t port, void *priv)
                         uint32_t ssp = ((uint32_t) cpu_state.seg_ss.seg << 4) + SP;
                         uint16_t ra  = (uint16_t) (mem_readb_phys(ssp + 2) |
                                                    (mem_readb_phys(ssp + 3) << 8));
+                        uint16_t ra2 = (uint16_t) (mem_readb_phys(ssp + 4) |
+                                                   (mem_readb_phys(ssp + 5) << 8));
                         int internal = (ra == 0x089D);
-                        int data = internal ? 0 : ((dev->fseq + 1) & 0xFF);
+                        /* 0x920 块两段 0x840，内部帧要求相反：
+                           第一段（0x973 调用）BH.bit0=1/BL.bit7=1 → 0xC0；
+                           第二段（0x9A5 调用）两者都 0 → 0x00。 */
+                        int data = internal ? ((dev->blk920 && (ra2 == 0x0973))
+                                                  ? 0xC0 : 0x00)
+                                            : ((dev->fseq + 1) & 0xFF);
                         int b = ibm5250_proto_frame_bit(dev->rx_bit, data, 7);
 
                         if (++dev->rx_bit >= 15) {
@@ -1322,6 +1334,13 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                     dev->h00         = 0;
                     dev->q00         = 0;
                     dev->rx_on       = 0;
+                    dev->blk920      = (cpu_state.pc == 0x0927);
+                    if (dev->blk920) {   /* 0x920 也走同一套接收序列（立即 sync） */
+                        dev->rd = 0; dev->clkc = 0; dev->fhunt = 0; dev->fbit = 0;
+                        dev->fsync = 0; dev->serve = 1; dev->ph = 2;
+                        dev->rx_on = 1; dev->rx_phase = 0; dev->rx_d = 0;
+                        dev->rx_c = 0; dev->rx_hunt = 0; dev->rx_bit = 0; dev->fseq = 0;
+                    }
                     dev->st3         = 0;
                     dev->send_bits   = 0;
                     dev->send_via_aa = 0;
@@ -1451,6 +1470,11 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                0xA48 随后的 0x1C6 读必须回到状态寄存器，而不是继续送帧。 */
             /* 只有 0xA40 那次相位选择（0xA48 判据）结束供帧；
                其它 0x1C2=0x04 仍需继续送帧（0x9D0 前两项）。 */
+            if ((val & 0x04) && (cpu_state.pc == 0x099A) && dev->rx_on) {
+                /* 0x920 块的第二段：0x999 选相位后重新走一遍 0x840 头序列。 */
+                dev->rx_phase = 0; dev->rx_d = 0; dev->rx_c = 0;
+                dev->rx_hunt = 0;  dev->rx_bit = 0;
+            }
             if ((val & 0x04) && ibm5250_pc_in(cpu_state.pc, ibm_pc_sel4,
                                               sizeof(ibm_pc_sel4) / sizeof(ibm_pc_sel4[0])))
                 dev->serve = 0;
