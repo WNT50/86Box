@@ -1690,6 +1690,23 @@ epoch_cram_writew(uint32_t addr, uint16_t val, void *priv)
     epoch_cram_write(addr + 1, val >> 8, epoch);
 }
 
+/* 适配器共享 RAM 窗口 0xE400:0000..00FF（块 0x9D0 的 0xA5B 判据：
+   第 i 个字节必须等于 i）。窗口在 hiram 里，但内容由 5250 设备在
+   客人写 0x1C2=09 时重写。 */
+static uint8_t  adr_shram[0x100];
+static int      adr_shram_on;
+
+static void
+epoch_adr_shared_clear(void *priv)
+{
+    int i;
+
+    (void) priv;
+    for (i = 0; i < 0x100; i++)
+        adr_shram[i] = (uint8_t) i;
+    adr_shram_on = 1;
+}
+
 static uint8_t
 epoch_hiram_readb(uint32_t addr, void *priv)
 {
@@ -1698,6 +1715,9 @@ epoch_hiram_readb(uint32_t addr, void *priv)
     if (epoch_is_3477 && (addr >= EPOCH_GEN_BASE))
         return epoch->gen[((uint32_t) epoch->genbank * EPOCH_GEN_SIZE) +
                           (addr - EPOCH_GEN_BASE)];
+
+    if (adr_shram_on && (addr >= 0xE4000) && (addr < 0xE4100))
+        return adr_shram[addr - 0xE4000];
 
     return epoch->hiram[(addr - EPOCH_HIRAM_BASE) % EPOCH_HIRAM_SIZE];
 }
@@ -1716,6 +1736,11 @@ epoch_hiram_writeb(uint32_t addr, uint8_t val, void *priv)
     if (epoch_is_3477 && (addr >= EPOCH_GEN_BASE)) {
         /* The generator banks stay as the IPL left them: IBMBIO's clear pass
            would otherwise wipe the only font on this panel. */
+        return;
+    }
+
+    if (adr_shram_on && (addr >= 0xE4000) && (addr < 0xE4100)) {
+        adr_shram[addr - 0xE4000] = val;
         return;
     }
 
@@ -3782,7 +3807,11 @@ machine_xt_ibm3477_init(const machine_t *model)
     i8018x_pcb_set_irq_map(pcb, 1, 1); /* Keyboard */
     i8018x_pcb_set_irq_map(pcb, 4, 2); /* Floppy */
 
-    ibm5250_init(0, ibm3477_5250_irq_raise, pcb, ibm3477_5250_irq_clear, pcb);
+    {
+        ibm5250_t *ad = ibm5250_init(0, ibm3477_5250_irq_raise, pcb,
+                                     ibm3477_5250_irq_clear, pcb);
+        ibm5250_set_shared_clear(ad, epoch_adr_shared_clear, NULL);
+    }
 
     io_sethandler(0x1B0, 0x0001, NULL, NULL, NULL, ibm3477_diag_out, NULL, NULL, NULL);
 
