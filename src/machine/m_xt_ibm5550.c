@@ -38,7 +38,9 @@
 #include <86box/86box.h>
 #include <86box/device.h>
 #include "cpu.h"
+#include <86box/plat.h>
 #include <86box/i8018x.h>
+#include <86box/ibm5250.h>
 #include <86box/timer.h>
 #include <86box/io.h>
 #include <86box/dma.h>
@@ -3686,6 +3688,59 @@ epoch_rom_pages_load(void)
 /* IBM 3477-S: a cut-down Multistation on an 80186-12, with the 5550's
    display and keyboard but the chip's own timers, DMA and interrupt
    controller. The system ROS lives in the F8000 window. */
+
+/* Onboard IBM 5250 communications adapter: INT0 of the 80186 ICU.
+   The guest's handlers acknowledge with EOI type 12 (INT0). */
+/* Diagnostic terminal's result channel: the self-test reports on port 0x1B0
+   with the code in AX (segment 0x01 = result, 0x00 = pass counter). */
+static void
+ibm3477_diag_out(uint16_t port, uint8_t val, void *priv)
+{
+    (void) priv;
+
+    if (port != 0x1B0)
+        return;
+
+    {
+        uint32_t dsb = ((uint32_t) cpu_state.seg_ds.seg) << 4;
+        pclog("3477: OUT1B0 %02X ax=%04X pc=%04X [2A]=%02X [2B]=%02X [2D]=%02X\n",
+              val, AX, cpu_state.pc, mem_readb_phys(dsb + 0x2A),
+              mem_readb_phys(dsb + 0x2B), mem_readb_phys(dsb + 0x2D));
+        pclog("  PORTS [4]=%04X [6]=%04X [8]=%04X [A]=%04X [C]=%04X [E]=%04X [12]=%04X\n",
+              mem_readw_phys(dsb + 0x4), mem_readw_phys(dsb + 0x6),
+              mem_readw_phys(dsb + 0x8), mem_readw_phys(dsb + 0xA),
+              mem_readw_phys(dsb + 0xC), mem_readw_phys(dsb + 0xE),
+              mem_readw_phys(dsb + 0x12));
+        for (int v = 0x0B; v <= 0x0F; v++)
+            pclog("  IVT %02X -> %04X:%04X\n", v,
+                  mem_readw_phys((uint32_t) v * 4 + 2), mem_readw_phys((uint32_t) v * 4));
+    }
+
+    if (getenv("EPOCH3477_EXIT_ON_REPORT") && (val == 0x01)) {
+        pclog("3477: POWEROFF on report ax=%04X\n", AX);
+        plat_power_off();
+    }
+}
+
+static void
+ibm3477_5250_irq_raise(void *priv)
+{
+    static int n;
+    struct i8018x_pcb_t *pcb = (struct i8018x_pcb_t *) priv;
+
+    if (n++ < 20) pclog("5250: IRAISE #%d\n", n);
+    /* Force a fresh low->high edge: the adapter keeps its own level flag and
+       no longer gets an ack callback, so a bare level raise would be dropped. */
+    i8018x_pcb_icu_int(pcb, 1, 0);
+    i8018x_pcb_icu_int(pcb, 1, 1);
+}
+
+static void
+ibm3477_5250_irq_clear(void *priv)
+{
+    i8018x_pcb_icu_int((struct i8018x_pcb_t *) priv, 1, 0);
+}
+
 int
 machine_xt_ibm3477_init(const machine_t *model)
 {
@@ -3726,6 +3781,10 @@ machine_xt_ibm3477_init(const machine_t *model)
     i8018x_pcb_set_dma_channels(pcb, FDC_PRIMARY_DMA, -1);
     i8018x_pcb_set_irq_map(pcb, 1, 1); /* Keyboard */
     i8018x_pcb_set_irq_map(pcb, 4, 2); /* Floppy */
+
+    ibm5250_init(0, ibm3477_5250_irq_raise, pcb, ibm3477_5250_irq_clear, pcb);
+
+    io_sethandler(0x1B0, 0x0001, NULL, NULL, NULL, ibm3477_diag_out, NULL, NULL, NULL);
 
     return ret;
 }
