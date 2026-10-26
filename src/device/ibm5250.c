@@ -195,6 +195,8 @@ struct ibm5250_t {
     int      aa_latch;   /* 块级锁存：直到下一条 0x1C0 命令 */
     int      h00;        /* cmd=0x00 的 0x840 搜寻计数 */
     int      q00;        /* cmd=0x00 的 quiesce 交替位 */
+    int      b5_raised;  /* 0x5B0 只投一次中断（0x639 要求 [0x2A]==0） */
+    int      blk5b0;    /* 0x5B0 块：ISR 采样要 bit7（0x5F2 的 and 0x80） */
     int      blk920;    /* 0x920 块：ISR 采样要 bit0=1（0x952 判据） */
     int      rx_on;      /* 0xAB0 块的接收序列在用 */
     int      rx_phase;   /* 0 = 0x840 头，1 = 0x720 收帧 */
@@ -1048,7 +1050,9 @@ ibm5250_in_real(uint16_t port, void *priv)
                    全局套用会破坏 ISR(0x2D6) 采样（A2 要 [0x2A]&0x80）。 */
                 /* 读点由最后一次写入 0x1C1 的值区分（0xC0 读要 bit7=1、
                    0x80 读要 bit7=0），不再依赖 EMDIAG 的读指令地址。 */
-                if (dev->c1_wval & 0x80)
+                /* bit6 是 bit7 回读的置位/清除控制：
+                   0xC0（bit6=1）→ 回读 bit7=1；0x80（bit6=0）→ 回读 bit7=0。 */
+                if (dev->c1_wval & 0x40)
                     u |= 0x80;
                 else
                     u &= (uint8_t) ~0x80;
@@ -1066,6 +1070,9 @@ ibm5250_in_real(uint16_t port, void *priv)
                     dev->u_bit0 = 0;
                     u |= 0x01;
                 }
+                if (getenv("EPOCH5250_TRACE") && (cpu_state.pc >= 0x0610) && (cpu_state.pc <= 0x0630))
+                    pclog("R1C1 pc=%04X u=%02X c1w=%02X latch=%02X\n",
+                          cpu_state.pc, u, dev->c1_wval, dev->latch);
                 /* ISR 采样点：按触发来源给值（必须放在所有调整之后）。
                    AA 触发 → 0xDA（含 0x50，0x6F8 要）；
                    其它触发 → 0x02（0x8D3 要求 [0x2A] ⊆ 0x42，不能有 0x40/0x04）。 */
@@ -1074,8 +1081,9 @@ ibm5250_in_real(uint16_t port, void *priv)
                     /* 0x8D3 要 bit6|bit1；0x9D0 的 0xA17 还要 bit3（选了共享窗口）；
                        0x920 的 0x952 要 bit0=1，而 0x7A0 的 0x8D3 明确要 bit0=0。 */
                     u = dev->irq_from_aa ? 0xDA
-                                         : (uint8_t) ((dev->blk920 ? 0x43 : 0x42) |
-                                                      (dev->st3 ? 0x08 : 0));
+                                         : (dev->blk5b0 ? 0xDA
+                                            : (uint8_t) ((dev->blk920 ? 0x43 : 0x42) |
+                                                         (dev->st3 ? 0x08 : 0)));
                 if (((u & 0x02) == 0) && (cpu_state.pc >= 0x0800) &&
                     (cpu_state.pc <= 0x0A00))
                     pclog("5250: NOBIT1 pc=%04X v=%02X latch=%02X c1w=%02X isr=%d serve=%d ph=%d rd=%d\n",
@@ -1201,6 +1209,8 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
 {
     ibm5250_t *dev = (ibm5250_t *) priv;
 
+    if (getenv("EPOCH5250_TRACE") && (cpu_state.pc >= 0x05B0) && (cpu_state.pc <= 0x0700))
+        pclog("OUT5B pc=%04X port=%03X v=%02X\n", cpu_state.pc, port, val);
     if (getenv("EPOCH5250_TRACE") && (cpu_state.pc >= 0x7A0) && (cpu_state.pc <= 0x800))
         pclog("OUT7A pc=%04X port=%03X v=%02X cmd=%02X\n", cpu_state.pc, port, val, dev->cmdlat);
     if (getenv("EPOCH5250_TRACE") && (cpu_state.pc >= 0xA00) && (cpu_state.pc <= 0xC00))
@@ -1335,6 +1345,8 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                     dev->q00         = 0;
                     dev->rx_on       = 0;
                     dev->blk920      = (cpu_state.pc == 0x0927);
+                    dev->blk5b0      = 0;
+                    dev->b5_raised   = 0;
                     if (dev->blk920) {   /* 0x920 也走同一套接收序列（立即 sync） */
                         dev->rd = 0; dev->clkc = 0; dev->fhunt = 0; dev->fbit = 0;
                         dev->fsync = 0; dev->serve = 1; dev->ph = 2;
@@ -1413,6 +1425,8 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                       mem_readb_phys(dsb + 0x2D));
             }
             
+            if (getenv("EPOCH5250_TRACE") && (cpu_state.pc >= 0x05F0) && (cpu_state.pc <= 0x0700))
+                pclog("W1C1 pc=%04X v=%02X\n", cpu_state.pc, val);
             dev->c1_wval = val;
             if (val == 0x42)
                 dev->c1_42 = 1;
@@ -1434,7 +1448,9 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                     timer_set_delay_u64(&dev->timer, 200 * TIMER_USEC);
                 }
             }
-            dev->latch = (uint8_t) (val | 0x42);
+            /* 写 0x1C1=0x80 是"清 bit7"：0x5B0 在 0x626 写它，
+               0x62B 随即回读要求 bit7=0（AH=0xA4）。 */
+            dev->latch = (val == 0x80) ? (uint8_t) 0x42 : (uint8_t) (val | 0x42);
             dev->b1    = 1;   /* 0x1C1 写入即置状态 bit1（0xA2C/0x8E8 判据） */
             /* 任何一次 0x1C1 写入都会让下一次 1C2=04 的 bit1 变成 0：
                0x8F6 写 0x42、0xA2B 写 0x48 都是这个效果（0x904 / 0xA48 两条判据）。 */
@@ -1470,6 +1486,8 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                0xA48 随后的 0x1C6 读必须回到状态寄存器，而不是继续送帧。 */
             /* 只有 0xA40 那次相位选择（0xA48 判据）结束供帧；
                其它 0x1C2=0x04 仍需继续送帧（0x9D0 前两项）。 */
+            if ((val == 0x10) && (cpu_state.pc == 0x05B8))
+                dev->blk5b0 = 1;   /* 0x5B0 块开始 */
             if ((val & 0x04) && (cpu_state.pc == 0x099A) && dev->rx_on) {
                 /* 0x920 块的第二段：0x999 选相位后重新走一遍 0x840 头序列。 */
                 dev->rx_phase = 0; dev->rx_d = 0; dev->rx_c = 0;
@@ -1612,7 +1630,14 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                     dev->send_bits = 0;
                     /* 0x440 回显块不投：它要求 [0x2A]==0（0x495），中断会把
                        采样写进去。其余块（0x6A0 / 0x7A0）在发送完成后要一次中断。 */
-                    if (dev->cmdlat != 0x40) {
+                    if (dev->blk5b0)
+                        dev->c1_wval |= 0x40;   /* 一次发送 → 状态 bit7 重新置位（0x5B0 的 A3 循环） */
+                    /* 0x5B0 只投第一次：A2/A3 需要 [0x2A] bit7，A5 要求循环后 [0x2A]==0。
+                       之后的发送不再投（A7 的 bit2 需要另行建模）。 */
+                    if (dev->blk5b0 && dev->b5_raised) {
+                    } else if (dev->cmdlat != 0x40) {
+                        if (dev->blk5b0)
+                            dev->b5_raised = 1;
                         /* 发送完成立即投：0x8C0 链发完就直接进 0xB90 延时，
                            期间不读 0x1C6，挂起到“下一次读”会永远不触发。 */
                         dev->irq_from_aa = dev->aa_latch;   /* 块级锁存：一块内多帧都算同一语境 */
