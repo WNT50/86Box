@@ -74,6 +74,10 @@ static const uint16_t ibm_pc_s68[]  = { 0x0687, 0x0688 };
 static const uint16_t ibm_pc_isr2[] = { 0x02D6, 0x02D7, 0x02F2, 0x02F3 };
 static const uint16_t ibm_pc_u27[]  = { 0x02D7 };
 static const uint16_t ibm_pc_w927[] = { 0x0927 };
+/* 写 0x1C2=0x04 选择相位、随后立刻读 0x1C6 要求 bit1=0 的判据点：
+   0xA41(0x9D0) / 0xB3A(0xAB0) / 0xC1B(0xBA0)。这些点要结束供帧，
+   否则读回的是响应帧位，bit1 由帧内容决定。 */
+static const uint16_t ibm_pc_sel4[] = { 0x0A41, 0x0B3A, 0x0C1B };
 static const uint16_t ibm_pc_w56[]  = { 0x05D4, 0x05D5, 0x05D6 };
 static const uint16_t ibm_pc_w99[]  = { 0x0999, 0x099A, 0x099B };
 
@@ -191,6 +195,12 @@ struct ibm5250_t {
     int      aa_latch;   /* 块级锁存：直到下一条 0x1C0 命令 */
     int      h00;        /* cmd=0x00 的 0x840 搜寻计数 */
     int      q00;        /* cmd=0x00 的 quiesce 交替位 */
+    int      rx_on;      /* 0xAB0 块的接收序列在用 */
+    int      rx_phase;   /* 0 = 0x840 头，1 = 0x720 收帧 */
+    int      rx_d;       /* 头：数据读计数 */
+    int      rx_c;       /* 头：时钟读计数 */
+    int      rx_hunt;    /* 0x720：搜寻计数（sync 时须为 7） */
+    int      rx_bit;     /* 0x720：已收位数 */
     int      fno;        /* frame counter (log only) */
     int      u_bit0;     /* 收帧完成事件位（0x1C1 bit0，ISR 采样后清） */
     int      dummy;      /* optional leading idle read */
@@ -1088,16 +1098,62 @@ ibm5250_in_real(uint16_t port, void *priv)
             if (cpu_state.pc == 0x02DF)
                 return dev->irq_from_aa ? 0x04 : 0x02;
             rv = ibm5250_in_1c6(dev);
-            /* 块 0xB70：cmd=0x00 下 0x840 的 8 次搜寻，第一次就给 sync（bit7）。
-               否则永远是 base（0x4A，bit7=0），8 次全灭后 [0x2F]==0 → AH=0x01。 */
-            if ((dev->cmdlat == 0x00) && dev->serve && dev->st3) {
-                if ((cpu_state.pc == 0x08A8) && (dev->h00 == 0)) {
-                    dev->h00++;
-                    rv = 0x80;          /* 第一次搜寻给 sync（bit7） */
-                } else if (cpu_state.pc == 0x08B2) {
-                    /* 0x86C 的 8 次 quiesce 采样：相邻两次 bit7 必须相反。 */
-                    dev->q00 ^= 1;
-                    rv = dev->q00 ? 0x80 : 0x00;
+            /* ── 0xAB0 块的接收序列（块级状态机）─────────────────────────
+               0x840 头：0x845 数据(0) → 0x848 时钟 → 0x84B 数据(sync)
+                         → 8 拍交替 → 3×1 → 3×0
+               0x720 收帧：7 拍空转后 sync（[0x2D]=7）→ 15 位帧，
+                         数据字节 = fseq+1（0xAE7 的 al == ch）
+               状态由 0x1C3=0x08（0xABE）起算，不受 ISR 端口读干扰。 */
+            if (getenv("EPOCH5250_TRACE") && dev->rx_on &&
+                ((cpu_state.pc == 0x08A8) || (cpu_state.pc == 0x08B2)))
+                pclog("RX %c phase=%d d=%d c=%d hunt=%d bit=%d fseq=%d v=%02X\n",
+                      (cpu_state.pc == 0x08A8) ? 'D' : 'C',
+                      dev->rx_phase, dev->rx_d, dev->rx_c, dev->rx_hunt,
+                      dev->rx_bit, dev->fseq,
+                      (unsigned)((cpu_state.pc == 0x08A8) ? 0 : 0));
+            if (dev->rx_on && ((cpu_state.pc == 0x08A8) || (cpu_state.pc == 0x08B2))) {
+                if (cpu_state.pc == 0x08A8) {              /* 数据读：bit7 = 线路值 */
+                    if (dev->rx_phase == 0) {
+                        uint8_t v = (dev->rx_d == 1) ? 0x80 : 0x00;
+                        dev->rx_d++;
+                        return v;
+                    }
+                    if (dev->rx_hunt < 7) {                /* 未命中：0x72E inc cl */
+                        dev->rx_hunt++;
+                        return 0x00;
+                    }
+                    if (dev->rx_hunt == 7) {               /* sync：[0x2D] = 7 */
+                        dev->rx_hunt = 8;
+                        dev->rx_bit  = 0;
+                        return 0x80;
+                    }
+                    {
+                        /* 0x840 自己在 0x89A 也收一帧（返回地址 0x089D）：
+                           它必须解出 0（0xAD9 的 or al,al），且不占帧号；
+                           块内 0xAE4 的 255 帧从 data=1 起。 */
+                        uint32_t ssp = ((uint32_t) cpu_state.seg_ss.seg << 4) + SP;
+                        uint16_t ra  = (uint16_t) (mem_readb_phys(ssp + 2) |
+                                                   (mem_readb_phys(ssp + 3) << 8));
+                        int internal = (ra == 0x089D);
+                        int data = internal ? 0 : ((dev->fseq + 1) & 0xFF);
+                        int b = ibm5250_proto_frame_bit(dev->rx_bit, data, 7);
+
+                        if (++dev->rx_bit >= 15) {
+                            dev->rx_bit  = 0;
+                            dev->rx_hunt = 0;              /* 下一帧重新搜寻 */
+                            if (!internal)
+                                dev->fseq++;
+                        }
+                        return (uint8_t) (b ? 0x80 : 0x00);
+                    }
+                } else {                                   /* 时钟读 */
+                    if (dev->rx_phase == 0) {
+                        uint8_t v = (uint8_t) (ibm5250_proto_clk_bit(dev->rx_c) ? 0x80 : 0x00);
+                        if (++dev->rx_c >= 17)
+                            dev->rx_phase = 1;             /* 头结束 → 0x720 */
+                        return v;
+                    }
+                    return 0x80;                           /* 0x735 的 jnc 要求 CF=1 */
                 }
             }
             if (getenv("EPOCH5250_TRACE") && (cpu_state.pc >= 0x08A0) && (cpu_state.pc <= 0x08B8))
@@ -1148,6 +1204,26 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
 
     switch (port) {
         case 0x1C3:
+            /* 0xAB0 块在 0xABE 写 0x1C3=0x08 作为"开始接收"的标记：
+               0x840 的搜寻/静默序列必须从这里重新起算，否则上一块
+               （或 ISR 的端口读）留下的 rd/clkc 会让 8 次搜寻全部落空。 */
+            if (dev->cmdlat == 0x00) {   /* 只有 0xAB0 这块走这套序列 */
+            dev->rd     = 0;
+            dev->clkc   = 0;
+            dev->fhunt  = 0;
+            dev->fbit   = 0;
+            dev->fsync  = 0;
+            dev->serve  = 1;
+            dev->ph     = 2;
+            dev->rx_on    = 1;
+            dev->rx_phase = 0;
+            dev->rx_d     = 0;
+            dev->rx_c     = 0;
+            dev->rx_hunt  = 0;
+            dev->rx_bit   = 0;
+            dev->fseq     = 0;   /* 帧计数从 0 起：数据字节 = fseq+1 = ch */
+            }
+            
             dev->c3 = val;
             /* 块 0xAB0 的 0x840 采样预算只有约 20 拍，不能先耗在 19 拍握手上：
                quiesce 紧跟在空闲之后，直接进帧阶段。 */
@@ -1245,6 +1321,7 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                     dev->aa_latch    = 0;
                     dev->h00         = 0;
                     dev->q00         = 0;
+                    dev->rx_on       = 0;
                     dev->st3         = 0;
                     dev->send_bits   = 0;
                     dev->send_via_aa = 0;
@@ -1374,7 +1451,8 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                0xA48 随后的 0x1C6 读必须回到状态寄存器，而不是继续送帧。 */
             /* 只有 0xA40 那次相位选择（0xA48 判据）结束供帧；
                其它 0x1C2=0x04 仍需继续送帧（0x9D0 前两项）。 */
-            if ((val & 0x04) && (cpu_state.pc == 0x0A41))
+            if ((val & 0x04) && ibm5250_pc_in(cpu_state.pc, ibm_pc_sel4,
+                                              sizeof(ibm_pc_sel4) / sizeof(ibm_pc_sel4[0])))
                 dev->serve = 0;
 
             
@@ -1481,8 +1559,14 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             /* 必须放在选择器之后：0x0A 不在表里，上面的 else 会用 phase
                覆盖。块 0xBA0 在 0xBA5（取指后报 0xBA8）写 0x0A，随后
                0xBB6 读 0x1C6 要求 bit1=1。 */
-            if ((val == 0x0A) && (cpu_state.pc >= 0x0BA0) && (cpu_state.pc <= 0x0BB0))
+            if ((val == 0x0A) && (cpu_state.pc >= 0x0BA0) && (cpu_state.pc <= 0x0BB0)) {
                 dev->b1 = 1;
+                /* 块 0xBA0 与 0xAB0 同构（31 帧，ch=1..0x1F），用 0x1C2=0x0A 起算。 */
+                dev->rd = 0; dev->clkc = 0; dev->fhunt = 0; dev->fbit = 0;
+                dev->fsync = 0; dev->serve = 1; dev->ph = 2;
+                dev->rx_on = 1; dev->rx_phase = 0; dev->rx_d = 0; dev->rx_c = 0;
+                dev->rx_hunt = 0; dev->rx_bit = 0; dev->fseq = 0;
+            }
 
             /* 块 0x7A0 每次写 0x1C2 之后都会进 0x8C0：每次都重新武装
                中断窗口，否则第二次调用没有中断、[0x2B] 被 0xCA0 清掉。 */
