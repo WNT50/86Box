@@ -207,6 +207,7 @@ struct ibm5250_t {
     int      ready;
     int      w42;
     int      bit0;
+    int      st3;        /* 0x1C2=0x09：共享 RAM 窗口选中 → 0x1C1 bit3 */
     int      c3;          /* 0x1C3 写入值（块 0xAB0 写 0x08） */
     int      ab0;         /* 处于块 0xAB0 的 0x840 收帧上下文 */
     int      fhunt;       /* 0x720 搜寻同步位时已数到的空闲拍 */
@@ -1054,7 +1055,8 @@ ibm5250_in_real(uint16_t port, void *priv)
                    AA 触发 → 0xDA（含 0x50，0x6F8 要）；
                    其它触发 → 0x02（0x8D3 要求 [0x2A] ⊆ 0x42，不能有 0x40/0x04）。 */
                 if (cpu_state.pc == 0x02D7)
-                    u = dev->irq_from_aa ? 0xDA : 0x42;   /* 0x8D3 要 bit6|bit1 */
+                    /* 0x8D3 要 bit6|bit1；0x9D0 的 0xA17 还要 bit3（选了共享窗口） */
+                    u = dev->irq_from_aa ? 0xDA : (uint8_t)(0x42 | (dev->st3 ? 0x08 : 0));
                 if (((u & 0x02) == 0) && (cpu_state.pc >= 0x0800) &&
                     (cpu_state.pc <= 0x0A00))
                     pclog("5250: NOBIT1 pc=%04X v=%02X latch=%02X c1w=%02X isr=%d serve=%d ph=%d rd=%d\n",
@@ -1308,6 +1310,8 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             /* 任何一次 0x1C1 写入都会让下一次 1C2=04 的 bit1 变成 0：
                0x8F6 写 0x42、0xA2B 写 0x48 都是这个效果（0x904 / 0xA48 两条判据）。 */
             dev->w42 = 1;
+            if (getenv("EPOCH5250_TRACE"))
+                pclog("W42SET pc=%04X cmd=%02X\n", cpu_state.pc, dev->cmdlat);
             /* 0x6A0 末尾：写 0x1C1=0xFF 之后要求 (0x1C6 & 3) == 0
                ⇒ 视为复位/静默，停止继续供帧，0x1C6 读回 0 */
             if (val == 0xFF) {
@@ -1327,6 +1331,7 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                0x7D8/0x806 这些按选择器取 bit0 的判据永远拿不到 1。 */
             if (dev->latch == 0xFF)
                 dev->latch = 0;
+            dev->st3 = (((val & 0x0F) == 0x09) ? 1 : 0);
             
             
             if (getenv("EPOCH5250_POLLOG")) {
