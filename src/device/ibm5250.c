@@ -188,6 +188,7 @@ struct ibm5250_t {
     int      send_bits;  /* 本次发送已写出的位数（16 位一帧） */
     int      send_via_aa;/* 本次发送由 0x1C9=0xAA 发起 */
     int      aa_block;   /* 本块由 0xAA 触发（ISR 服务一次后清） */
+    int      aa_latch;   /* 块级锁存：直到下一条 0x1C0 命令 */
     int      fno;        /* frame counter (log only) */
     int      u_bit0;     /* 收帧完成事件位（0x1C1 bit0，ISR 采样后清） */
     int      dummy;      /* optional leading idle read */
@@ -1053,7 +1054,7 @@ ibm5250_in_real(uint16_t port, void *priv)
                    AA 触发 → 0xDA（含 0x50，0x6F8 要）；
                    其它触发 → 0x02（0x8D3 要求 [0x2A] ⊆ 0x42，不能有 0x40/0x04）。 */
                 if (cpu_state.pc == 0x02D7)
-                    u = dev->irq_from_aa ? 0xDA : 0x02;
+                    u = dev->irq_from_aa ? 0xDA : 0x42;   /* 0x8D3 要 bit6|bit1 */
                 if (((u & 0x02) == 0) && (cpu_state.pc >= 0x0800) &&
                     (cpu_state.pc <= 0x0A00))
                     pclog("5250: NOBIT1 pc=%04X v=%02X latch=%02X c1w=%02X isr=%d serve=%d ph=%d rd=%d\n",
@@ -1066,7 +1067,8 @@ ibm5250_in_real(uint16_t port, void *priv)
         case 0x1C3:
             return 0xff;
 
-        case 0x1C6:
+        case 0x1C6: {
+            uint8_t rv;
             if (dev->irq_pending && (cpu_state.pc != 0x02DF)) {
                 if (getenv("EPOCH5250_TRACE"))
                     pclog("IRQFIRE pc=%04X cmd=%02X aa=%d bits=%d\n",
@@ -1079,7 +1081,16 @@ ibm5250_in_real(uint16_t port, void *priv)
             }
             if (cpu_state.pc == 0x02DF)
                 return dev->irq_from_aa ? 0x04 : 0x02;
-            return ibm5250_in_1c6(dev);
+            rv = ibm5250_in_1c6(dev);
+            if (((cpu_state.pc == 0x07D7) || (cpu_state.pc == 0x07D8) ||
+                 (cpu_state.pc == 0x0805) || (cpu_state.pc == 0x0806)) &&
+                dev->bit0)
+                rv |= 0x01;   /* 0x1C2=0x08 选中 bit0，判据用 rcr/jz 直接取它 */
+            if (getenv("EPOCH5250_TRACE") && (cpu_state.pc >= 0x07F8) && (cpu_state.pc <= 0x0812))
+                pclog("RD805 v=%02X bit0=%d bit1=%d cmd=%02X done40=%d\n",
+                      rv, dev->bit0, dev->b1, dev->cmdlat, dev->done40);
+            return rv;
+        }
 
         default:
             return 0xff;
@@ -1091,6 +1102,8 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
 {
     ibm5250_t *dev = (ibm5250_t *) priv;
 
+    if (getenv("EPOCH5250_TRACE") && (cpu_state.pc >= 0x7A0) && (cpu_state.pc <= 0x800))
+        pclog("OUT7A pc=%04X port=%03X v=%02X cmd=%02X\n", cpu_state.pc, port, val, dev->cmdlat);
     if (getenv("EPOCH5250_TRACE") && (cpu_state.pc >= 0xA00) && (cpu_state.pc <= 0xC00))
         pclog("OUTA pc=%04X port=%03X v=%02X\n", cpu_state.pc, port, val);
 
@@ -1142,6 +1155,7 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                    挂起，等发送结束后的第一次 0x1C6 读再投。 */
                 dev->send_via_aa = 1;
                 dev->aa_block    = 1;
+                dev->aa_latch    = 1;
                 dev->send_bits   = 0;   /* 本次发送重新计数，别被上一帧的余数提前触发 */
             }
         case 0x1CA:
@@ -1197,6 +1211,7 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                     dev->idle_sync   = 0;
                     dev->idle_bits   = 0;
                     dev->irq_pending = 0;   /* 新命令作废上一块挂起的中断 */
+                    dev->aa_latch    = 0;
                     dev->send_bits   = 0;
                     dev->send_via_aa = 0;
                     /* 块 0x920 的命令写在 pc=0x0927；它要自己走一遍
@@ -1304,6 +1319,15 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             break;
 
         case 0x1C2:
+            /* 新的操作开始：结束 0x40 的空闲图案，否则后面的块每读 0x1C6
+               都会命中空闲分支（0x7A0 的 0x808 因此拿不到 bit0 → AH=0x43）。 */
+            dev->done40 = 0;
+            /* 0x1C1 曾写 0xFF（0x4BD/0x706 的自检）→ base() 会把 bit0/bit1
+               一律压成 0；新的一次状态选择开始，残值必须清掉，否则
+               0x7D8/0x806 这些按选择器取 bit0 的判据永远拿不到 1。 */
+            if (dev->latch == 0xFF)
+                dev->latch = 0;
+            
             
             if (getenv("EPOCH5250_POLLOG")) {
                 int nz = 0, k, first = -1;
@@ -1429,11 +1453,17 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                     /* 0x440 回显块不投：它要求 [0x2A]==0（0x495），中断会把
                        采样写进去。其余块（0x6A0 / 0x7A0）在发送完成后要一次中断。 */
                     if (dev->cmdlat != 0x40) {
+                        /* 发送完成立即投：0x8C0 链发完就直接进 0xB90 延时，
+                           期间不读 0x1C6，挂起到“下一次读”会永远不触发。 */
+                        dev->irq_from_aa = dev->aa_latch;   /* 块级锁存：一块内多帧都算同一语境 */
                         if (getenv("EPOCH5250_TRACE"))
-                            pclog("PENDSET cmd=%02X pc=%04X\n", dev->cmdlat, cpu_state.pc);
-                        dev->irq_pending = 1;
-                        dev->irq_from_aa = dev->send_via_aa;
-                        dev->send_via_aa = 0;
+                            pclog("IRQRAISE cmd=%02X pc=%04X aa=%d\n",
+                                  dev->cmdlat, cpu_state.pc, dev->irq_from_aa);
+                        if (dev->irq_raise != NULL) {
+                            dev->isr_active = 1;
+                            dev->irq_level  = 1;
+                            dev->irq_raise(dev->irq_priv);
+                        }
                     }
                     /* send_via_aa 不在这里清：一块里会连发多帧，
                        只有下一条 0x1C0 命令才算新语境。 */
