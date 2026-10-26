@@ -31,6 +31,8 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
+#include <86box/plat.h>
+#include <unistd.h>
 #include <time.h>
 #include <stdarg.h>
 #include <wchar.h>
@@ -2644,7 +2646,19 @@ epoch_misc_out(uint16_t port, uint8_t val, void *priv)
             out1b0_pass++;
         pclog("3477: OUT1B0 %02X ax=%04X pc=%04X:%04X [2F]=%02X [28]=%02X pass=%d\n", val, AX,
               (CS > 0xFFFF) ? (int) (CS >> 4) : (int) CS, cpu_state.pc, epoch_adr_latch,
-              mem_readb_phys(((uint32_t) DS << 4) + 0x28), out1b0_pass); }
+              mem_readb_phys(((uint32_t) DS << 4) + 0x28), out1b0_pass);
+        /* 拿到失败/结论码就立刻停机：不用等超时，跑批时间从分钟级降到秒级 */
+        if (getenv("EPOCH3477_EXIT_ON_REPORT") && (val == 0x01)) {
+            if (getenv("EPOCH5250_IDLELOG")) {
+                uint32_t dsb = ((uint32_t) cpu_state.seg_ds.seg) << 4;
+                pclog("IDLE @report ax=%04X [2D]=%02X [2A]=%02X [2B]=%02X\n",
+                      AX, mem_readb_phys(dsb + 0x2D), mem_readb_phys(dsb + 0x2A),
+                      mem_readb_phys(dsb + 0x2B));
+            }
+            /* 客机上报结论 → 优雅关机：同步磁盘、存 NVR、关主窗口 */
+            pclog("3477: POWEROFF on report ax=%04X\n", AX);
+            plat_power_off();
+        } }
     if (getenv("EPOCH3477_ADR_RW")) {
         if (port == 0x1C0) {
             if ((val == 0x40) || (val == 0x08)) {

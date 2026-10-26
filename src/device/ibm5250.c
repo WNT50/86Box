@@ -42,6 +42,9 @@
 #include "cpu.h"
 #include <86box/ibm5250.h>
 
+/* 临时探针总开关：默认关闭，pclog 同步写会拖慢时序 */
+#define TRACE_ON (getenv("EPOCH5250_TRACE") != NULL)
+
 /* 19-read handshake, measured on the real EMDIAG/0x840 sequence.  idx 18 must
    stay 0: giving it the start bit breaks the 0x500 subtest (AH=0x13). */
 /* 0x1C1 状态位：各判据链要求的并集
@@ -119,8 +122,8 @@ typedef struct {
 } ibm5250_frame_desc_t;
 
 static const ibm5250_frame_desc_t ibm5250_frames[] = {
-    /* 0x40 Clear Unit：实测用奇校验（手册写偶，待真机/ROM 复核） */
-    { 0x40, 7, 1, 1, { 0x55, 0x00, 0x00 } },
+    /* 0x40 Clear Unit：偶校验（EMDIAG 0x820 判定 sync+data+station+parity 须为偶数个 1） */
+    { 0x40, 7, 0, 1, { 0x2A, 0x00, 0x00 } },   /* 回显 [0xE] 写入的字节；0x460 判 bit1=0 / 0x46B 判 0x54 */
     /* 0x64：三帧，数据 14/AA/DB */
     { 0x64, 7, 0, 3, { 0x14, 0xAA, 0xDB } },
     /* 0x08 轮询：单帧 FF */
@@ -177,6 +180,7 @@ struct ibm5250_t {
     int      pre;        /* 帧前空槽（每槽 2 读）*/
     uint8_t  data8;      /* 0x1C8 数据寄存器 */
     int      seq64;      /* 0x64 命令的帧序号 */
+    int      idle_rd;    /* 0x40 空闲期连续读计数（0x482 要第 247 次读到 1） */
     int      fno;        /* frame counter (log only) */
     int      u_bit0;     /* 收帧完成事件位（0x1C1 bit0，ISR 采样后清） */
     int      dummy;      /* optional leading idle read */
@@ -452,13 +456,37 @@ static unsigned long g_isr_n;
 static uint8_t
 ibm5250_in_1c6(ibm5250_t *dev)
 {
+    if (getenv("EPOCH5250_IDLELOG") && (cpu_state.pc == 0x0485)) {
+        static int once;
+        if (!once) {
+            once = 1;
+            uint32_t dsb = ((uint32_t) cpu_state.seg_ds.seg) << 4;
+            pclog("IDLE @485: [2D]=%02X [2A]=%02X [2B]=%02X CL=%02X idle_rd=%d\n",
+                  mem_readb_phys(dsb + 0x2D), mem_readb_phys(dsb + 0x2A),
+                  mem_readb_phys(dsb + 0x2B), CL, dev->idle_rd);
+        }
+    }
     {
         g_rd_n++;
         if (dev->isr_active)
             g_isr_n++;
-        if (dev->isr_active || (cpu_state.pc == 0x02DF) || (cpu_state.pc == 0x02D7))
+        if (TRACE_ON && (dev->isr_active || (cpu_state.pc == 0x02DF) || (cpu_state.pc == 0x02D7)))
             pclog("5250: RD#%lu pc=%04X isr=%d ph=%d serve=%d\n",
                   g_rd_n, cpu_state.pc, dev->isr_active, dev->ph, dev->serve);
+    }
+    /* 0x40 首帧发完后，后续 0x720 一律走空闲图案：
+       第 247 次读给 sync（→[0x2D]=0xF7，0x482 判据），
+       第 260 次给 parity（sync+parity=2，偶校验通过），其余全 0（AL=0）。 */
+    if ((dev->cmdlat == 0x40) && dev->done40) {
+        uint8_t iv;
+        dev->idle_rd++;
+        /* 0x8A0 每位读两次口（0x8A8 采用 / 0x8B2 丢弃）：
+           搜寻循环 cl 从 0 起算（实测 sync@493 → cl=0xF6），故 cl=0xF7 ⇒ sync 在
+           rd=2*248-1=495；随后第 13 位（parity）= 495+2*13 = 521。 */
+        iv = ((dev->idle_rd == 495) || (dev->idle_rd == 521)) ? 0x80 : 0x00;
+        if (getenv("EPOCH5250_IDLELOG") && (dev->idle_rd <= 300))
+            pclog("IDLE rd=%d v=%02X pc=%04X\n", dev->idle_rd, iv, cpu_state.pc);
+        return iv;
     }
     uint8_t base = ibm5250_base(dev);
 
@@ -488,7 +516,17 @@ ibm5250_in_1c6(ibm5250_t *dev)
         /* 只有 EMDIAG 的 0x40/0x64 收发要求静默期读回 0x00
            （0x720 超时返回 AL=(读值<<1)，必须为 0）；
            其它情形（IPL 早期轮询）保持 base，否则 POST 会卡住。 */
-        if ((dev->cmdlat == 0x40) || (dev->cmdlat == 0x64) || (dev->cmdlat == 0xAA))
+        if (dev->cmdlat == 0x40) {
+            /* 0x720 的同步位搜索：空转第 247 次给一个 1，记入 [0x2D]=0xF7
+               （0x482 判据）；之后仍返回 0，15 位数据全 0 → AL=0。 */
+            dev->idle_rd++;
+            if (dev->idle_rd == 247)
+                return 0x80;    /* sync：客机把它当作第 247 位（[0x2D]=0xF7） */
+            if (dev->idle_rd == 259)
+                return 0x80;    /* 该伪帧的 parity 位：sync=1 + parity=1 → 偶校验通过 */
+            return 0x00;        /* 数据/站号全 0 → AL=0（0x476 判据） */
+        }
+        if ((dev->cmdlat == 0x64) || (dev->cmdlat == 0xAA))
             return 0x00;
         return ret;
     }
@@ -498,7 +536,7 @@ ibm5250_in_1c6(ibm5250_t *dev)
     if (dev->ph != 2) {
         /* ISR 的采样读不能消耗握手槽 */
         if (ISR_PC(cpu_state.pc))
-            { uint8_t r = (uint8_t) ((base & 0x3d) | (dev->ready ? 0x02 : 0x00));
+            { uint8_t r = (uint8_t) ((base & 0x7d) | (dev->ready ? 0x02 : 0x00));
             /* 0x1C6 bit1 = 状态可读：写过 0x1C1 且 bit6=1（c1_ff）后
                表示服务位已被取走 → 读 0；否则读 1。0x8EC 要 1、0x908 要 0。 */
             if (ISR_PC(cpu_state.pc))
@@ -606,8 +644,8 @@ ibm5250_in_1c6(ibm5250_t *dev)
         if (dev->isr_active)
             /* 块 0x5B0 的 A7 要求 [0x2A]&4：最后一次写 0x1C1 是 0x80(bit6=0)
                时，ISR 采样带上 bit2；其它情形仍是 0x4A。 */
-        if (dev->isr_active || (cpu_state.pc == 0x02D7) ||
-            (cpu_state.pc == 0x02DF) || (cpu_state.pc == 0x02FB))
+        if (TRACE_ON && (dev->isr_active || (cpu_state.pc == 0x02D7) ||
+            (cpu_state.pc == 0x02DF) || (cpu_state.pc == 0x02FB)))
             pclog("5250: ISRRD pc=%04X ret=%02X isr=%d serve=%d ph=%d rd=%d\n",
                   cpu_state.pc, (unsigned) (0x4A | (dev->c1_ff ? 0x00 : 0x04)), dev->isr_active,
                   dev->serve, dev->ph, dev->rd);
@@ -865,8 +903,10 @@ ibm5250_in_1c6(ibm5250_t *dev)
            是 0（实测 scanM4：k 只到 6~7 就重开）。 */
         if ((dev->rd >= 32) && !(dev->fsync && (dev->fbit < 15))) {
             dev->rd = 0;
-            if (dev->cmdlat == 0x40)
-                dev->done40 = 1;
+            if (dev->cmdlat == 0x40) {
+                dev->done40  = 1;
+                dev->idle_rd = 0;
+            }
             /* 0x40/0x64 只应答一帧：之后 0x720 必须"无应答"超时
                （BL=0 → AL=0）。0x08 等其它命令保持连续应答，IPL 需要。 */
             if (getenv("EPOCH5250_CODEDUMP") && (dev->cmdlat == 0x64)) {
@@ -1010,6 +1050,14 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
         case 0x1C9:      /* EMDIAG 的 [0x12]：写 0xAA 是“触发一帧应答”，命令号不变 */
             if (val == 0xAA) {   /* 触发一次收发：发送完成即拉中断，
                                     ISR 在 0xB90 延时窗口内写 [0x2A]/[0x2B] */
+                /* 同时重开一帧序列：0x440 之后的 0xAA 要一帧新的应答，
+                   不能被 0x40 的空闲图案挡住（0x840 只搜 8 次）。 */
+                dev->done40  = 0;
+                dev->idle_rd = 0;
+                dev->rd      = 0;
+                dev->fhunt   = 0;
+                dev->fsync   = 0;
+                dev->fbit    = 0;
                 if (dev->irq_raise != NULL) {
                     dev->isr_active = 1;
                     dev->irq_raise(dev->irq_priv);
@@ -1063,6 +1111,8 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                     dev->cmdlat = val;
                     dev->ph     = 1;
                     dev->rd     = 0;
+                    dev->idle_rd = 0;
+                    dev->done40  = 0;   /* 新命令到来：结束 0x40 空闲图案 */
                     /* 块 0x920 的命令写在 pc=0x0927；它要自己走一遍
                        0x840，必须从干净序列开始（实测宽条件会误伤
                        0x7A0 的 0x7C6）。 */
@@ -1192,7 +1242,7 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             /* 块 0x920 第二阶段：0x999 写 1C2=04 之后紧跟 0x9A2 call 0x840，
                此时 rd 已经走到 51，不重开起始序列就必然 AH=01。 */
             if ((val == 0x04)) {
-                pclog("5250: BOUND 1C2=04 rd=%lu isr=%lu pc=%04X\n", g_rd_n, g_isr_n, cpu_state.pc);
+                if (TRACE_ON) pclog("5250: BOUND 1C2=04 rd=%lu isr=%lu pc=%04X\n", g_rd_n, g_isr_n, cpu_state.pc);
                 dev->c2_rst = 1;
 
                 dev->rd    = 0;
