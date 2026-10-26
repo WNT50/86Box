@@ -375,7 +375,9 @@ ibm5250_base(ibm5250_t *dev)
        0x1C6 bit7 = 数据位、bit1 = 错误位（正常必须为 0）、bit0 = 就绪。
        phase 不是 0x1C6 的内容，绝不映射到 bit1 —— 之前正是它让每个块
        的 `1C6 & 2` 判据直接失败（AH=0x03 / 0xA1 …）。 */
-    uint8_t v = (uint8_t) (dev->latch & 0x7d);
+    /* bit1 不来自 latch：0x1C1 写入置 1，0x1C2 状态重选按选择器重算。
+       否则 0x1C1=0x48 置的 bit1 会一直留到 0x1C2=0x04 之后的 0xA48 判据。 */
+    uint8_t v = (uint8_t) (dev->latch & 0x7C);
 
     if (dev->b1_pulse && ibm5250_is_b1_pulse_pc(cpu_state.pc)) {
         dev->b1_pulse = 0;
@@ -1084,6 +1086,11 @@ ibm5250_in_real(uint16_t port, void *priv)
             if (cpu_state.pc == 0x02DF)
                 return dev->irq_from_aa ? 0x04 : 0x02;
             rv = ibm5250_in_1c6(dev);
+            if (getenv("EPOCH5250_TRACE") && (cpu_state.pc >= 0x0A40) && (cpu_state.pc <= 0x0A50))
+                pclog("RDA4 pc=%04X v=%02X b1=%d ph=%d w42=%d latch=%02X bp=%d cmd=%02X done40=%d ph=%d rd=%d serve=%d ab0=%d\n",
+                      cpu_state.pc, rv, dev->b1, dev->phase, dev->w42, dev->latch,
+                      dev->b1_pulse, dev->cmdlat, dev->done40, dev->ph, dev->rd,
+                      dev->serve, dev->ab0);
             if (((cpu_state.pc == 0x07D7) || (cpu_state.pc == 0x07D8) ||
                  (cpu_state.pc == 0x0805) || (cpu_state.pc == 0x0806)) &&
                 dev->bit0)
@@ -1307,6 +1314,7 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                 }
             }
             dev->latch = (uint8_t) (val | 0x42);
+            dev->b1    = 1;   /* 0x1C1 写入即置状态 bit1（0xA2C/0x8E8 判据） */
             /* 任何一次 0x1C1 写入都会让下一次 1C2=04 的 bit1 变成 0：
                0x8F6 写 0x42、0xA2B 写 0x48 都是这个效果（0x904 / 0xA48 两条判据）。 */
             dev->w42 = 1;
@@ -1332,6 +1340,11 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             if (dev->latch == 0xFF)
                 dev->latch = 0;
             dev->st3 = (((val & 0x0F) == 0x09) ? 1 : 0);
+            /* 状态重选 = 新的一次操作：握手序列从头开始。
+               否则 0xA48（写 0x1C2=0x04 后要求 bit1=0）会读到握手表里的 0x42。 */
+            dev->ph    = 1;
+            dev->rd    = 0;
+
             
             
             if (getenv("EPOCH5250_POLLOG")) {
@@ -1427,7 +1440,9 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                     if (sel->b0 != SEL_KEEP)
                         dev->bit0 = sel->b0;
                 } else {
-                    dev->b1 = dev->phase;
+                    /* 不在选择器表里的写（如 0x1C2=0x42/0x01）是状态重选：
+                       清 bit1（0x8FA → 0x904 要求 bit1=0）。 */
+                    dev->b1 = 0;
                 }
             }
 
