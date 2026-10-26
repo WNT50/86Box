@@ -159,7 +159,7 @@ static const ibm5250_sel_t ibm5250_sels[] = {
     { 0x01, 1,         0         },  /* 0x7E5 → 0x7ED jz 要求 bit0=0 */
     { 0x04, SEL_PHASE, SEL_KEEP  },  /* 0x8E1/0x8FF：bit1=phase */
     { 0x08, 1,         1         },  /* 0x7FA → 0x808 jc 要求 bit0=1 */
-    { 0x09, 1,         SEL_KEEP  },  /* 0x9D7 → 0x9E8 jnz 要求 bit1=1 */
+    { 0x09, 1,         1         },  /* 0x9D7 → 0x9E8 jnz 要 bit1=1；0xB7F → 0xB85 jc 要 bit0=1 */
 };
 
 struct ibm5250_t {
@@ -189,6 +189,8 @@ struct ibm5250_t {
     int      send_via_aa;/* 本次发送由 0x1C9=0xAA 发起 */
     int      aa_block;   /* 本块由 0xAA 触发（ISR 服务一次后清） */
     int      aa_latch;   /* 块级锁存：直到下一条 0x1C0 命令 */
+    int      h00;        /* cmd=0x00 的 0x840 搜寻计数 */
+    int      q00;        /* cmd=0x00 的 quiesce 交替位 */
     int      fno;        /* frame counter (log only) */
     int      u_bit0;     /* 收帧完成事件位（0x1C1 bit0，ISR 采样后清） */
     int      dummy;      /* optional leading idle read */
@@ -1086,6 +1088,26 @@ ibm5250_in_real(uint16_t port, void *priv)
             if (cpu_state.pc == 0x02DF)
                 return dev->irq_from_aa ? 0x04 : 0x02;
             rv = ibm5250_in_1c6(dev);
+            /* 块 0xB70：cmd=0x00 下 0x840 的 8 次搜寻，第一次就给 sync（bit7）。
+               否则永远是 base（0x4A，bit7=0），8 次全灭后 [0x2F]==0 → AH=0x01。 */
+            if ((dev->cmdlat == 0x00) && dev->serve && dev->st3) {
+                if ((cpu_state.pc == 0x08A8) && (dev->h00 == 0)) {
+                    dev->h00++;
+                    rv = 0x80;          /* 第一次搜寻给 sync（bit7） */
+                } else if (cpu_state.pc == 0x08B2) {
+                    /* 0x86C 的 8 次 quiesce 采样：相邻两次 bit7 必须相反。 */
+                    dev->q00 ^= 1;
+                    rv = dev->q00 ? 0x80 : 0x00;
+                }
+            }
+            if (getenv("EPOCH5250_TRACE") && (cpu_state.pc >= 0x08A0) && (cpu_state.pc <= 0x08B8))
+                pclog("RD8A pc=%04X v=%02X cmd=%02X serve=%d ph=%d rd=%d fsync=%d fbit=%d fno=%d ab0=%d\n",
+                      cpu_state.pc, rv, dev->cmdlat, dev->serve, dev->ph, dev->rd,
+                      dev->fsync, dev->fbit, dev->fno, dev->ab0);
+            if (getenv("EPOCH5250_TRACE") && (cpu_state.pc >= 0x0B70) && (cpu_state.pc <= 0x0B90))
+                pclog("RDB7 pc=%04X v=%02X bit0=%d b1=%d cmd=%02X ph=%d rd=%d latch=%02X\n",
+                      cpu_state.pc, rv, dev->bit0, dev->b1, dev->cmdlat, dev->ph,
+                      dev->rd, dev->latch);
             if (getenv("EPOCH5250_TRACE") && (cpu_state.pc >= 0x0A40) && (cpu_state.pc <= 0x0A50))
                 pclog("RDA4 pc=%04X v=%02X b1=%d ph=%d w42=%d latch=%02X bp=%d cmd=%02X done40=%d ph=%d rd=%d serve=%d ab0=%d\n",
                       cpu_state.pc, rv, dev->b1, dev->phase, dev->w42, dev->latch,
@@ -1221,6 +1243,9 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                     dev->idle_bits   = 0;
                     dev->irq_pending = 0;   /* 新命令作废上一块挂起的中断 */
                     dev->aa_latch    = 0;
+                    dev->h00         = 0;
+                    dev->q00         = 0;
+                    dev->st3         = 0;
                     dev->send_bits   = 0;
                     dev->send_via_aa = 0;
                     /* 块 0x920 的命令写在 pc=0x0927；它要自己走一遍
@@ -1339,7 +1364,8 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                0x7D8/0x806 这些按选择器取 bit0 的判据永远拿不到 1。 */
             if (dev->latch == 0xFF)
                 dev->latch = 0;
-            dev->st3 = (((val & 0x0F) == 0x09) ? 1 : 0);
+            if ((val & 0x0F) == 0x09)
+                dev->st3 = 1;   /* 块级：选中共享窗口后整块都算（0x8C0 链里的 0x04 不能清掉它） */
             /* 状态重选 = 新的一次操作：握手序列从头开始。
                否则 0xA48（写 0x1C2=0x04 后要求 bit1=0）会读到握手表里的 0x42。 */
             dev->ph    = 1;
