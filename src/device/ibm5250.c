@@ -393,8 +393,13 @@ static uint8_t
 ibm5250_ab0_frame_bit(ibm5250_t *dev, int k, int data)
 {
     /* 站号固定 7（EOM）：0xB11 的 (BH|0xF1)+1==0 要求 W8..W11 全 1。 */
-    if (k == 14)
+    if (k == 14) {
         dev->u_bit0 = 1;        /* 一帧收完 → 状态寄存器 bit0 事件 */
+        /* 0x40 的应答发完就拉中断：客机 ISR 在 0x2D7 采样 0x1C1 写 [0x2A]，
+           而 0x4AD 的 (al|0xAF)+1==0 检查依赖它（早于 0x1C9=0xAA 那次触发）。 */
+        if ((dev->cmdlat == 0x40) && (dev->irq_raise != NULL))
+            dev->irq_raise(dev->irq_priv);
+    }
     return ibm5250_proto_frame_bit(k, data, 7);
 }
 
@@ -412,8 +417,15 @@ ibm5250_frame_bit(ibm5250_t *dev, int k)
     if (dev->cmdlat == 0x40 && getenv("EPOCH5250_D40"))   /* 实验覆盖 */
         d = (int) strtoul(getenv("EPOCH5250_D40"), NULL, 16);
 
-    if (k == 15)
+    if (k == 15) {
         dev->u_bit0 = 1;
+        /* 0x40 应答发完即拉中断：客机 ISR(0x2D7) 采样 0x1C1 → [0x2A]，
+           0x4AD 的 (al|0xAF)+1==0 依赖它（早于 0x4D1 的 0xAA 触发）。 */
+        if ((dev->cmdlat == 0x40) && (dev->irq_raise != NULL)) {
+            dev->isr_active = 1;
+            dev->irq_raise(dev->irq_priv);
+        }
+    }
 
     if (k == 0)                 return 1;                 /* B15 sync */
     if (k <= 8)                 return (uint8_t) ((d >> (k - 1)) & 1);  /* B14..B7 */
@@ -479,6 +491,8 @@ ibm5250_in_1c6(ibm5250_t *dev)
        第 260 次给 parity（sync+parity=2，偶校验通过），其余全 0（AL=0）。 */
     if ((dev->cmdlat == 0x40) && dev->done40) {
         uint8_t iv;
+        if (getenv("EPOCH5250_TRACE") && ((dev->idle_rd < 3) || (dev->idle_rd == 495) || (dev->idle_rd % 100 == 0)))
+            pclog("IDLEPATH rd=%d pc=%04X CL=%02X BX=%04X\n", dev->idle_rd, cpu_state.pc, CL, BX);
         dev->idle_rd++;
         /* 0x8A0 每位读两次口（0x8A8 采用 / 0x8B2 丢弃）：
            搜寻循环 cl 从 0 起算（实测 sync@493 → cl=0xF6），故 cl=0xF7 ⇒ sync 在
@@ -904,8 +918,9 @@ ibm5250_in_1c6(ibm5250_t *dev)
         if ((dev->rd >= 32) && !(dev->fsync && (dev->fbit < 15))) {
             dev->rd = 0;
             if (dev->cmdlat == 0x40) {
+                if (!dev->done40)
+                    dev->idle_rd = 0;   /* 只在进入空闲时归零，别每次 rd>=32 都清 */
                 dev->done40  = 1;
-                dev->idle_rd = 0;
             }
             /* 0x40/0x64 只应答一帧：之后 0x720 必须"无应答"超时
                （BL=0 → AL=0）。0x08 等其它命令保持连续应答，IPL 需要。 */
@@ -978,6 +993,9 @@ ibm5250_in_real(uint16_t port, void *priv)
                （0x4AD 要 6|4、0x616 要 7、0x683 要 2=0、0x8D3 要 6|1、0xA17 要 6|3） */
             {
                 uint8_t u = (uint8_t) (dev->latch | IBMR_ST_READY);
+                if (getenv("EPOCH5250_TRACE") && (cpu_state.pc == 0x02D7))
+                    pclog("ISRVAL u=%02X latch=%02X c1w=%02X isr=%d\n",
+                          u, dev->latch, dev->c1_wval, dev->isr_active);
                 if (getenv("EPOCH5250_IDLELOG") && ((cpu_state.pc == 0x02D6) || (cpu_state.pc == 0x02F2)))
                     pclog("ISRST pc=%04X u=%02X isr=%d c1w=%02X ff=%d\n",
                           cpu_state.pc, u, dev->isr_active, dev->c1_wval, dev->c1_ff);
@@ -1188,6 +1206,14 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             break;
 
         case 0x1C1:
+            if (getenv("EPOCH5250_TRACE") && (val == 0xFF)) {
+                uint32_t dsb = ((uint32_t) cpu_state.seg_ds.seg) << 4;
+                pclog("CHK2A pc=%04X ds=%04X [2A]=%02X [2B]=%02X [2D]=%02X\n",
+                      cpu_state.pc, cpu_state.seg_ds.seg,
+                      mem_readb_phys(dsb + 0x2A), mem_readb_phys(dsb + 0x2B),
+                      mem_readb_phys(dsb + 0x2D));
+            }
+            
             dev->c1_wval = val;
             if (val == 0x42)
                 dev->c1_42 = 1;

@@ -1280,8 +1280,11 @@ check_interrupts(int nec_hlt)
             wait_cycs(3, 0);
             /* The on-chip controller vectors internally, so it hands over the
                type itself and the 8259 runs no acknowledge cycle for it. */
-            if (icu)
+            if (icu) {
                 temp = i8018x_pcb_icu_int_type();
+                if (getenv("EPOCH5250_TRACE"))
+                    pclog("CPU: ICU dispatch type=%02X cs=%04X ip=%04X\n", temp, CS, cpu_state.pc);
+            }
             else if (!cascade)
                 temp = pic_irq_ack_instance(pic.int_pending ? &pic : &pic2);
             else /* ACK to PIC */

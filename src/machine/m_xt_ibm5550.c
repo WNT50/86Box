@@ -3731,14 +3731,14 @@ ibm3477_5250_irq_raise(void *priv)
     if (n++ < 20) pclog("5250: IRAISE #%d\n", n);
     /* Force a fresh low->high edge: the adapter keeps its own level flag and
        no longer gets an ack callback, so a bare level raise would be dropped. */
-    i8018x_pcb_icu_int(pcb, 1, 0);
-    i8018x_pcb_icu_int(pcb, 1, 1);
+    i8018x_pcb_icu_int(pcb, 0, 0);
+    i8018x_pcb_icu_int(pcb, 0, 1);
 }
 
 static void
 ibm3477_5250_irq_clear(void *priv)
 {
-    i8018x_pcb_icu_int((struct i8018x_pcb_t *) priv, 1, 0);
+    i8018x_pcb_icu_int((struct i8018x_pcb_t *) priv, 0, 0);
 }
 
 int
