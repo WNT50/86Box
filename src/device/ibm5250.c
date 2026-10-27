@@ -1555,7 +1555,8 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                 dev->b5_raised = 0;
                 dev->b5_clr   = 0;
             }
-            if ((val & 0x04) && (cpu_state.pc == 0x099A) && dev->rx_on) {
+            /* 设备侧签名：(ctl=01, sel=04) 全片唯一，即 0x920 的第二段重启 */
+            if ((val & 0x04) && (dev->g_ctl == 0x01) && dev->rx_on) {
                 /* 0x920 块的第二段：0x999 选相位后重新走一遍 0x840 头序列。 */
                 dev->rx_phase = 0; dev->rx_d = 0; dev->rx_c = 0;
                 dev->rx_hunt = 0;  dev->rx_bit = 0;
