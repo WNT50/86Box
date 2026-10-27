@@ -42,6 +42,19 @@
 #include "cpu.h"
 #include <86box/ibm5250.h>
 
+/* 适配器有两个寄存器窗口：0x1C0 与 0x100（偏移相同）。
+   EMDIAG 的 0x500 第二遍把基址切到 0x100。 */
+#define IBM5250_ALT_BASE  0x0100
+#define IBM5250_ALT_DELTA 0x00C0
+
+static uint16_t
+ibm5250_norm(uint16_t port)
+{
+    if ((port >= IBM5250_ALT_BASE) && (port < (IBM5250_ALT_BASE + 0x20)))
+        return (uint16_t) (port + IBM5250_ALT_DELTA);
+    return port;
+}
+
 /* 临时探针总开关：默认关闭，pclog 同步写会拖慢时序 */
 #define TRACE_ON (getenv("EPOCH5250_TRACE") != NULL)
 
@@ -194,6 +207,10 @@ struct ibm5250_t {
     int      b5_sends;   /* 0x5B0 已完成的发送次数（决定 ISR 采样值） */
     int      blk5b0;    /* 0x5B0 块：ISR 采样要 bit7（0x5F2 的 and 0x80） */
     int      blk920;    /* 0x920 块：ISR 采样要 bit0=1（0x952 判据） */
+    int      rx_budget;
+    int      rx_zero;
+    int      isr_val;
+    int      prev_cmd;
     int      rx_on;      /* 0xAB0 块的接收序列在用 */
     int      rx_phase;   /* 0 = 0x840 头，1 = 0x720 收帧 */
     int      rx_d;       /* 头：数据读计数 */
@@ -1028,7 +1045,7 @@ ibm5250_in(uint16_t port, void *priv)
 {
     if (getenv("EPOCH5250_TRACE") && (cpu_state.pc >= 0x2D0) && (cpu_state.pc <= 0x308))
         pclog("ISRIN port=%03X pc=%04X cs=%04X\n", port, cpu_state.pc, CS);
-    return ibm5250_in_real(port, priv);
+    return ibm5250_in_real(ibm5250_norm(port), priv);
 }
 
 static uint8_t
@@ -1155,7 +1172,7 @@ ibm5250_in_real(uint16_t port, void *priv)
             }
             if (dev->isr_c6) {
                 dev->isr_c6 = 0;
-                return dev->irq_from_aa ? 0x04 : 0x02;
+                return (uint8_t) dev->isr_val;
             }
             rv = ibm5250_in_1c6(dev);
             /* ── 0xAB0 块的接收序列（块级状态机）─────────────────────────
@@ -1203,13 +1220,18 @@ ibm5250_in_real(uint16_t port, void *priv)
                         int data = internal ? ((dev->blk920 && (ra2 == 0x0973))
                                                   ? 0xC0 : 0x00)
                                             : ((dev->fseq + 1) & 0xFF);
+                        if (dev->rx_zero && !internal)
+                            data = 0x00;
                         int b = ibm5250_proto_frame_bit(dev->rx_bit, data, 7);
 
                         if (++dev->rx_bit >= 15) {
                             dev->rx_bit  = 0;
                             dev->rx_hunt = 0;              /* 下一帧重新搜寻 */
-                            if (!internal)
+                            if (!internal) {
                                 dev->fseq++;
+                                if (dev->rx_budget > 0 && --dev->rx_budget == 0)
+                                    dev->rx_zero = 1;
+                            }
                         }
                         return (uint8_t) (b ? 0x80 : 0x00);
                     }
@@ -1255,6 +1277,8 @@ static void
 ibm5250_out(uint16_t port, uint8_t val, void *priv)
 {
     ibm5250_t *dev = (ibm5250_t *) priv;
+
+    port = ibm5250_norm(port);
 
     /* (命令, 控制, 选择) 文法：只记录转移，不改变行为 */
     switch (port) {
@@ -1317,6 +1341,9 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             dev->rx_hunt  = 0;
             dev->rx_bit   = 0;
             dev->fseq     = 0;   /* 帧计数从 0 起：数据字节 = fseq+1 = ch */
+            dev->isr_val   = 0x04;
+            dev->rx_zero   = 0;
+            dev->rx_budget = 0xFF;
             }
             
             dev->c3 = val;
@@ -1405,6 +1432,7 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                 int hold = (val == 0x08) && (dev->cmdlat == 0x40) && !dev->done40;
 
                 if (!hold) {
+                    dev->prev_cmd = dev->cmdlat;
                     dev->cmdlat = val;
                     dev->ph     = 1;
                     dev->rd     = 0;
@@ -1416,13 +1444,29 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                     dev->aa_latch    = 0;
                     dev->h00         = 0;
                     dev->q00         = 0;
-                    dev->rx_on       = 0;
+                    /* 收摊写不算新纪元：0x00（主窗口）与 0x10（0x100 窗口，
+                       0x50C 的 cmp dx,0x100 分支）都不得清掉刚起的接收序列。 */
+                    if ((val != 0x00) && !((val == 0x10) && (dev->prev_cmd == 0x08)))
+                        dev->rx_on = 0;
                     /* 同一签名：0x1C0←0x00 且 (ctl=48, sel=04) */
-                    dev->blk920      = ((dev->cmdlat == 0x00) && (dev->g_ctl == 0x48) &&
-                                        (dev->g_sel == 0x04));
+                    dev->blk920      = ((dev->cmdlat == 0x00) && (dev->prev_cmd == 0x00) &&
+                                        (dev->g_ctl == 0x48) && (dev->g_sel == 0x04));
+                    if (dev->blk920)
+                        dev->isr_val = 0x02;
                     dev->blk5b0      = 0;
                     dev->b5_raised   = 0;
                     dev->b5_sends    = 0;
+                    if (val == 0x40) dev->isr_val = 0x02;
+                    if (val == 0x64) dev->isr_val = 0x04;
+                    if (val == 0x00 && dev->prev_cmd == 0x64) dev->isr_val = 0x02;
+                    if (val == 0x08) {
+                        dev->isr_val = 0x04;
+                        dev->rd = 0; dev->clkc = 0; dev->fhunt = 0; dev->fbit = 0;
+                        dev->fsync = 0; dev->serve = 1; dev->ph = 2;
+                        dev->rx_on = 1; dev->rx_phase = 0; dev->rx_d = 0; dev->rx_c = 0;
+                        dev->rx_hunt = 0; dev->rx_bit = 0; dev->fseq = 0;
+                        dev->rx_zero = 0; dev->rx_budget = 1;
+                    }
                     if (dev->blk920) {   /* 0x920 也走同一套接收序列（立即 sync） */
                         dev->rd = 0; dev->clkc = 0; dev->fhunt = 0; dev->fbit = 0;
                         dev->fsync = 0; dev->serve = 1; dev->ph = 2;
@@ -1653,6 +1697,8 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                 dev->flast   = 0;
                 dev->clkc    = 0;
                 dev->fseq    = 0;
+                dev->rx_zero = 0;
+                dev->rx_budget = 0xFF;
                 dev->b1_pulse = 1;
             }
             if (val & 0x04) {
@@ -1816,8 +1862,27 @@ ibm5250_reset(ibm5250_t *dev)
 static const uint16_t ibm5250_ports[] = {
     0x1C0, 0x1C1, 0x1C2, 0x1C3, 0x1C6, 0x1C7,
     0x1C8, 0x1C9, 0x1CA, 0x1CB, 0x1CC, 0x1CD, 0x1CE, 0x1CF,
-    0x1D0, 0x1D1, 0x1D6
+    0x1D0, 0x1D1, 0x1D6,
+    0x100, 0x101, 0x102, 0x103, 0x106, 0x107,
+    0x108, 0x109, 0x10A, 0x10B, 0x10C, 0x10D, 0x10E, 0x10F,
+    0x110, 0x111, 0x116
 };
+
+/* 只观测：0x100..0x11F 上的访问（第二窗口）。返回 0xFF、吞掉写，不影响行为。 */
+static uint8_t
+ibm5250_alt_probe_in(uint16_t port, void *priv)
+{
+    (void) priv;
+    pclog("ALTIN  p=%03X pc=%04X\n", port, cpu_state.pc);
+    return 0xFF;
+}
+
+static void
+ibm5250_alt_probe_out(uint16_t port, uint8_t val, void *priv)
+{
+    (void) priv;
+    pclog("ALTOUT p=%03X v=%02X pc=%04X\n", port, val, cpu_state.pc);
+}
 
 ibm5250_t *
 ibm5250_init(int irq, ibm5250_irq_t irq_raise, void *irq_priv,
@@ -1841,6 +1906,11 @@ ibm5250_init(int irq, ibm5250_irq_t irq_raise, void *irq_priv,
     for (int i = 0; i < (int) (sizeof(ibm5250_ports) / sizeof(ibm5250_ports[0])); i++)
         io_sethandler(ibm5250_ports[i], 0x0001,
                       ibm5250_in, NULL, NULL, ibm5250_out, NULL, NULL, dev);
+
+    if (getenv("EPOCH5250_ALT_PROBE"))
+        io_sethandler(0x0100, 0x0020,
+                      ibm5250_alt_probe_in, NULL, NULL,
+                      ibm5250_alt_probe_out, NULL, NULL, dev);
 
     pclog("5250: adapter initialised (irq=%d, %d ports)\n",
           irq, (int) (sizeof(ibm5250_ports) / sizeof(ibm5250_ports[0])));
