@@ -1096,7 +1096,9 @@ ibm5250_in_real(uint16_t port, void *priv)
                 /* A9：写 0x1C1=0x84 后 0x687 的回读要求 bit2=0。
                    必须放在 isr_active 那行之后，否则 bit2 会被重新置上。
                    只认 0x688 这个读点，块 0x500 的 0x13 判据不受影响。 */
-                if ((cpu_state.pc == 0x0688) && dev->blk5b0)
+                /* A9：写 0x1C1=0x84 之后的第一次回读要求 bit2=0。
+                   用“写值 + 读序号”定位，不再看 pc。 */
+                if (dev->blk5b0 && (dev->c1_wval == 0x84) && (dev->rd_c1 == 1))
                     u &= (uint8_t) ~0x04;
                 if (getenv("EPOCH5250_TRACE") && (cpu_state.pc >= 0x0610) && (cpu_state.pc <= 0x0630))
                     pclog("R1C1 pc=%04X u=%02X c1w=%02X latch=%02X\n",
@@ -1414,7 +1416,9 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                     /* 块 0x920 的命令写在 pc=0x0927；它要自己走一遍
                        0x840，必须从干净序列开始（实测宽条件会误伤
                        0x7A0 的 0x7C6）。 */
-                    if ((val == 0x00) && ibm5250_pc_in(cpu_state.pc, ibm_pc_w927, 1)) {
+                    /* 设备侧签名：0x927 这次 0x1C0←0x00 发生在 (ctl=48, sel=04)
+                       之后；0x7A0 的 0x7C6 是 (ctl=FF, sel=00)，天然分开。 */
+                    if ((val == 0x00) && (dev->g_ctl == 0x48) && (dev->g_sel == 0x04)) {
                         dev->fhunt = 0;
                         dev->fsync = 0;
                         dev->fbit  = 0;
@@ -1543,7 +1547,9 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                0xA48 随后的 0x1C6 读必须回到状态寄存器，而不是继续送帧。 */
             /* 只有 0xA40 那次相位选择（0xA48 判据）结束供帧；
                其它 0x1C2=0x04 仍需继续送帧（0x9D0 前两项）。 */
-            if ((val == 0x10) && (cpu_state.pc == 0x05B8)) {
+            /* 块起点判据改为设备侧：0x1C2←0x10 全片只出现在 A 组开头
+               （文法日志里 (ctl=01, sel=10) 共 4 次，全在本块内）。 */
+            if (val == 0x10) {
                 dev->blk5b0   = 1;   /* 0x5B0 块开始 */
                 dev->b5_sends = 0;
                 dev->b5_raised = 0;
