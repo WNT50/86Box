@@ -1446,8 +1446,13 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                     dev->q00         = 0;
                     /* 收摊写不算新纪元：0x00（主窗口）与 0x10（0x100 窗口，
                        0x50C 的 cmp dx,0x100 分支）都不得清掉刚起的接收序列。 */
-                    if ((val != 0x00) && !((val == 0x10) && (dev->prev_cmd == 0x08)))
+                    if ((val != 0x00) && !((val == 0x10) && (dev->prev_cmd == 0x08))) {
                         dev->rx_on = 0;
+                        /* 预算状态只属于 0x500 那个窗口：新命令必须清零，
+                           否则后续块的 0x840 sync 搜寻拿到全 0 数据。 */
+                        dev->rx_zero = 0;
+                        dev->rx_budget = 0xFF;
+                    }
                     /* 同一签名：0x1C0←0x00 且 (ctl=48, sel=04) */
                     dev->blk920      = ((dev->cmdlat == 0x00) && (dev->prev_cmd == 0x00) &&
                                         (dev->g_ctl == 0x48) && (dev->g_sel == 0x04));
@@ -1456,7 +1461,13 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                     dev->blk5b0      = 0;
                     dev->b5_raised   = 0;
                     dev->b5_sends    = 0;
-                    if (val == 0x40) dev->isr_val = 0x02;
+                    if (val == 0x40) {
+                        dev->isr_val = 0x02;
+                        /* 0x440 链在 0x45B 有它自己的 0x840 sync 搜寻 */
+                        dev->rx_on = 1; dev->rx_phase = 0; dev->rx_d = 0; dev->rx_c = 0;
+                        dev->rx_hunt = 0; dev->rx_bit = 0; dev->serve = 1;
+                        dev->rx_zero = 0; dev->rx_budget = 0xFF;
+                    }
                     if (val == 0x64) dev->isr_val = 0x04;
                     if (val == 0x00 && dev->prev_cmd == 0x64) dev->isr_val = 0x02;
                     if (val == 0x08) {
