@@ -211,6 +211,9 @@ struct ibm5250_t {
     int      rx_zero;
     int      isr_val;
     int      prev_cmd;
+    int      win_sel;    /* 0x1CA/0x10A 的窗口选择锁存 */
+    int      cnt_pri;    /* 主窗口 0x1C0 组的访问计数 */
+    int      cnt_alt;    /* 第二窗口 0x100 组的访问计数 */
     int      rx_on;      /* 0xAB0 块的接收序列在用 */
     int      rx_phase;   /* 0 = 0x840 头，1 = 0x720 收帧 */
     int      rx_d;       /* 头：数据读计数 */
@@ -1045,6 +1048,11 @@ ibm5250_in(uint16_t port, void *priv)
 {
     if (getenv("EPOCH5250_TRACE") && (cpu_state.pc >= 0x2D0) && (cpu_state.pc <= 0x308))
         pclog("ISRIN port=%03X pc=%04X cs=%04X\n", port, cpu_state.pc, CS);
+    {
+        ibm5250_t *d = (ibm5250_t *) priv;
+        if ((port >= 0x0100) && (port < 0x0120)) d->cnt_alt++;
+        else if ((port >= 0x01C0) && (port < 0x01E0)) d->cnt_pri++;
+    }
     return ibm5250_in_real(ibm5250_norm(port), priv);
 }
 
@@ -1278,6 +1286,13 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
 {
     ibm5250_t *dev = (ibm5250_t *) priv;
 
+    if ((port >= 0x0100) && (port < 0x0120)) dev->cnt_alt++;
+    else if ((port >= 0x01C0) && (port < 0x01E0)) dev->cnt_pri++;
+
+    /* 0x1CA / 0x10A 是窗口/通道选择锁存（两遍都会写，顺序固定）。 */
+    if ((port == 0x01CA) || (port == 0x010A))
+        dev->win_sel = val;
+
     port = ibm5250_norm(port);
 
     /* (命令, 控制, 选择) 文法：只记录转移，不改变行为 */
@@ -1424,7 +1439,8 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             break;
 
         case 0x1C0:
-            pclog("5250: CMDW %02X pc=%04X\n", val, cpu_state.pc);
+            pclog("5250: CMDW %02X pc=%04X [pri=%d alt=%d sel=%d]\n",
+                  val, cpu_state.pc, dev->cnt_pri, dev->cnt_alt, dev->win_sel);
             /* 协议表：每个测试块都先写一条命令（0x00/0x08/0x10/0x40/0x64/0xAA…），
                之前只放行 0x40/0x08/0x64，导致 0x7A0 起步就被忽略。 */
             if (val != 0xFF) {
