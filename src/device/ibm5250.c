@@ -77,7 +77,7 @@ static const uint16_t ibm_pc_w927[] = { 0x0927 };
 /* 写 0x1C2=0x04 选择相位、随后立刻读 0x1C6 要求 bit1=0 的判据点：
    0xA41(0x9D0) / 0xB3A(0xAB0) / 0xC1B(0xBA0)。这些点要结束供帧，
    否则读回的是响应帧位，bit1 由帧内容决定。 */
-static const uint16_t ibm_pc_sel4[] = { 0x0A41, 0x0B3A, 0x0C1B };
+static const uint16_t ibm_pc_sel4[] = { 0x0A41, 0x0B3A, 0x0C1B, 0x0675 };
 static const uint16_t ibm_pc_w56[]  = { 0x05D4, 0x05D5, 0x05D6 };
 static const uint16_t ibm_pc_w99[]  = { 0x0999, 0x099A, 0x099B };
 
@@ -195,7 +195,9 @@ struct ibm5250_t {
     int      aa_latch;   /* 块级锁存：直到下一条 0x1C0 命令 */
     int      h00;        /* cmd=0x00 的 0x840 搜寻计数 */
     int      q00;        /* cmd=0x00 的 quiesce 交替位 */
-    int      b5_raised;  /* 0x5B0 只投一次中断（0x639 要求 [0x2A]==0） */
+    int      b5_raised;  /* 0x5B0 已投过的中断次数 */
+    int      b5_clr;     /* 0x5B0：0x1C1=0x80 写了多少次（=轮询帧序号） */
+    int      b5_sends;   /* 0x5B0 已完成的发送次数（决定 ISR 采样值） */
     int      blk5b0;    /* 0x5B0 块：ISR 采样要 bit7（0x5F2 的 and 0x80） */
     int      blk920;    /* 0x920 块：ISR 采样要 bit0=1（0x952 判据） */
     int      rx_on;      /* 0xAB0 块的接收序列在用 */
@@ -1064,8 +1066,9 @@ ibm5250_in_real(uint16_t port, void *priv)
                     u &= (uint8_t) ~0x04;
                 if (dev->c2_rst)
                     u &= (uint8_t) ~0x02;
+
                 if (dev->isr_active && !dev->c1_ff)
-                    u |= 0x04;
+                    u |= 0x04;   /* 写 0x1C1=0x84 之后 A9 要求 bit2=0，不能被这里加回来 */
                 if (dev->u_bit0) {
                     dev->u_bit0 = 0;
                     u |= 0x01;
@@ -1081,7 +1084,7 @@ ibm5250_in_real(uint16_t port, void *priv)
                     /* 0x8D3 要 bit6|bit1；0x9D0 的 0xA17 还要 bit3（选了共享窗口）；
                        0x920 的 0x952 要 bit0=1，而 0x7A0 的 0x8D3 明确要 bit0=0。 */
                     u = dev->irq_from_aa ? 0xDA
-                                         : (dev->blk5b0 ? 0xDA
+                                         : (dev->blk5b0 ? ((dev->b5_clr == 0) ? 0xDA : 0x04)
                                             : (uint8_t) ((dev->blk920 ? 0x43 : 0x42) |
                                                          (dev->st3 ? 0x08 : 0)));
                 if (((u & 0x02) == 0) && (cpu_state.pc >= 0x0800) &&
@@ -1347,6 +1350,7 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                     dev->blk920      = (cpu_state.pc == 0x0927);
                     dev->blk5b0      = 0;
                     dev->b5_raised   = 0;
+                    dev->b5_sends    = 0;
                     if (dev->blk920) {   /* 0x920 也走同一套接收序列（立即 sync） */
                         dev->rd = 0; dev->clkc = 0; dev->fhunt = 0; dev->fbit = 0;
                         dev->fsync = 0; dev->serve = 1; dev->ph = 2;
@@ -1451,6 +1455,8 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             /* 写 0x1C1=0x80 是"清 bit7"：0x5B0 在 0x626 写它，
                0x62B 随即回读要求 bit7=0（AH=0xA4）。 */
             dev->latch = (val == 0x80) ? (uint8_t) 0x42 : (uint8_t) (val | 0x42);
+            if ((val == 0x80) && dev->blk5b0)
+                dev->b5_clr++;   /* 每轮询帧一次：0 → 首帧, 1..15 → 循环内, ≥15 → 循环后 */
             dev->b1    = 1;   /* 0x1C1 写入即置状态 bit1（0xA2C/0x8E8 判据） */
             /* 任何一次 0x1C1 写入都会让下一次 1C2=04 的 bit1 变成 0：
                0x8F6 写 0x42、0xA2B 写 0x48 都是这个效果（0x904 / 0xA48 两条判据）。 */
@@ -1486,8 +1492,12 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                0xA48 随后的 0x1C6 读必须回到状态寄存器，而不是继续送帧。 */
             /* 只有 0xA40 那次相位选择（0xA48 判据）结束供帧；
                其它 0x1C2=0x04 仍需继续送帧（0x9D0 前两项）。 */
-            if ((val == 0x10) && (cpu_state.pc == 0x05B8))
-                dev->blk5b0 = 1;   /* 0x5B0 块开始 */
+            if ((val == 0x10) && (cpu_state.pc == 0x05B8)) {
+                dev->blk5b0   = 1;   /* 0x5B0 块开始 */
+                dev->b5_sends = 0;
+                dev->b5_raised = 0;
+                dev->b5_clr   = 0;
+            }
             if ((val & 0x04) && (cpu_state.pc == 0x099A) && dev->rx_on) {
                 /* 0x920 块的第二段：0x999 选相位后重新走一遍 0x840 头序列。 */
                 dev->rx_phase = 0; dev->rx_d = 0; dev->rx_c = 0;
@@ -1630,14 +1640,17 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                     dev->send_bits = 0;
                     /* 0x440 回显块不投：它要求 [0x2A]==0（0x495），中断会把
                        采样写进去。其余块（0x6A0 / 0x7A0）在发送完成后要一次中断。 */
-                    if (dev->blk5b0)
+                    if (dev->blk5b0) {
                         dev->c1_wval |= 0x40;   /* 一次发送 → 状态 bit7 重新置位（0x5B0 的 A3 循环） */
-                    /* 0x5B0 只投第一次：A2/A3 需要 [0x2A] bit7，A5 要求循环后 [0x2A]==0。
-                       之后的发送不再投（A7 的 bit2 需要另行建模）。 */
-                    if (dev->blk5b0 && dev->b5_raised) {
+                        dev->b5_sends++;
+                    }
+                    /* 0x5B0：第 1 次发送要中断（A2/A3），中间 15 帧轮询不留 [0x2A]（A5），
+                       循环后的发送再要一次（A7 的 bit2）。 */
+                    if (dev->blk5b0 && (dev->b5_clr >= 1) && (dev->b5_clr <= 14)) {
+                        /* 15 帧轮询期内不投（A5 要求循环结束 [0x2A]==0） */
                     } else if (dev->cmdlat != 0x40) {
                         if (dev->blk5b0)
-                            dev->b5_raised = 1;
+                            dev->b5_raised++;
                         /* 发送完成立即投：0x8C0 链发完就直接进 0xB90 延时，
                            期间不读 0x1C6，挂起到“下一次读”会永远不触发。 */
                         dev->irq_from_aa = dev->aa_latch;   /* 块级锁存：一块内多帧都算同一语境 */
