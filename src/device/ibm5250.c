@@ -68,18 +68,10 @@ ibm5250_pc_in(uint16_t pc, const uint16_t *set, unsigned n)
     return 0;
 }
 
-static const uint16_t ibm_pc_s61[]  = { 0x061A, 0x061B };
-static const uint16_t ibm_pc_s62[]  = { 0x062B, 0x062C };
-static const uint16_t ibm_pc_s68[]  = { 0x0687, 0x0688 };
-static const uint16_t ibm_pc_isr2[] = { 0x02D6, 0x02D7, 0x02F2, 0x02F3 };
-static const uint16_t ibm_pc_u27[]  = { 0x02D7 };
-static const uint16_t ibm_pc_w927[] = { 0x0927 };
 /* 写 0x1C2=0x04 选择相位、随后立刻读 0x1C6 要求 bit1=0 的判据点：
    0xA41(0x9D0) / 0xB3A(0xAB0) / 0xC1B(0xBA0)。这些点要结束供帧，
    否则读回的是响应帧位，bit1 由帧内容决定。 */
 static const uint16_t ibm_pc_sel4[] = { 0x0A41, 0x0B3A, 0x0C1B, 0x0675 };
-static const uint16_t ibm_pc_w56[]  = { 0x05D4, 0x05D5, 0x05D6 };
-static const uint16_t ibm_pc_w99[]  = { 0x0999, 0x099A, 0x099B };
 
 /* 0x840 的两个读点类别：1=数据读(0x8A7/0x8A8)，2=时钟读(0x8B1/0x8B2)，
    0=其它读（块内 0x71 检查等，不推进序列）。 */
