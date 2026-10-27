@@ -175,6 +175,8 @@ struct ibm5250_t {
     int      rd;         /* read index inside the current phase */
     int      serve;
     int      isr_active;
+    int      isr_samp;   /* 已投中断、ISR 尚未读 0x1C1（采样窗口） */
+    int      isr_c6;     /* ISR 采样后紧跟的那次 0x1C6 读 */
     uint8_t  c1_wval;
     int      c1_42;        /* 写 0x1C1=0x42 后，下一次 0x1C6 读 bit1=0（一次性） */
     int      c2_rst;       /* 写完 0x1C2=0x04 后 0x1C1 bit1 必须读 0 */      /* 最后一次写 0x1C1 的值 */   /* IRQ 已投递、尚未 ack：ISR 采样窗口 */
@@ -262,6 +264,9 @@ struct ibm5250_t {
     int      irq_burst;
 };
 
+static void ibm5250_raise(ibm5250_t *dev);
+
+
 void
 ibm5250_irq_ack(ibm5250_t *dev)
 {
@@ -288,7 +293,7 @@ ibm5250_irq_cb(void *priv)
         dev->a7_pend = 0;
         if (dev->irq_raise != NULL) {
             dev->isr_active = 1;
-            dev->irq_raise(dev->irq_priv);
+            ibm5250_raise(dev);
         }
         return;
     }
@@ -347,7 +352,7 @@ ibm5250_irq_cb(void *priv)
 
     dev->irq_level = 1;
     dev->isr_active = 1;
-            dev->irq_raise(dev->irq_priv);
+            ibm5250_raise(dev);
     if (getenv("EPOCH5250_PCLOG"))
         pclog("5250: IRQ ASSERT (level) after trigger\n");
 
@@ -393,7 +398,7 @@ ibm5250_arm_irq(ibm5250_t *dev)
 
     dev->irq_level = 1;
     dev->isr_active = 1;
-            dev->irq_raise(dev->irq_priv);
+            ibm5250_raise(dev);
 }
 
 static uint8_t
@@ -437,7 +442,7 @@ ibm5250_ab0_frame_bit(ibm5250_t *dev, int k, int data)
         /* 0x40 的应答发完就拉中断：客机 ISR 在 0x2D7 采样 0x1C1 写 [0x2A]，
            而 0x4AD 的 (al|0xAF)+1==0 检查依赖它（早于 0x1C9=0xAA 那次触发）。 */
         if ((dev->cmdlat == 0x40) && (dev->irq_raise != NULL))
-            dev->irq_raise(dev->irq_priv);
+            ibm5250_raise(dev);
     }
     return ibm5250_proto_frame_bit(k, data, 7);
 }
@@ -767,7 +772,7 @@ ibm5250_in_1c6(ibm5250_t *dev)
                            采到 [0x2A]，0xB03 的 (al|0xB7)+1==0 才能成立。 */
                         if ((dev->fseq == 255) && (dev->irq_raise != NULL))
                             dev->isr_active = 1;
-            dev->irq_raise(dev->irq_priv);
+            ibm5250_raise(dev);
                     }
                     dev->fsync = 0;
                     dev->fhunt = 0;
@@ -1001,7 +1006,7 @@ ibm5250_in_1c6(ibm5250_t *dev)
                     if (getenv("EPOCH5250_LEVELIRQ") && dev->irq_raise) {
                         dev->irq_level = 0;
                         dev->isr_active = 1;
-            dev->irq_raise(dev->irq_priv);
+            ibm5250_raise(dev);
                         dev->irq_level = 1;
                     }
                 }
@@ -1015,6 +1020,16 @@ ibm5250_in_1c6(ibm5250_t *dev)
 }
 
 static uint8_t ibm5250_in_real(uint16_t port, void *priv);
+
+/* 所有中断投递都走这里：打开“ISR 采样窗口”。
+   这样就不必再用 pc==0x02D7 去认 ISR 的那次读。 */
+static void
+ibm5250_raise(ibm5250_t *dev)
+{
+    dev->isr_samp = 1;
+    if (dev->irq_raise != NULL)
+        dev->irq_raise(dev->irq_priv);
+}
 
 static uint8_t
 ibm5250_in(uint16_t port, void *priv)
@@ -1062,6 +1077,14 @@ ibm5250_in_real(uint16_t port, void *priv)
                （0x4AD 要 6|4、0x616 要 7、0x683 要 2=0、0x8D3 要 6|1、0xA17 要 6|3） */
             {
                 uint8_t u = (uint8_t) (dev->latch | IBMR_ST_READY);
+                /* 采样窗口：投递中断后 ISR 的第一次 0x1C1 读。
+                   用事件标志代替 pc==0x02D7。 */
+                int is_samp = 0;
+                if (dev->isr_samp) {
+                    dev->isr_samp = 0;
+                    dev->isr_c6   = 1;   /* 紧接着那次 0x1C6 读也属于 ISR */
+                    is_samp       = 1;
+                }
                 if (getenv("EPOCH5250_TRACE") && (cpu_state.pc == 0x02D7))
                     pclog("ISRVAL u=%02X latch=%02X c1w=%02X isr=%d\n",
                           u, dev->latch, dev->c1_wval, dev->isr_active);
@@ -1106,7 +1129,7 @@ ibm5250_in_real(uint16_t port, void *priv)
                 /* ISR 采样点：按触发来源给值（必须放在所有调整之后）。
                    AA 触发 → 0xDA（含 0x50，0x6F8 要）；
                    其它触发 → 0x02（0x8D3 要求 [0x2A] ⊆ 0x42，不能有 0x40/0x04）。 */
-                if (cpu_state.pc == 0x02D7)
+                if (is_samp)
                     /* 0x8D3 要 bit6|bit1；0x9D0 的 0xA17 还要 bit3（选了共享窗口） */
                     /* 0x8D3 要 bit6|bit1；0x9D0 的 0xA17 还要 bit3（选了共享窗口）；
                        0x920 的 0x952 要 bit0=1，而 0x7A0 的 0x8D3 明确要 bit0=0。 */
@@ -1136,10 +1159,12 @@ ibm5250_in_real(uint16_t port, void *priv)
                 dev->isr_active  = 1;
                 dev->irq_level   = 1;
                 if (dev->irq_raise != NULL)
-                    dev->irq_raise(dev->irq_priv);
+                    ibm5250_raise(dev);
             }
-            if (cpu_state.pc == 0x02DF)
+            if (dev->isr_c6) {
+                dev->isr_c6 = 0;
                 return dev->irq_from_aa ? 0x04 : 0x02;
+            }
             rv = ibm5250_in_1c6(dev);
             /* ── 0xAB0 块的接收序列（块级状态机）─────────────────────────
                0x840 头：0x845 数据(0) → 0x848 时钟 → 0x84B 数据(sync)
@@ -1400,7 +1425,9 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                     dev->h00         = 0;
                     dev->q00         = 0;
                     dev->rx_on       = 0;
-                    dev->blk920      = (cpu_state.pc == 0x0927);
+                    /* 同一签名：0x1C0←0x00 且 (ctl=48, sel=04) */
+                    dev->blk920      = ((dev->cmdlat == 0x00) && (dev->g_ctl == 0x48) &&
+                                        (dev->g_sel == 0x04));
                     dev->blk5b0      = 0;
                     dev->b5_raised   = 0;
                     dev->b5_sends    = 0;
@@ -1718,7 +1745,7 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                         if (dev->irq_raise != NULL) {
                             dev->isr_active = 1;
                             dev->irq_level  = 1;
-                            dev->irq_raise(dev->irq_priv);
+                            ibm5250_raise(dev);
                         }
                     }
                     /* send_via_aa 不在这里清：一块里会连发多帧，
