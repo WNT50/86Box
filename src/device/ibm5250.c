@@ -1073,6 +1073,11 @@ ibm5250_in_real(uint16_t port, void *priv)
                     dev->u_bit0 = 0;
                     u |= 0x01;
                 }
+                /* A9：写 0x1C1=0x84 后 0x687 的回读要求 bit2=0。
+                   必须放在 isr_active 那行之后，否则 bit2 会被重新置上。
+                   只认 0x688 这个读点，块 0x500 的 0x13 判据不受影响。 */
+                if ((cpu_state.pc == 0x0688) && dev->blk5b0)
+                    u &= (uint8_t) ~0x04;
                 if (getenv("EPOCH5250_TRACE") && (cpu_state.pc >= 0x0610) && (cpu_state.pc <= 0x0630))
                     pclog("R1C1 pc=%04X u=%02X c1w=%02X latch=%02X\n",
                           cpu_state.pc, u, dev->c1_wval, dev->latch);
