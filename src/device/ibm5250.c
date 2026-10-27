@@ -210,6 +210,17 @@ struct ibm5250_t {
     int      u_bit0;     /* 收帧完成事件位（0x1C1 bit0，ISR 采样后清） */
     int      dummy;      /* optional leading idle read */
 
+    /* ── 设备侧定位手段（替代 pc 判据的基础设施）── */
+    int      rd_c0;      /* 上次 0x1C0 命令以来，0x1C0 的读次数 */
+    int      rd_c1;      /* 上次 0x1C1 写以来，0x1C1 的读次数 */
+    int      rd_c2;      /* 上次 0x1C2 写以来，0x1C2 的读次数 */
+    int      rd_c6;      /* 上次 0x1C6 写以来，0x1C6 的读次数 */
+    int      g_state;    /* 文法：0 空闲，1 收到命令，2 收到控制，3 收到选择 */
+    uint8_t  g_cmd;      /* 最近一次 0x1C0 写 */
+    uint8_t  g_ctl;      /* 最近一次 0x1C1 写 */
+    uint8_t  g_sel;      /* 最近一次 0x1C2 写 */
+    uint8_t  g_ctl3;     /* 最近一次 0x1C3 写 */
+
     uint32_t hist;       /* pulse history for the 0x2AA frame preamble */
     int      inframe;
     int      pcnt;
@@ -1027,6 +1038,15 @@ ibm5250_in_real(uint16_t port, void *priv)
         }
     }
 
+    /* 每口读计数：设备侧定位用的基础量，不参与任何判据 */
+    switch (port) {
+        case 0x1C0: dev->rd_c0++; break;
+        case 0x1C1: dev->rd_c1++; break;
+        case 0x1C2: dev->rd_c2++; break;
+        case 0x1C6: dev->rd_c6++; break;
+        default: break;
+    }
+
     if ((cpu_state.pc >= 0x0906) && (cpu_state.pc <= 0x090A))
         pclog("5250: IN@%04X port=%03X\n", cpu_state.pc, port);
     switch (port) {
@@ -1216,6 +1236,32 @@ static void
 ibm5250_out(uint16_t port, uint8_t val, void *priv)
 {
     ibm5250_t *dev = (ibm5250_t *) priv;
+
+    /* (命令, 控制, 选择) 文法：只记录转移，不改变行为 */
+    switch (port) {
+        case 0x1C0:
+            dev->g_cmd = val; dev->g_state = 1;
+            dev->rd_c0 = dev->rd_c1 = dev->rd_c2 = dev->rd_c6 = 0;
+            break;
+        case 0x1C1:
+            dev->g_ctl = val; dev->g_state = 2; dev->rd_c1 = 0;
+            break;
+        case 0x1C2:
+            dev->g_sel = val; dev->g_state = 3; dev->rd_c2 = 0;
+            break;
+        case 0x1C3:
+            dev->g_ctl3 = val; dev->rd_c6 = 0;
+            break;
+        case 0x1C6:
+            dev->rd_c6 = 0;
+            break;
+        default:
+            break;
+    }
+    if (getenv("EPOCH5250_TRACE") && (getenv("EPOCH5250_GRAMMAR")))
+        pclog("G st=%d cmd=%02X ctl=%02X sel=%02X c3=%02X | port=%03X v=%02X pc=%04X\n",
+              dev->g_state, dev->g_cmd, dev->g_ctl, dev->g_sel, dev->g_ctl3,
+              port, val, cpu_state.pc);
 
     if (getenv("EPOCH5250_TRACE") && (cpu_state.pc >= 0x05B0) && (cpu_state.pc <= 0x0700))
         pclog("OUT5B pc=%04X port=%03X v=%02X\n", cpu_state.pc, port, val);
