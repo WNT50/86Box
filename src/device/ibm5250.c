@@ -1230,12 +1230,16 @@ ibm5250_in_real(uint16_t port, void *priv)
                                             : ((dev->fseq + 1) & 0xFF);
                         if (dev->rx_zero && !internal)
                             data = 0x00;
+                        /* 0x440：首帧 0x2A（0x720 的 15 次 rcr 后 BL&0x7C==0x54），
+                           之后一帧 0x00（0x479 的 or al,al 要求 0）。 */
+                        if ((dev->cmdlat == 0x40) && !dev->rx_zero)
+                            data = (dev->fseq == 0) ? 0x2A : 0x00;
                         int b = ibm5250_proto_frame_bit(dev->rx_bit, data, 7);
 
                         if (++dev->rx_bit >= 15) {
                             dev->rx_bit  = 0;
                             dev->rx_hunt = 0;              /* 下一帧重新搜寻 */
-                            if (!internal) {
+                            if (!internal || (dev->cmdlat == 0x40)) {
                                 dev->fseq++;
                                 if (dev->rx_budget > 0 && --dev->rx_budget == 0)
                                     dev->rx_zero = 1;
@@ -1483,6 +1487,7 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                         dev->rx_on = 1; dev->rx_phase = 0; dev->rx_d = 0; dev->rx_c = 0;
                         dev->rx_hunt = 0; dev->rx_bit = 0; dev->serve = 1;
                         dev->rx_zero = 0; dev->rx_budget = 0xFF;
+                        dev->fseq = 0;
                     }
                     if (val == 0x64) dev->isr_val = 0x04;
                     if (val == 0x00 && dev->prev_cmd == 0x64) dev->isr_val = 0x02;
