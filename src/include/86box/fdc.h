@@ -185,6 +185,18 @@ typedef struct fdc_t {
     pc_timer_t watchdog_timer;
 
     void *fdd[4];
+
+    /* Controller-specific overrides.  A controller that does not speak the
+       uPD765 register/command model (the WD279x family) points ext at its own
+       state and installs these hooks; when ext_data is set the transfer and
+       callback paths below belong to that controller and the uPD765 semantics
+       are bypassed. */
+    void *ext;
+    int (*ext_data)(void *ext, uint8_t data, int last);
+    int (*ext_getdata)(void *ext, int last);
+    void (*ext_noidam)(void *ext);
+    void (*ext_seek_done)(void *ext, int drive);
+    void (*ext_diskchange)(void *ext, int drive);
 } fdc_t;
 
 extern void fdc_remove(fdc_t *fdc);
