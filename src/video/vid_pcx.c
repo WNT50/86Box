@@ -52,6 +52,11 @@ typedef struct pcx_video_t {
 
 static video_timings_t timing_pcx = { VIDEO_ISA, 8, 16, 32, 8, 16, 32 };
 
+/* PCX_VID_LOG in the environment dumps the host -> 8031 stream; the POST's
+   message table is ASCII, so the log reads as text with a byte index. */
+static int pcx_vid_log;
+static int pcx_vid_log_n;
+
 static void
 pcx_video_poll(void *priv)
 {
@@ -59,7 +64,7 @@ pcx_video_poll(void *priv)
     int          y;
 
     if (!dev->term.dirty) {
-        timer_advance_u64(&dev->timer, 1000000ULL / PCX_VIDEO_FREQ);
+        timer_advance_u64(&dev->timer, TIMER_USEC * (1000000ULL / PCX_VIDEO_FREQ));
         return;
     }
 
@@ -71,7 +76,7 @@ pcx_video_poll(void *priv)
                PCX_VIDEO_XSIZE * 4);
     video_blit_memtoscreen(0, 0, PCX_VIDEO_XSIZE, PCX_VIDEO_YSIZE);
 
-    timer_advance_u64(&dev->timer, 1000000ULL / PCX_VIDEO_FREQ);
+    timer_advance_u64(&dev->timer, TIMER_USEC * (1000000ULL / PCX_VIDEO_FREQ));
 }
 
 static uint8_t
@@ -104,6 +109,10 @@ pcx_video_write(uint16_t addr, uint8_t val, void *priv)
 
     dev->regs[reg] = val;
 
+    if ((reg == 0x00) && (pcx_vid_log > 0) && (pcx_vid_log_n < 8192))
+        pclog("[PCXV] %05i %02X %c\n", pcx_vid_log_n++, val,
+              ((val >= 0x20) && (val < 0x7f)) ? val : '.');
+
     if (reg == 0x00)
         pcx_term_write(&dev->term, val);
 }
@@ -128,6 +137,8 @@ pcx_video_init(const device_t *info)
     dev = (pcx_video_t *) calloc(1, sizeof(pcx_video_t));
     if (dev == NULL)
         return NULL;
+
+    pcx_vid_log = (getenv("PCX_VID_LOG") != NULL);
 
     pcx_term_init(&dev->term);
 
