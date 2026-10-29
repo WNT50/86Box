@@ -883,6 +883,23 @@ pic_write_even(uint16_t addr, uint8_t val, void *priv)
     pic_write((uint16_t) ((addr & 0x0002u) >> 1), val, priv);
 }
 
+/* The PC-X wires the 8259s as a plain two-byte pair on an 8-bit bus, so A0 is
+   CPU A0: even = command/status, odd = data (ICW2-4, OCW1 and the IMR read).
+   Using the "even" helpers above here collapses both ports onto register 0 and
+   the POST's IMR read-back at 0xf801 never sees what it wrote. */
+static uint8_t
+pic_read_direct(uint16_t addr, void *priv)
+{
+    return pic_read((uint16_t) (addr & 0x0001u), priv);
+}
+
+static void
+pic_write_direct(uint16_t addr, uint8_t val, void *priv)
+{
+    pic_write((uint16_t) (addr & 0x0001u), val, priv);
+}
+
+
 void
 pic_set_pci(void)
 {
@@ -1123,8 +1140,8 @@ pic_init_pcx(void)
     shadow  = 0;
     cascade = 0;
     pic_reset_hard();
-    io_sethandler(0xf800, 0x0002, pic_read_even, NULL, NULL, pic_write_even, NULL, NULL, &pic);
-    io_sethandler(0xf820, 0x0002, pic_read_even, NULL, NULL, pic_write_even, NULL, NULL, &pic2);
+    io_sethandler(0xf800, 0x0002, pic_read_direct, NULL, NULL, pic_write_direct, NULL, NULL, &pic);
+    io_sethandler(0xf820, 0x0002, pic_read_direct, NULL, NULL, pic_write_direct, NULL, NULL, &pic2);
 }
 
 void
