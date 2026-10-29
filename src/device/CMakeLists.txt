@@ -37,6 +37,7 @@ add_library(dev OBJECT
     ibm_5161.c
     inboard386.c
     ibm_xma.c
+    ibm5250.c
     mcamem.c
     isamem.c
     isarom.c

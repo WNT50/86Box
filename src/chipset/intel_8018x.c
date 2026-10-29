@@ -467,6 +467,12 @@ i8018x_pcb_icu_acknowledge(struct i8018x_pcb_t *pcb)
 
     int i = i8018x_pcb_icu_peek(pcb);
 
+    if (pcb->icu_ext & 0x0010)
+        pclog("ICU: ack i=%d mask=%04X pmask=%04X isr=%04X ext=%04X ltm=%d\n",
+              i, pcb->regs[I8018X_ICU_MASK / 2], pcb->regs[I8018X_ICU_PRIO_MASK / 2],
+              pcb->icu_isr, pcb->icu_ext,
+              (pcb->regs[I8018X_ICU_INT_CON(0) / 2] & I8018X_ICU_CON_LTM) ? 1 : 0);
+
     if (i < 0)
         return 0;
 
@@ -748,6 +754,14 @@ i8018x_pcb_write_word(struct i8018x_pcb_t *dev, uint16_t off, uint16_t val)
         }
 
         dev->icu_isr &= (uint16_t) ~clear;
+
+        /* 外部源（INT0/INT1）电平模式：EOI 只清 in-service，设备侧必须撤线。 */
+        for (int i = 5; i < I8018X_ICU_SOURCES; i++) {
+            if (!(clear & i8018x_icu_src[i]))
+                continue;
+            if (((i - 5) < 2) && (dev->ext_ack[i - 5] != NULL))
+                (void) dev->ext_ack[i - 5](dev->ext_ack_priv[i - 5]);
+        }
     }
 
     /* A source's mask bit sits in its control register as well as in the mask
