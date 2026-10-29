@@ -49,6 +49,32 @@
 #    define BLOCK_INVALID    0
 #endif
 
+/* Set by a machine whose translation is not a mapping: every byte/word accesses
+   on the 808x path goes through read_mem_b/read_mem_w/write_mem_b/write_mem_w,
+   so a hook there covers data accesses and instruction fetches alike. */
+uint32_t (*mem_machine_translate)(uint32_t addr, int rw) = NULL;
+
+/* Translate, and report a fault to the caller instead of letting it fall into
+   random mapping: the machine's hook has raised its own NMI by then. Only the
+   byte helpers and the word-aligned halves of the word helpers call this --
+   an odd word access is split into two byte accesses, which translate once
+   each; translating in the word helper as well would translate twice. */
+static int
+mem_machine_map(uint32_t *addr, int rw)
+{
+    uint32_t phys;
+
+    if (mem_machine_translate == NULL)
+        return 1;
+
+    phys = mem_machine_translate(*addr, rw);
+    if (phys == 0xffffffffu)
+        return 0;
+
+    *addr = phys & rammask;
+    return 1;
+}
+
 mem_mapping_t ram_low_mapping;       /* 0..640K mapping */
 mem_mapping_t ram_mid_mapping;       /* 640..1024K mapping */
 mem_mapping_t ram_mid_mapping2;      /* 640..1024K mapping, second part, for SiS 471 in relocate mode  */
@@ -774,6 +800,9 @@ read_mem_b(uint32_t addr)
     mem_logical_addr = addr;
     addr &= rammask;
 
+    if (!mem_machine_map(&addr, 0))
+        return 0xff;
+
     map = read_mapping[addr >> MEM_GRANULARITY_BITS];
     if (map && map->read_b)
         ret = map->read_b(addr, map->priv);
@@ -792,6 +821,8 @@ read_mem_w(uint32_t addr)
 
     if (addr & 1)
         ret = read_mem_b(addr) | (read_mem_b(addr + 1) << 8);
+    else if (!mem_machine_map(&addr, 0))
+        ret = 0xffff;
     else {
         map = read_mapping[addr >> MEM_GRANULARITY_BITS];
 
@@ -812,6 +843,9 @@ write_mem_b(uint32_t addr, uint8_t val)
     mem_logical_addr = addr;
     addr &= rammask;
 
+    if (!mem_machine_map(&addr, 1))
+        return;
+
     map = write_mapping[addr >> MEM_GRANULARITY_BITS];
     if (map && map->write_b)
         map->write_b(addr, val, map->priv);
@@ -828,7 +862,9 @@ write_mem_w(uint32_t addr, uint16_t val)
     if (addr & 1) {
         write_mem_b(addr, val);
         write_mem_b(addr + 1, val >> 8);
-    } else {
+    } else if (!mem_machine_map(&addr, 1))
+        return;
+    else {
         map = write_mapping[addr >> MEM_GRANULARITY_BITS];
         if (map) {
             if (map->write_w)

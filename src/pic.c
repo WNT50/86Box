@@ -1109,6 +1109,24 @@ pic_init_tandy2k(void)
     io_sethandler(0x0070, 0x0010, pic_read_even, NULL, NULL, pic_write_even, NULL, NULL, &pic2);
 }
 
+/* The PC-X puts its two 8259s on the system-interface select lines at 0xf800 and
+   0xf820.  Like the Tandy they drive separate 80186 interrupt inputs, so neither
+   is the other's slave and both keep their own vector base. */
+void
+pic_init_pcx(void)
+{
+    for (uint8_t irq = 0; irq < 8; irq++)
+        irq_vector_override[irq] = -1;
+
+    pic_clear_output_callback();
+
+    shadow  = 0;
+    cascade = 0;
+    pic_reset_hard();
+    io_sethandler(0xf800, 0x0002, pic_read_even, NULL, NULL, pic_write_even, NULL, NULL, &pic);
+    io_sethandler(0xf820, 0x0002, pic_read_even, NULL, NULL, pic_write_even, NULL, NULL, &pic2);
+}
+
 void
 pic2_init(void)
 {

@@ -310,6 +310,12 @@ extern int    mem_a20_gate;
 
 extern int is_compare;
 
+/* Machine-private address translation, consulted by the byte/word
+   access helpers below, and is NULL when the machine has none. Returns
+   the physical address, or 0xffffffff when the MMU access faulted -- the
+   machine has already latched the reason and raised whatever it raises. */
+extern uint32_t (*mem_machine_translate)(uint32_t addr, int rw);
+
 extern uint8_t  read_mem_b(uint32_t addr);
 extern uint16_t read_mem_w(uint32_t addr);
 extern void     write_mem_b(uint32_t addr, uint8_t val);

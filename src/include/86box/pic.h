@@ -94,6 +94,7 @@ extern void pic_ibm5140_diag_write(uint8_t value);
 extern void pic_ibm5140_diag_enable(int enabled);
 extern uint8_t pic_irq_ack_instance(pic_t *dev);
 extern void pic_init_tandy2k(void);
+extern void pic_init_pcx(void);
 extern void pic2_init(void);
 extern void pic_reset(void);
 
