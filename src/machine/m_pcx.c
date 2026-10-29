@@ -380,7 +380,11 @@ machine_pcx_init(const machine_t *model)
        PC-X); bits 4/5 ask the POST to drop into the monitor after/before POST,
        bit 6 skips the early RAM clear.  MAME hardcodes 0x01 because it models
        the PC-D.  Verified against the v3 BIOS: 0x3c reads it, tests 0x60. */
-    pcx.dip  = 0x00;
+    /* 0xf841 reads the S9 block.  Bit 0 is the one the POST looks at right after
+       the memory test: with it clear the ROM installs a keyboard-failure vector
+       and never reaches the rest of the self test (v3 BIOS 0xfcab4-0xfcac6).
+       MAME's pcd_v sets 0x01 here as well; 0x10/0x20 would drop into a monitor. */
+    pcx.dip  = 0x01;
     pcx.led  = 0x00;
     pcx.dskctl2 = 0x00;
 
