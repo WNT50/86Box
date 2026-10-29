@@ -45,6 +45,7 @@
 #include <86box/rom.h>
 #include <86box/i8018x.h>
 #include <86box/wd2791.h>
+#include <86box/pcx_term.h>
 #include <86box/plat_unused.h>
 #include "cpu.h"
 
@@ -78,6 +79,7 @@
 #define PCX_VIDEO_STATUS  0x00f981
 #define PCX_VIDEO_CTRL    0x00f982
 #define PCX_VIDEO_EXEC    0x00f98f
+#define PCX_TERM_ROM      "roms/machines/pcx/d12-graka.bin"
 #define PCX_DSKCTL2_PORT  0x00f905
 #define PCX_FDC_PORT      0x00f900
 #define PCX_DSKCTL_PORT   0x00f904
@@ -107,6 +109,8 @@ typedef struct pcx_t {
     uint8_t rtc_data, rtc_status, rtc_cmd;
 
     uint8_t vid_data, vid_ctrl, vid_exec;
+
+    pcx_term_t term; /* terminal side of the video board */
     uint8_t err_seg; /* A19..A12 of the last bus timeout / parity error */
 
     wd2791_t *fdc;   /* WD2791 formatter, 0xf900-0xf903 */
@@ -321,9 +325,11 @@ pcx_video_write(uint16_t port, uint8_t val, UNUSED(void *priv))
             break;
 
         default:
-            /* Character/parameter stream.  Fed to the renderer once the board
-               is modelled; for now it is only latched. */
+            /* Everything below 0xf980+0 is the host -> 8031 stream: the POST
+               sends a control byte and then the characters of its messages. */
             pcx.vid_data = val;
+            if ((port - PCX_VIDEO_DATA) == 0)
+                pcx_term_write(&pcx.term, val);
             break;
     }
 }
@@ -395,6 +401,10 @@ machine_pcx_init(const machine_t *model)
     pcx.rtc_data   = 0x00;
     pcx.rtc_status = 0x20; /* bits 4-6 = 0b010, idle */
     pcx.rtc_cmd    = 0x00;
+    pcx_term_init(&pcx.term);
+    /* A missing character generator only costs the glyphs, not the terminal:
+       the page still fills in, it just renders blank. */
+    pcx_term_load_font(&pcx.term, PCX_TERM_ROM);
     pcx.vid_data   = 0x00;
     pcx.vid_ctrl   = 0x00;
     pcx.vid_exec   = 0x00;
