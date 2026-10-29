@@ -150,6 +150,7 @@ struct i8018x_pcb_t {
     uint16_t icu_isr;       /* in-service register bits */
     uint32_t icu_dhlt;      /* CPU NMI/IRET events already applied to the halt bit */
     uint8_t  tmr_alt[3];    /* MAX COUNT register in use: 0 = A, 1 = B (ALT) */
+    uint32_t tmr_ext_div[3]; /* CPU clocks per TIMERIN edge, 0 = pin not driven */
     int      dma_ch[2];       /* 86Box DMA channel the on-chip channel drives, -1 = unused */
     uint8_t  dma_drq[2];      /* request pin state, recorded only */
     uint8_t  dma_adv_pend[2]; /* pointer step owed to the read_only/advance pair */
@@ -177,6 +178,7 @@ static void     i8018x_pcb_outw(uint16_t port, uint16_t val, void *priv);
 #define I8018X_TMR_CON_MC      0x0020u
 #define I8018X_TMR_CON_P       0x0008u
 #define I8018X_TMR_CON_ALT     0x0002u
+#define I8018X_TMR_CON_EXT     0x0004u /* count the TIMERIN pin, not the clock */
 #define I8018X_TMR_CON_CONT    0x0001u
 
 /* The three timers count at one fourth of the CPU clock (270788-001 section
@@ -229,7 +231,14 @@ i8018x_pcb_tmr_events(struct i8018x_pcb_t *dev, int i)
 {
     uint64_t src;
 
-    if ((i != 2) && (dev->regs[I8018X_TMR_CON(i) / 2] & I8018X_TMR_CON_P))
+    if (dev->regs[I8018X_TMR_CON(i) / 2] & I8018X_TMR_CON_EXT) {
+        /* External clock: the count advances only on TIMERIN edges, which the
+           machine layer supplies as a rate (270788-001 section 6.2).  An
+           unwired pin means the timer stands still. */
+        src = dev->tmr_ext_div[i]
+                  ? ((tsc - dev->tmr_base[i]) / ((uint64_t) dev->tmr_ext_div[i] * 3u))
+                  : 0u;
+    } else if ((i != 2) && (dev->regs[I8018X_TMR_CON(i) / 2] & I8018X_TMR_CON_P))
         src = i8018x_pcb_tmr_events(dev, 2) / i8018x_pcb_tmr_max(dev, 2);
     else
         src = (tsc - dev->tmr_base[i]) / i8018x_pcb_tmr_div();
@@ -268,6 +277,7 @@ i8018x_pcb_tmr_update(struct i8018x_pcb_t *dev)
 
         uint64_t max = i8018x_pcb_tmr_max(dev, i);
         uint64_t cyc = i8018x_pcb_tmr_events(dev, i) / max;
+
 
         if (cyc <= dev->tmr_done[i])
             continue;
@@ -573,6 +583,18 @@ i8018x_pcb_set_ext_ack(struct i8018x_pcb_t *pcb, int line, ext_ack_t ack, void *
     pcb->ext_ack_priv[line] = priv;
 
     i8018x_pcb_cascade = (pcb->ext_ack[0] != NULL) || (pcb->ext_ack[1] != NULL);
+}
+
+/* Rate of the TIMERIN pin, in CPU clocks per edge.  Only timers 0 and 1 have
+   one; timer 2 has no MAX COUNT register B and no external input pin on the
+   80186 (270788-001 section 6.3). */
+void
+i8018x_pcb_set_timer_input(struct i8018x_pcb_t *pcb, int tmr, uint32_t cpu_clocks_per_event)
+{
+    if ((pcb == NULL) || (tmr < 0) || (tmr > 1))
+        return;
+
+    pcb->tmr_ext_div[tmr] = cpu_clocks_per_event;
 }
 
 /* A board that hangs its sources on the machine's 8259 instead of on the
