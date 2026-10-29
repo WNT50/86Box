@@ -45,7 +45,7 @@
 #include <86box/rom.h>
 #include <86box/i8018x.h>
 #include <86box/wd2791.h>
-#include <86box/pcx_term.h>
+#include <86box/pcx_vid.h>
 #include <86box/plat_unused.h>
 #include "cpu.h"
 
@@ -79,7 +79,6 @@
 #define PCX_VIDEO_STATUS  0x00f981
 #define PCX_VIDEO_CTRL    0x00f982
 #define PCX_VIDEO_EXEC    0x00f98f
-#define PCX_TERM_ROM      "roms/machines/pcx/d12-graka.bin"
 #define PCX_DSKCTL2_PORT  0x00f905
 #define PCX_FDC_PORT      0x00f900
 #define PCX_DSKCTL_PORT   0x00f904
@@ -109,8 +108,6 @@ typedef struct pcx_t {
     uint8_t rtc_data, rtc_status, rtc_cmd;
 
     uint8_t vid_data, vid_ctrl, vid_exec;
-
-    pcx_term_t term; /* terminal side of the video board */
     uint8_t err_seg; /* A19..A12 of the last bus timeout / parity error */
 
     wd2791_t *fdc;   /* WD2791 formatter, 0xf900-0xf903 */
@@ -290,50 +287,6 @@ pcx_rtc_write(uint16_t port, uint8_t val, UNUSED(void *priv))
     }
 }
 
-/* Video board window.  0xf980 carries the command/data stream, 0xf981 is the
-   status the POST polls (bit 1 = busy, v3 0xfce8d), 0xf982 and 0xf98f are
-   set-up registers.  The board answers "always ready" until the SCN2672 model
-   lands, which is enough for the POST to walk past the video step. */
-static uint8_t
-pcx_video_read(uint16_t port, UNUSED(void *priv))
-{
-    switch (port) {
-        case PCX_VIDEO_STATUS:
-            return 0x00; /* never busy */
-
-        case PCX_VIDEO_CTRL:
-            return pcx.vid_ctrl;
-
-        case PCX_VIDEO_EXEC:
-            return pcx.vid_exec;
-
-        default:
-            return pcx.vid_data;
-    }
-}
-
-static void
-pcx_video_write(uint16_t port, uint8_t val, UNUSED(void *priv))
-{
-    switch (port) {
-        case PCX_VIDEO_CTRL:
-            pcx.vid_ctrl = val;
-            break;
-
-        case PCX_VIDEO_EXEC:
-            pcx.vid_exec = val;
-            break;
-
-        default:
-            /* Everything below 0xf980+0 is the host -> 8031 stream: the POST
-               sends a control byte and then the characters of its messages. */
-            pcx.vid_data = val;
-            if ((port - PCX_VIDEO_DATA) == 0)
-                pcx_term_write(&pcx.term, val);
-            break;
-    }
-}
-
 /* Placeholders: return open bus so the POST at least does not hang on them.
    Each of these is a separate item in docs/86box/pcx-machine-plan. */
 static uint8_t
@@ -401,10 +354,6 @@ machine_pcx_init(const machine_t *model)
     pcx.rtc_data   = 0x00;
     pcx.rtc_status = 0x20; /* bits 4-6 = 0b010, idle */
     pcx.rtc_cmd    = 0x00;
-    pcx_term_init(&pcx.term);
-    /* A missing character generator only costs the glyphs, not the terminal:
-       the page still fills in, it just renders blank. */
-    pcx_term_load_font(&pcx.term, PCX_TERM_ROM);
     pcx.vid_data   = 0x00;
     pcx.vid_ctrl   = 0x00;
     pcx.vid_exec   = 0x00;
@@ -464,8 +413,9 @@ machine_pcx_init(const machine_t *model)
                   pcx_nvram_write, NULL, NULL, NULL);
     io_sethandler(PCX_RTC_PORT, 0x000c, pcx_rtc_read, NULL, NULL,
                   pcx_rtc_write, NULL, NULL, NULL);
-    io_sethandler(PCX_VIDEO_DATA, 0x0010, pcx_video_read, NULL, NULL,
-                  pcx_video_write, NULL, NULL, NULL);
+    /* The video board owns 0xf980-0xf98f itself; registering it here as well
+       would shadow the device (io.c: later registration wins). */
+    device_add(&pcx_video_device);
 
     /* WD2791 formatter: registers at 0xf900-0xf903, INTRQ on IR6, DRQ on the
        80186 DMA channel 1.  The 0xf904 latch above feeds it drive/side/DDEN. */
