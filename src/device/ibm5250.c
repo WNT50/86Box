@@ -84,8 +84,12 @@ ibm5250_pc_in(uint16_t pc, const uint16_t *set, unsigned n)
    否则读回的是响应帧位，bit1 由帧内容决定。 */
 static const uint16_t ibm_pc_sel4[] = { 0x0A41, 0x0B3A, 0x0C1B, 0x0675 };
 
-/* 0x840 的两个读点类别：1=数据读(0x8A7/0x8A8)，2=时钟读(0x8B1/0x8B2)，
-   0=其它读（块内 0x71 检查等，不推进序列）。 */
+/* 0x1C6 的读点分类：数据读 / 时钟读 / 其它。
+   ★ 端口层不可判：0x8A0 与 0x8AA 都是“写 3 次 0x1C6 → in 0x1C6”，端口地址、
+   前导写序列、返回值来源完全相同；0x840 的调用序列还是 D C C D C（不是严格交替），
+   所以读序号、写计数都替代不了指令地址。要改只能上指令层挂钩，那本质上仍是
+   “认代码地址”，并没有变成协议判据。详见 NOTES-5250-0x500.md。 */
+enum { IBM_RD_NONE = 0, IBM_RD_DATA = 1, IBM_RD_CLOCK = 2 };
 static int
 ibm5250_read_kind(uint16_t pc)
 {
@@ -94,6 +98,15 @@ ibm5250_read_kind(uint16_t pc)
     if ((pc == 0x08B1) || (pc == 0x08B2))
         return 2;
     return 0;
+}
+
+/* 0x1C6 的“发送位”写点（0xA73 里的三次 out 中的第一次）。
+   ★ 同样不可由端口层区分：0xB90 的 54 拍时钟与 0xCA0 的 16 位发送都是
+   “call 0xA73” 的重复，写序列 v / v|0x40 / v 完全同构，只有次数不同。 */
+static int
+ibm5250_is_tx_wr_pc(uint16_t pc)
+{
+    return (pc == 0x0A91) || (pc == 0x0A9A) || (pc == 0x0AA3);
 }
 
 static const uint8_t ibm5250_handshake[19] = {
@@ -546,7 +559,7 @@ ibm5250_in_1c6(ibm5250_t *dev)
            0x8B2 是丢弃读，给它任何值都不会被看到。
            sync：客机搜寻循环 cl 走到 0xF7 时（0x737 会把 cl 存进 [0x2D]）；
            校验：sync 之后第 13 个有效位（sync + 8 data + 3 station + parity = 13 位偶校验）。 */
-        if (cpu_state.pc == 0x8A8) {
+        if (ibm5250_read_kind(cpu_state.pc) == IBM_RD_DATA) {
             if (!dev->idle_sync && (CL == 0xF7)) {
                 dev->idle_sync = 1;
                 dev->idle_bits = 0;
@@ -735,7 +748,7 @@ ibm5250_in_1c6(ibm5250_t *dev)
                 r |= 0x02;
             return r; }
 
-        if (ibm5250_read_kind(cpu_state.pc) == 0)
+        if (ibm5250_read_kind(cpu_state.pc) == IBM_RD_NONE)
             
 
         /* 实测读序：rd=0 是 0x8A7 的数据读（0x84E 取它的 CF），
@@ -757,7 +770,7 @@ ibm5250_in_1c6(ibm5250_t *dev)
                                        (mem_readb_phys(ssp + 3) << 8));
             uint16_t r3  = (uint16_t) (mem_readb_phys(ssp + 4) |
                                        (mem_readb_phys(ssp + 5) << 8));
-            int is_data  = (ibm5250_read_kind(cpu_state.pc) == 1);
+            int is_data  = (ibm5250_read_kind(cpu_state.pc) == IBM_RD_DATA);
 
             if ((r1 == 0x072C) || (r1 == 0x0743)) {   /* 0x729 搜寻 / 0x740 收帧 */
                 if (r1 == 0x0743)
@@ -842,7 +855,7 @@ ibm5250_in_1c6(ibm5250_t *dev)
         /* 同一拍里 0x8A7 是数据读、0x8B1 是时钟读，biphase 编码下两者互补：
            0x84E 用数据读的 CF 判“找到同步”，随后 0x865 用时钟读的 bit7
            判“线路仍为高则失败”，所以时钟读必须取反。 */
-        if (ibm5250_read_kind(cpu_state.pc) == 2) {
+        if (ibm5250_read_kind(cpu_state.pc) == IBM_RD_CLOCK) {
             /* 时钟读按位格推进：
                c0..c2   0（0x865 要求线路静默）
                c3..c10  1,0,1,0…（0x86C 的 8 拍交替）
@@ -1225,13 +1238,13 @@ ibm5250_in_real(uint16_t port, void *priv)
                          数据字节 = fseq+1（0xAE7 的 al == ch）
                状态由 0x1C3=0x08（0xABE）起算，不受 ISR 端口读干扰。 */
             if (getenv("EPOCH5250_TRACE") && dev->rx_on &&
-                ((cpu_state.pc == 0x08A8) || (cpu_state.pc == 0x08B2)))
+                (ibm5250_read_kind(cpu_state.pc) != IBM_RD_NONE))
                 pclog("RX %c phase=%d d=%d c=%d hunt=%d bit=%d fseq=%d v=%02X\n",
-                      (cpu_state.pc == 0x08A8) ? 'D' : 'C',
+                      (ibm5250_read_kind(cpu_state.pc) == IBM_RD_DATA) ? 'D' : 'C',
                       dev->rx_phase, dev->rx_d, dev->rx_c, dev->rx_hunt,
                       dev->rx_bit, dev->fseq,
                       (unsigned)((cpu_state.pc == 0x08A8) ? 0 : 0));
-            if (dev->rx_on && ((cpu_state.pc == 0x08A8) || (cpu_state.pc == 0x08B2))) {
+            if (dev->rx_on && (ibm5250_read_kind(cpu_state.pc) != IBM_RD_NONE)) {
                 uint16_t rs = 0;
                 {   uint32_t se = ((uint32_t) cpu_state.seg_ss.seg << 4) + SP;
                     rs = (uint16_t) (mem_readb_phys(se) |
@@ -1239,7 +1252,7 @@ ibm5250_in_real(uint16_t port, void *priv)
                     uint16_t rc = (uint16_t) (mem_readb_phys(se + 2) |
                                               (mem_readb_phys(se + 3) << 8));
                     if ((rs == 0x0848) &&
-                        ((cpu_state.pc == 0x08A8) ||
+                        ((ibm5250_read_kind(cpu_state.pc) == IBM_RD_DATA) ||
                          (dev->blk7a0 && (dev->rx_phase != 0)))) {
                         /* 0x845 的 call 0x8A0 返回 0x0848：0x840 入口，头重来 */
                         dev->rx_phase = 0;
@@ -1262,7 +1275,7 @@ ibm5250_in_real(uint16_t port, void *priv)
                                               (dev->w6 > 0) ? ((dev->w6 - 1) / 3) : 0); }
                     }
                 }
-                if (cpu_state.pc == 0x08A8) {              /* 数据读：bit7 = 线路值 */
+                if (ibm5250_read_kind(cpu_state.pc) == IBM_RD_DATA) {   /* 数据读：bit7 = 线路值 */
                     if (dev->rx_phase == 0) {
                         uint8_t v = 0x00;
                         if ((dev->cmdlat == 0x40) || dev->blk7a0) {
@@ -1905,7 +1918,7 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             break;
 
         case 0x1C6:
-            if ((cpu_state.pc == 0x0A91) || (cpu_state.pc == 0x0A9A) || (cpu_state.pc == 0x0AA3)) {
+            if (ibm5250_is_tx_wr_pc(cpu_state.pc)) {
                 if (++dev->send_bits >= 16) {
                     dev->c1_b7 = 1;      /* 一帧发完：bit7 重新就绪 */
                     dev->send_bits = 0;
