@@ -80,4 +80,21 @@ if(BUILD_TESTING)
     gtest_discover_tests(ibm_pc700_power_tests)
 endif()
 
+if(BUILD_TESTING)
+    add_executable(ibm5250_proto_tests
+        ibm5250_proto_test.cpp
+    )
+
+    target_include_directories(ibm5250_proto_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/src
+        ${PROJECT_SOURCE_DIR}/src/include
+        ${PROJECT_SOURCE_DIR}/src/cpu
+        ${PROJECT_BINARY_DIR}/src/include
+    )
+    target_link_libraries(ibm5250_proto_tests PRIVATE GTest::gtest_main)
+
+    include(GoogleTest)
+    gtest_discover_tests(ibm5250_proto_tests)
+endif()
+
 add_subdirectory(modem)
