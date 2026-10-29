@@ -125,6 +125,16 @@ static pcx_t pcx;
    into an NMI.  MAME returns 0 from its fallback handlers; a real open bus
    reads 0xff, which is what we give the guest here -- if the POST turns out to
    look at the value, this is the place to change. */
+/* The NMI of this board comes from the parity logic and from the bus time-out;
+   there is no 0xa0-style mask register in front of it, so the CPU's NMI input is
+   always armed.  (nmi_mask is a global that nmi_init() clears, and no port of
+   this machine ever sets it, which would swallow every NMI.) */
+static void
+pcx_nmi_enable(void)
+{
+    nmi_mask = 1;
+}
+
 static void
 pcx_bus_timeout(uint32_t addr)
 {
@@ -158,6 +168,36 @@ static void
 pcx_nmi_writeb(uint32_t addr, UNUSED(uint8_t val), UNUSED(void *priv))
 {
     pcx_bus_timeout(addr);
+}
+
+/* The same time-out applies to I/O cycles: the board watches the bus, not just
+   the memory decode.  The POST relies on it -- it reads 0xfbbf's neighbour
+   0xfbbe in a loop and only leaves that loop when the NMI handler has run
+   (v3 BIOS 0xfc911). */
+static uint8_t
+pcx_io_hole_read8(uint16_t port, UNUSED(void *priv))
+{
+    pcx_bus_timeout(port);
+    return 0xff;
+}
+
+static uint16_t
+pcx_io_hole_read16(uint16_t port, UNUSED(void *priv))
+{
+    pcx_bus_timeout(port);
+    return 0xffff;
+}
+
+static void
+pcx_io_hole_write8(uint16_t port, UNUSED(uint8_t val), UNUSED(void *priv))
+{
+    pcx_bus_timeout(port);
+}
+
+static void
+pcx_io_hole_write16(uint16_t port, UNUSED(uint16_t val), UNUSED(void *priv))
+{
+    pcx_bus_timeout(port);
 }
 
 static void
@@ -388,11 +428,29 @@ machine_pcx_init(const machine_t *model)
         struct i8018x_pcb_t *pcb = device_add(&i8018x_pcb_device);
 
         i8018x_pcb_set_dma_channels(pcb, 0, 1); /* DRQ0: SCSI, DRQ1: WD2791 */
+        /* TIMERIN0 is a board signal, not the internal clock: the service manual
+           (Teil II, adapter type 5, p. 4-11) says timer 0's count input hangs on
+           the serial interface's Schrittakt and times the c/t lines out.  The
+           POST's timer test gives a window: its loop allows 8192..24576 passes
+           at 23 clocks each (cmp 3 + jcc 4 + dec 3 + jcc 13 from the 80186
+           timing table), so 25001 counts must take 23.6..70.6 ms, i.e. the pin
+           runs at 0.35..1.06 MHz.  8 MHz / 16 = 500 kHz sits inside that. */
+        i8018x_pcb_set_timer_input(pcb, 0, 16);
         i8018x_pcb_set_ext_ack(pcb, 0, pcx_8259_ack, &pic);
         i8018x_pcb_set_ext_ack(pcb, 1, pcx_8259_ack, &pic2);
         pic_set_output_callback(&pic, pcx_icu_int0, pcb);
         pic_set_output_callback(&pic2, pcx_icu_int1, pcb);
     }
+
+    /* Undecoded I/O: a cycle nothing answers times out and raises the NMI.  Only
+       the port the POST's own time-out test reads is claimed here (v3 BIOS
+       0xfc911: `in 0xfbbe` in a loop, leaving it only when the NMI handler has
+       run).  A blanket handler over the whole hole cannot be used: the POST
+       scans 0xfb00-0xffff for devices before it has put a vector in IVT 8
+       (0xfc405-0xfc433, vector written at 0xfc458), so every one of those reads
+       would raise an NMI nobody is listening for and kill the boot. */
+    io_sethandler(0xfbbe, 0x0001, pcx_io_hole_read8, pcx_io_hole_read16, NULL,
+                  pcx_io_hole_write8, pcx_io_hole_write16, NULL, NULL);
 
     io_sethandler(PCX_STAT_PORT, 0x0001, pcx_stat_read, NULL, NULL,
                   pcx_stat_write, NULL, NULL, NULL);
@@ -441,6 +499,8 @@ machine_pcx_init(const machine_t *model)
     /* The MMU sits on port 0x8000-0x8fff and translates every CPU access to the
        RAM window in 1 KB pages; it is also the place that catches the hole when
        the board layout later maps more RAM than the configuration has. */
+    pcx_nmi_enable();
+
     pcx_mmu_init(PCX_MMU_SINIX12);
     pcx_mmu_set_hole(0, 0); /* the mapping above already reports the hole */
 
