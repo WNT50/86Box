@@ -35,8 +35,10 @@
 #define HAVE_STDARG_H
 #include <86box/86box.h>
 #include "cpu.h"
+#include "x86seg.h"
 #include <86box/io.h>
 #include <86box/timer.h>
+#include <86box/mem.h>
 #include <86box/device.h>
 #include <86box/keyboard.h>
 
@@ -68,6 +70,8 @@ typedef struct kbc_hp_t {
     uint8_t svc;         /* 0x69 service request status */
     uint8_t port1;       /* 8041 port 1 (HP path data) */
     uint8_t kbd_enabled;
+    uint8_t p2;            /* output port: bit 0 = RC, bit 1 = A20_GATE */
+    uint8_t awaiting_p2;   /* next 0x60 write is the output port value */
     uint8_t pending_out;   /* byte to be placed in the output buffer */
     uint8_t pending_svc;   /* service code to be published in 0x69 */
     uint8_t has_pending;
@@ -115,6 +119,34 @@ kbc_hp_schedule(uint8_t out, uint8_t svc, uint64_t usec)
     timer_set_delay_u64(&dev->resp_timer, usec);
 }
 
+/* Output port, reusing the 86Box helpers exactly as the AT 8042 model does
+   (kbc_at.c: write_p2()): bit 1 gates A20, a 1 -> 0 edge on bit 0 resets the
+   CPU while keeping RAM. */
+static void
+kbc_hp_write_p2(kbc_hp_t *dev, uint8_t val)
+{
+    uint8_t old = dev->p2;
+
+    if ((mem_a20_key ^ val) & 0x02) {
+        mem_a20_key = val & 0x02;
+        mem_a20_recalc();
+        flushmmucache();
+    }
+
+    if (((old ^ val) & 0x01) && !(val & 0x01)) {
+        softresetx86();
+        cpu_set_edx();
+        mem_a20_alt = 0;
+        mem_a20_recalc();
+        flushmmucache();
+        /* With A20 gated the reset fetch would land 1 MB low (see the Siemens
+           PCD-2L hack in kbc_at.c:824), so put CS back at F000. */
+        loadcs_2386(0xf000);
+    }
+
+    dev->p2 = val;
+}
+
 static void
 kbc_hp_write(uint16_t port, uint8_t val, void *priv)
 {
@@ -125,6 +157,11 @@ kbc_hp_write(uint16_t port, uint8_t val, void *priv)
     switch (port) {
         case 0x0060:
             dev->ibf = 0;
+            if (dev->awaiting_p2) {
+                dev->awaiting_p2 = 0;
+                kbc_hp_write_p2(dev, val);
+                break;
+            }
             if (dev->awaiting) {
                 dev->awaiting = 0;
                 switch (dev->cmd) {
@@ -155,6 +192,22 @@ kbc_hp_write(uint16_t port, uint8_t val, void *priv)
                 case 0x20: /* read command byte */
                 case 0x60: /* HP path: data follows */
                     dev->awaiting = 1;
+                    break;
+                case 0xd1: /* write output port: value follows on 0x60 */
+                    dev->awaiting_p2 = 1;
+                    break;
+                case 0xdd: /* disable A20 */
+                case 0xdf: /* enable A20 */
+                    kbc_hp_write_p2(dev, (dev->p2 & 0xfd) | (val & 0x02));
+                    break;
+                case 0xfe: /* pulse output line 0: reset the CPU (RC) */
+                    dev->p2 = (dev->p2 & 0xfe) | 0x00;
+                    softresetx86();
+                    cpu_set_edx();
+                    mem_a20_alt = 0;
+                    mem_a20_recalc();
+                    flushmmucache();
+                    loadcs_2386(0xf000);
                     break;
                 case 0xaa: /* self test: 0x55 lands after the self test */
                     kbc_hp_schedule(0x55, 0x00, 1000);
@@ -280,7 +333,8 @@ kbc_hp_reset(void *priv)
     dev->cmd      = 0x00;
     dev->svc      = 0x00;
 
-    dev->has_pending = 0;
+    dev->has_pending  = 0;
+    dev->awaiting_p2  = 0;
     timer_disable(&dev->resp_timer);
 
     /* The 8041 reports BAT OK (0x55) after a reset; POST compares it. */
