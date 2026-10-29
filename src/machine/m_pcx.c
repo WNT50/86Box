@@ -68,6 +68,16 @@
 #define PCX_STAT_PORT     0x00f840
 #define PCX_DIP_PORT      0x00f841
 #define PCX_RTC_PORT      0x00f880
+#define PCX_RTC_DATA      0x00f880
+#define PCX_RTC_STATUS    0x00f88a
+#define PCX_RTC_CMD       0x00f88b
+#define PCX_NVRAM_PORT    0x00f000   /* 2 KB battery-backed config RAM */
+#define PCX_NVRAM_SIZE    0x000800
+#define PCX_VIDEO_DATA    0x00f980
+#define PCX_VIDEO_STATUS  0x00f981
+#define PCX_VIDEO_CTRL    0x00f982
+#define PCX_VIDEO_EXEC    0x00f98f
+#define PCX_DSKCTL2_PORT  0x00f905
 #define PCX_FDC_PORT      0x00f900
 #define PCX_DSKCTL_PORT   0x00f904
 #define PCX_SCSI_PORT     0x00f940
@@ -90,7 +100,14 @@ typedef struct pcx_t {
     uint8_t dip;     /* 0xf841: read = S9 switches, write = LED latch */
     uint8_t led;     /* what the BIOS last wrote to 0xf841 */
     uint8_t dskctl;  /* 0xf904 */
+    uint8_t dskctl2; /* 0xf905: second latch, read-modify-written by the POST */
+
+    uint8_t nvram[PCX_NVRAM_SIZE];
+    uint8_t rtc_data, rtc_status, rtc_cmd;
+
+    uint8_t vid_data, vid_ctrl, vid_exec;
     uint8_t err_seg; /* A19..A12 of the last bus timeout / parity error */
+
 } pcx_t;
 
 static pcx_t pcx;
@@ -197,6 +214,116 @@ pcx_dskctl_write(UNUSED(uint16_t port), uint8_t val, UNUSED(void *priv))
     pcx.dskctl = val;
 }
 
+static uint8_t
+pcx_dskctl2_read(UNUSED(uint16_t port), UNUSED(void *priv))
+{
+    return pcx.dskctl2;
+}
+
+static void
+pcx_dskctl2_write(UNUSED(uint16_t port), uint8_t val, UNUSED(void *priv))
+{
+    /* The POST's helper at v3 0xfc26b does a read-modify-write of 0xf904 and
+       0xf905 as a pair (density/side select); keep the second latch so the
+       read back is what the board would hold, not open bus. */
+    pcx.dskctl2 = val;
+}
+
+/* 2 KB NVRAM the BIOS uses for the machine configuration.  It is mapped as
+   I/O on this board, not as memory. */
+static uint8_t
+pcx_nvram_read(uint16_t port, UNUSED(void *priv))
+{
+    return pcx.nvram[(port - PCX_NVRAM_PORT) & (PCX_NVRAM_SIZE - 1)];
+}
+
+static void
+pcx_nvram_write(uint16_t port, uint8_t val, UNUSED(void *priv))
+{
+    pcx.nvram[(port - PCX_NVRAM_PORT) & (PCX_NVRAM_SIZE - 1)] = val;
+}
+
+/* RTC / NVRAM control block.  The POST (v3 0xfc95c) reads 0xf88a, expects
+   bits 4-6 to read 0b010, then checks bit 7 of 0xf88b as "calibrated"; after
+   writing 0x20/0x02 it polls bit 7 of 0xf88a until it clears, so the status
+   register reports idle at once. */
+static uint8_t
+pcx_rtc_read(uint16_t port, UNUSED(void *priv))
+{
+    switch (port) {
+        case PCX_RTC_STATUS:
+            return pcx.rtc_status;
+
+        case PCX_RTC_CMD:
+            return pcx.rtc_cmd;
+
+        default:
+            return pcx.rtc_data;
+    }
+}
+
+static void
+pcx_rtc_write(uint16_t port, uint8_t val, UNUSED(void *priv))
+{
+    switch (port) {
+        case PCX_RTC_STATUS:
+            pcx.rtc_status = val;
+            break;
+
+        case PCX_RTC_CMD:
+            pcx.rtc_cmd = val;
+            /* Any command completes immediately: clear the busy bit. */
+            pcx.rtc_status &= 0x7f;
+            break;
+
+        default:
+            pcx.rtc_data = val;
+            break;
+    }
+}
+
+/* Video board window.  0xf980 carries the command/data stream, 0xf981 is the
+   status the POST polls (bit 1 = busy, v3 0xfce8d), 0xf982 and 0xf98f are
+   set-up registers.  The board answers "always ready" until the SCN2672 model
+   lands, which is enough for the POST to walk past the video step. */
+static uint8_t
+pcx_video_read(uint16_t port, UNUSED(void *priv))
+{
+    switch (port) {
+        case PCX_VIDEO_STATUS:
+            return 0x00; /* never busy */
+
+        case PCX_VIDEO_CTRL:
+            return pcx.vid_ctrl;
+
+        case PCX_VIDEO_EXEC:
+            return pcx.vid_exec;
+
+        default:
+            return pcx.vid_data;
+    }
+}
+
+static void
+pcx_video_write(uint16_t port, uint8_t val, UNUSED(void *priv))
+{
+    switch (port) {
+        case PCX_VIDEO_CTRL:
+            pcx.vid_ctrl = val;
+            break;
+
+        case PCX_VIDEO_EXEC:
+            pcx.vid_exec = val;
+            break;
+
+        default:
+            /* Character/parameter stream.  Fed to the renderer once the board
+               is modelled; for now it is only latched. */
+            pcx.vid_data = val;
+            break;
+    }
+}
+
 /* Placeholders: return open bus so the POST at least does not hang on them.
    Each of these is a separate item in docs/86box/pcx-machine-plan. */
 static uint8_t
@@ -257,6 +384,15 @@ machine_pcx_init(const machine_t *model)
        the PC-D.  Verified against the v3 BIOS: 0x3c reads it, tests 0x60. */
     pcx.dip  = 0x00;
     pcx.led  = 0x00;
+    pcx.dskctl2 = 0x00;
+
+    memset(pcx.nvram, 0x00, sizeof(pcx.nvram)); /* an unconfigured battery */
+    pcx.rtc_data   = 0x00;
+    pcx.rtc_status = 0x20; /* bits 4-6 = 0b010, idle */
+    pcx.rtc_cmd    = 0x00;
+    pcx.vid_data   = 0x00;
+    pcx.vid_ctrl   = 0x00;
+    pcx.vid_exec   = 0x00;
     pcx.err_seg = 0x00;
 
     /* RAM is contiguous up to the graphics board, unlike the PC layout that
@@ -307,16 +443,22 @@ machine_pcx_init(const machine_t *model)
                   pcx_dip_write, NULL, NULL, NULL);
     io_sethandler(PCX_DSKCTL_PORT, 0x0001, pcx_dskctl_read, NULL, NULL,
                   pcx_dskctl_write, NULL, NULL, NULL);
+    io_sethandler(PCX_DSKCTL2_PORT, 0x0001, pcx_dskctl2_read, NULL, NULL,
+                  pcx_dskctl2_write, NULL, NULL, NULL);
+    io_sethandler(PCX_NVRAM_PORT, PCX_NVRAM_SIZE, pcx_nvram_read, NULL, NULL,
+                  pcx_nvram_write, NULL, NULL, NULL);
+    io_sethandler(PCX_RTC_PORT, 0x000c, pcx_rtc_read, NULL, NULL,
+                  pcx_rtc_write, NULL, NULL, NULL);
+    io_sethandler(PCX_VIDEO_DATA, 0x0010, pcx_video_read, NULL, NULL,
+                  pcx_video_write, NULL, NULL, NULL);
 
     /* Not implemented yet -- see the TODO list below. */
-    io_sethandler(PCX_RTC_PORT, 0x0040, pcx_stub_readb, NULL, NULL,
-                  pcx_stub_writeb, NULL, NULL, NULL);
+
     io_sethandler(PCX_FDC_PORT, 0x0004, pcx_stub_readb, NULL, NULL,
                   pcx_stub_writeb, NULL, NULL, NULL);
     io_sethandler(PCX_SCSI_PORT, 0x0004, pcx_stub_readb, NULL, NULL,
                   pcx_stub_writeb, NULL, NULL, NULL);
-    io_sethandler(PCX_VIDEO_PORT, 0x0040, pcx_stub_readb, NULL, NULL,
-                  pcx_stub_writeb, NULL, NULL, NULL);
+
     io_sethandler(PCX_USART1_PORT, 0x0004, pcx_stub_readb, NULL, NULL,
                   pcx_stub_writeb, NULL, NULL, NULL);
     io_sethandler(PCX_USART2_PORT, 0x0004, pcx_stub_readb, NULL, NULL,
