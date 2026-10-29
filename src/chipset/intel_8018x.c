@@ -184,7 +184,13 @@ static void     i8018x_pcb_outw(uint16_t port, uint16_t val, void *priv);
    xt_cpu_multi = 3, pit.c:1893-1894 clocks this 12 MHz part at 36 MHz, and
    808x.c:218 applies it as tsc += diff * (xt_cpu_multi >> 32). One CPU/4
    event is therefore 12 tsc. */
-#define I8018X_TMR_TSC_PER_EVENT   12u
+/* tsc per timer event.  The part counts at CPU/4 and 86Box advances tsc three
+   times per CPU cycle for this clock, so 12 is the hardware value.  PCX_TMR_DIV
+   overrides it for experiments only: this ROM's timer self-test has a ~10%
+   margin on real silicon and 86Box's 808x core charges roughly twice the cycles
+   per instruction, so the default run fails it while a larger divider gets the
+   POST past it. */
+static uint32_t i8018x_tmr_tsc_per_event;
 
 /* Maximum count of the register currently selected; ALT alternates between
    MAX COUNT register A and B on timers 0 and 1. */
@@ -202,6 +208,19 @@ i8018x_pcb_tmr_max(struct i8018x_pcb_t *dev, int i)
     return m ? (m + 1u) : 0x10000u;
 }
 
+static uint32_t
+i8018x_pcb_tmr_div(void)
+{
+    if (!i8018x_tmr_tsc_per_event) {
+        const char *env = getenv("PCX_TMR_DIV");
+
+        i8018x_tmr_tsc_per_event = env ? (uint32_t) strtoul(env, NULL, 0) : 12u;
+        if (!i8018x_tmr_tsc_per_event)
+            i8018x_tmr_tsc_per_event = 12u;
+    }
+    return i8018x_tmr_tsc_per_event;
+}
+
 /* Clock events counted by a timer since it was last started. Timer 2 always
    runs from the internal clock; timers 0 and 1 run from timer 2's
    maximum-count output when the Prescaler bit (bit 3) is set. */
@@ -213,7 +232,7 @@ i8018x_pcb_tmr_events(struct i8018x_pcb_t *dev, int i)
     if ((i != 2) && (dev->regs[I8018X_TMR_CON(i) / 2] & I8018X_TMR_CON_P))
         src = i8018x_pcb_tmr_events(dev, 2) / i8018x_pcb_tmr_max(dev, 2);
     else
-        src = (tsc - dev->tmr_base[i]) / I8018X_TMR_TSC_PER_EVENT;
+        src = (tsc - dev->tmr_base[i]) / i8018x_pcb_tmr_div();
 
     return src - dev->tmr_src[i];
 }
