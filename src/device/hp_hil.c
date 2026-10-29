@@ -35,7 +35,9 @@
 #include <86box/86box.h>
 #include "cpu.h"
 #include <86box/io.h>
+#include <86box/keyboard.h>
 #include <86box/device.h>
+extern void kbc_at_ext_out(uint8_t val);
 
 #define HP_HIL_REGS 16
 
@@ -78,11 +80,12 @@ hp_hil_write(uint16_t port, uint8_t val, void *priv)
     switch (port) {
         case 0x0068:
             dev->hp_ctrl = val;
+            kbc_at_ext_out(val);    /* loop the byte back through 0x60 + OBF */
             break;
 
         case 0x006a:
-            /* Command consumed: raise the service status read back on 0x69. */
-            dev->svc = 0x06;
+            /* Acknowledge: the service status drops back to zero. */
+            dev->svc = 0x00;
             break;
         case 0x006d:
             dev->index = val;
@@ -160,10 +163,25 @@ hp_hil_read(uint16_t port, void *priv)
     return ret;
 }
 
+/* The 0x45 data write goes to the KBC, so the KBC tells us about it. */
+extern void (*kbc_at_ext_write)(uint16_t port, uint8_t val);
+
+static hp_hil_t *hp_hil_dev;
+
+static void
+hp_hil_kbc_ext(uint16_t port, uint8_t val)
+{
+    if ((port == 0x0060) && (val == 0x45) && hp_hil_dev)
+        hp_hil_dev->svc = 0x06;
+}
+
 static void *
 hp_hil_init(const device_t *info)
 {
     hp_hil_t *dev = (hp_hil_t *) calloc(1, sizeof(hp_hil_t));
+
+    hp_hil_dev      = dev;
+    kbc_at_ext_write = hp_hil_kbc_ext;
 
     io_sethandler(0x0068, 3, hp_hil_read, NULL, NULL, hp_hil_write, NULL, NULL, dev);
     io_sethandler(0x006c, 4, hp_hil_read, NULL, NULL, hp_hil_write, NULL, NULL, dev);
@@ -175,6 +193,9 @@ static void
 hp_hil_close(void *priv)
 {
     hp_hil_t *dev = (hp_hil_t *) priv;
+
+    kbc_at_ext_write = NULL;
+    hp_hil_dev      = NULL;
 
     io_removehandler(0x0068, 3, hp_hil_read, NULL, NULL, hp_hil_write, NULL, NULL, dev);
     io_removehandler(0x006c, 4, hp_hil_read, NULL, NULL, hp_hil_write, NULL, NULL, dev);
