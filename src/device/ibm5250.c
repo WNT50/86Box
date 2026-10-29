@@ -1360,10 +1360,10 @@ ibm5250_in_real(uint16_t port, void *priv)
                       cpu_state.pc, rv, dev->b1, dev->phase, dev->w42, dev->latch,
                       dev->b1_pulse, dev->cmdlat, dev->done40, dev->ph, dev->rd,
                       dev->serve, dev->ab0);
-            if (((cpu_state.pc == 0x07D7) || (cpu_state.pc == 0x07D8) ||
-                 (cpu_state.pc == 0x0805) || (cpu_state.pc == 0x0806)) &&
-                dev->bit0)
-                rv |= 0x01;   /* 0x1C2=0x08 选中 bit0，判据用 rcr/jz 直接取它 */
+            /* 0x1C2 选择器的 bit0 输出：选 0x08/0x09 期间读回 bit0=1，
+               选 0x01 读回 0。不再按指令地址白名单。 */
+            if (dev->bit0)
+                rv |= 0x01;
             if (getenv("EPOCH5250_TRACE") && (cpu_state.pc >= 0x07F8) && (cpu_state.pc <= 0x0812))
                 pclog("RD805 v=%02X bit0=%d bit1=%d cmd=%02X done40=%d\n",
                       rv, dev->bit0, dev->b1, dev->cmdlat, dev->done40);
