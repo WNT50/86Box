@@ -742,6 +742,11 @@ fdc_xfer_count_down(fdc_t *fdc)
 void
 fdc_diskchange_interrupt(fdc_t *fdc, int drive)
 {
+    if (fdc->ext_diskchange != NULL) {
+        fdc->ext_diskchange(fdc->ext, drive);
+        return;
+    }
+
     if (fdc->flags & FDC_FLAG_5550) {
         fdc->st0 = 0xc0 | (drive & 3);
         fdc_int(fdc, 1);
@@ -754,6 +759,11 @@ fdc_diskchange_interrupt(fdc_t *fdc, int drive)
 void
 fdc_seek_complete_interrupt(fdc_t *fdc, int drive)
 {
+    if (fdc->ext_seek_done != NULL) {
+        fdc->ext_seek_done(fdc->ext, drive);
+        return;
+    }
+
     if (!fdc) {
         fdc_log("ERROR: fdc_seek_complete_interrupt called with NULL fdc!\n");
         return;
@@ -2501,6 +2511,10 @@ fdc_data(fdc_t *fdc, uint8_t data, int last)
 {
     int result = 0;
 
+    /* A controller with its own register model moves the bytes itself. */
+    if (fdc->ext_data != NULL)
+        return fdc->ext_data(fdc->ext, data, last);
+
     if ((fdc->deleted & 2) && (fdc->processed_cmd == 0x16)) {
         /* A native FDC VERIFY command has no host data transfer. */
         return 0;
@@ -2608,6 +2622,11 @@ fdc_sector_finishread(fdc_t *fdc)
 void
 fdc_noidam(fdc_t *fdc)
 {
+    if (fdc->ext_noidam != NULL) {
+        fdc->ext_noidam(fdc->ext);
+        return;
+    }
+
     fdc_log("FDC error: No ID address mark\n");
     fdc_error(fdc, 1, 0);
 }
@@ -2676,6 +2695,9 @@ int
 fdc_getdata(fdc_t *fdc, int last)
 {
     int data = 0;
+
+    if (fdc->ext_getdata != NULL)
+        return fdc->ext_getdata(fdc->ext, last);
 
     if ((fdc->flags & (FDC_FLAG_PCJR | FDC_FLAG_PCJX)) || !fdc->dma) {
         if ((fdc->flags & (FDC_FLAG_PCJR | FDC_FLAG_PCJX)) || !fdc->fifo || (fdc->tfifo < 1)) {
