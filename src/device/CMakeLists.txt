@@ -38,6 +38,7 @@ add_library(dev OBJECT
     inboard386.c
     ibm_xma.c
     mcamem.c
+    hp_hil.c
     isamem.c
     isarom.c
     isartc.c
@@ -45,6 +46,7 @@ add_library(dev OBJECT
     kbc_3270pc.c
     kbc_at.c
     kbc_at_dev.c
+    kbc_hp_8041.c
     kbc_ps2_m25.c
     kbc_xt.c
     keyboard.c
