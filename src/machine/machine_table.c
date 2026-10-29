@@ -3710,6 +3710,55 @@ const machine_t machines[] = {
         .net_device               = NULL,
         .aliases                  = { "Tandy 2000 HD", "" }
     },
+    /* Siemens PC-X (SINIX): 80186 with a 1 KB page MMU, WD2791 floppy
+       controller, on-board SCSI, SCN2672/8031 graphics board. */
+    {
+        .name              = "Siemens PC-X",
+        .internal_name     = "pcx",
+        .type              = MACHINE_TYPE_186,
+        .chipset           = MACHINE_CHIPSET_PROPRIETARY,
+        .init              = machine_pcx_init,
+        .p1_handler        = NULL,
+        .gpio_handler      = NULL,
+        .available_flag    = MACHINE_AVAILABLE,
+        .gpio_acpi_handler = NULL,
+        .cpu               = {
+            .package     = CPU_PKG_186,
+            .block       = CPU_BLOCK_NONE,
+            .min_bus     = 8000000,
+            .max_bus     = 0,
+            .min_voltage = 0,
+            .max_voltage = 0,
+            .min_multi   = 0,
+            .max_multi   = 0
+        },
+        .bus_flags = MACHINE_PC,
+        .flags     = MACHINE_VIDEO_FIXED | MACHINE_KEYBOARD | MACHINE_MFM,
+        .ram       = {
+            .min  = 256,
+            .max  = 1024,
+            .step = 256
+        },
+        .nvrmask                  = 63,
+        .jumpered_ecp_dma         = 0,
+        .default_jumpered_ecp_dma = -1,
+        .kbc_device               = NULL,
+        .kbc_params               = 0x00000000,
+        .nvr_device               = NULL,
+        .nvr_params               = 0x00000000,
+        .sio_device               = NULL,
+        .sio_params               = 0x00000000,
+        .kbc_p1                   = 0xff,
+        .gpio                     = 0xffffffff,
+        .gpio_acpi                = 0xffffffff,
+        .device                   = &pcx_device,
+        .kbd_device               = NULL,
+        .fdc_device               = NULL,
+        .vid_device               = NULL,
+        .snd_device               = NULL,
+        .net_device               = NULL,
+        .aliases                  = { "PC-X", "" }
+    },
 
     /* 286 AT machines */
     /* Has IBM AT KBC firmware. */
