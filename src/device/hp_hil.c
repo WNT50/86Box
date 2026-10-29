@@ -63,6 +63,8 @@ typedef struct hp_hil_t {
     uint8_t error;   /* 0x6e */
     uint8_t busy;    /* 0x6f bit 0 = 1 -> transfer complete */
     uint8_t command; /* last command byte written while bit 3 was set */
+    uint8_t hp_ctrl; /* 0x68: 8041 extension data */
+    uint8_t svc;     /* 0x69: service request status (0x06 = done) */
     uint8_t regs[HP_HIL_REGS];
 } hp_hil_t;
 
@@ -74,6 +76,14 @@ hp_hil_write(uint16_t port, uint8_t val, void *priv)
     hp_hil_log("[%04X:%08X] HIL out(%03X, %02X)\n", CS, cpu_state.pc, port, val);
 
     switch (port) {
+        case 0x0068:
+            dev->hp_ctrl = val;
+            break;
+
+        case 0x006a:
+            /* Command consumed: raise the service status read back on 0x69. */
+            dev->svc = 0x06;
+            break;
         case 0x006d:
             dev->index = val;
             break;
@@ -116,6 +126,14 @@ hp_hil_read(uint16_t port, void *priv)
     uint8_t   ret = 0xff;
 
     switch (port) {
+        case 0x0068:
+            return dev->hp_ctrl;
+
+        case 0x0069:
+            return dev->svc;
+
+        case 0x006a:
+            return 0x00;
         case 0x006c:
             ret      = dev->data;
             dev->busy = 0;
@@ -147,6 +165,7 @@ hp_hil_init(const device_t *info)
 {
     hp_hil_t *dev = (hp_hil_t *) calloc(1, sizeof(hp_hil_t));
 
+    io_sethandler(0x0068, 3, hp_hil_read, NULL, NULL, hp_hil_write, NULL, NULL, dev);
     io_sethandler(0x006c, 4, hp_hil_read, NULL, NULL, hp_hil_write, NULL, NULL, dev);
 
     return dev;
@@ -157,6 +176,7 @@ hp_hil_close(void *priv)
 {
     hp_hil_t *dev = (hp_hil_t *) priv;
 
+    io_removehandler(0x0068, 3, hp_hil_read, NULL, NULL, hp_hil_write, NULL, NULL, dev);
     io_removehandler(0x006c, 4, hp_hil_read, NULL, NULL, hp_hil_write, NULL, NULL, dev);
 
     free(dev);
@@ -173,6 +193,8 @@ hp_hil_reset(void *priv)
     dev->error   = 0x00;
     dev->busy    = 1;
     dev->command = 0x00;
+    dev->hp_ctrl = 0x00;
+    dev->svc     = 0x06;
 }
 
 const device_t hp_hil_device = {
