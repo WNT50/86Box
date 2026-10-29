@@ -52,6 +52,7 @@ enum {
 
 pic_t pic;
 pic_t pic2;
+pic_t pic3;
 int cascade = 0;
 
 static int shadow = 0;
@@ -1125,6 +1126,17 @@ pic2_init(void)
 {
     io_sethandler(0x00a0, 0x0002, pic_read, NULL, NULL, pic_write, NULL, NULL, &pic2);
     pic_attach_slave(&pic2, 2);
+}
+
+void
+pic3_init(void)
+{
+    /* HP Vectra: a third 8259 on 0x7c-0x7d, cascaded into master IR1.
+       pic_attach_slave() records the wired input in master_irq, which is
+       what pic_update_pending_at() walks since #8561; writing slaves[1]
+       alone would leave master_irq at 0 and feed this PIC into IRQ 0. */
+    io_sethandler(0x007c, 0x0002, pic_read, NULL, NULL, pic_write, NULL, NULL, &pic3);
+    pic_attach_slave(&pic3, 1);
 }
 
 static void

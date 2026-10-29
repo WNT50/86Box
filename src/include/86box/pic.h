@@ -60,6 +60,7 @@ typedef struct pic {
 
 extern pic_t pic;
 extern pic_t pic2;
+extern pic_t pic3;
 extern int   cascade;
 
 extern void     pic_reset_smi_irq_mask(void);
@@ -95,6 +96,7 @@ extern void pic_ibm5140_diag_enable(int enabled);
 extern uint8_t pic_irq_ack_instance(pic_t *dev);
 extern void pic_init_tandy2k(void);
 extern void pic2_init(void);
+extern void pic3_init(void);
 extern void pic_reset(void);
 
 extern uint8_t pic_read(uint16_t addr, void *priv);
