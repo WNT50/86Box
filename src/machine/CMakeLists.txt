@@ -35,6 +35,7 @@ add_library(mch OBJECT
     m_tandy1k.c
     m_tandy2k.c
     m_pcx.c
+    pcx_term.c
     pcx_mmu.c
     m_v86p.c
     m_at_t3100e.c
