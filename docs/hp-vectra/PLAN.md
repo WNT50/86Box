@@ -328,3 +328,31 @@ bit-bang SCSI）都比 Vectra 重；Vectra 的 AT 外设几乎全是标准件，
 - HP 150（8088 + 触摸屏 + HIL）：MAME/86Box 皆无，Vectra 的 HIL 实现可直接复用给 HP 150。
 - Siemens PC-D/PC-X：卡在 OMTI 5100/5300 与定制视频，Vectra 不比它难。
 - 86Box 已有的 80186 片内外设（`src/chipset/intel_8018x.c`，WNT50）与 3477-S 线无关，本方案不涉及。
+
+---
+
+## 9. Phase 1 实施状态（2026-10-29）
+
+已落地并编译通过（分支 `vectra`，未推送）：
+
+| 文件 | 内容 |
+|---|---|
+| `src/machine/machine_table.c` | 机型条目 `[ISA] HP Vectra 45945A`（`internal_name = hpvectra`），286 @ 8 MHz，`MACHINE_AT`，RAM 256–3648 KB / 步进 128 |
+| `src/machine/m_at_286.c` | `machine_at_vectra_init()`：`bios_load_interleaved(even, odd, 0x000F0000, 65536, 0)` → `machine_at_ibm_common_init()` → `device_add(&hp_hil_device)`；`HP_VECTRA_TRACE=1` 时登记 0x3B0–0x3DF 端口的访问日志（临时脚手架） |
+| `src/device/kbc_hp_8041.c` | 8041：`0x60/0x64` 应用路径 + `0x68/0x69/0x6A` HP 路径；复位后 `0x60` 给 0x55（BAT） |
+| `src/device/hp_hil.c` | U777：`0x6D` 索引（bit3=命令）、`0x6C` 数据、`0x6E` 错误、`0x6F` bit0=完成；16 个寄存器影子 |
+| `src/include/86box/{hp_hil.h}`, `keyboard.h`, `machine.h` | 设备与 init 声明 |
+
+### 9.1 实测结果
+
+- ROM 正常加载并被 POST 执行（`F000:FFFF0` 校验过、屏幕有输出）。
+- 屏幕首行按段刷出：`7255 0302 0323 00NNNK`，内存自检计数能到 `00640K`。
+- `0302`/`0323` 是 8041 接口自检的错误码 ⇒ **8041 模型还没达到 ROM 期望**。
+- HIL 枚举（`0xA5/0x5A` 写设备地址 5、2，再 `0x6D=08/0x6C=0xFE`）失败后函数返回 `0xFFFF`，调用方随即跳到意外地址（实测 `0x0040:0xAA4D` 或 `0x00EF:0x12D0` 之类的低端 RAM 垃圾），POST 到此为止。
+
+### 9.2 下一步（按优先级）
+
+1. **8041 语义对齐**：按 `F1D86`/`F1D9E`/`F1DC2`–`F1E1A` 反汇编把命令 0x60/0x45 与 `0x69 == 0x06` 的时序做对，消除 0302/0323。
+2. **HIL 设备链**：给 `0x6F` bit0 只在传输真正结束时置位，`0x6D` 的 bit3 语义按 `F3820` 的轮询来实现，并在枚举序列（A5/5A/FE）下返回"无设备"以外的合法响应；否则 POST 永远走 `0xFFFF` 错误分支。
+3. **45981A 视频**：已确认 POST 走 `3D4/3D5` + `3D8`，`vid_cga` 能顶住出字；`3DD` 与 25 kHz 仍缺。
+4. 上述两项都通之后，再看 `760` 磁盘探测与引导。
