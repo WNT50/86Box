@@ -70,6 +70,7 @@
 #define PCX_STAT_PORT     0x00f840
 #define PCX_DIP_PORT      0x00f841
 #define PCX_RTC_PORT      0x00f880
+#define PCX_RTC_SIZE      0x0040 /* 64 registers, 0x0e-0x3f are battery RAM */
 #define PCX_RTC_DATA      0x00f880
 #define PCX_RTC_STATUS    0x00f88a
 #define PCX_RTC_CMD       0x00f88b
@@ -105,7 +106,7 @@ typedef struct pcx_t {
     uint8_t dskctl2; /* 0xf905: second latch, read-modify-written by the POST */
 
     uint8_t nvram[PCX_NVRAM_SIZE];
-    uint8_t rtc_data, rtc_status, rtc_cmd;
+    uint8_t rtc[PCX_RTC_SIZE]; /* 0xf880-0xf8bf, MC146818 register file */
 
     uint8_t vid_data, vid_ctrl, vid_exec;
     uint8_t err_seg; /* A19..A12 of the last bus timeout / parity error */
@@ -255,36 +256,29 @@ pcx_nvram_write(uint16_t port, uint8_t val, UNUSED(void *priv))
 static uint8_t
 pcx_rtc_read(uint16_t port, UNUSED(void *priv))
 {
-    switch (port) {
-        case PCX_RTC_STATUS:
-            return pcx.rtc_status;
+    uint8_t reg = (uint8_t) (port - PCX_RTC_PORT);
 
-        case PCX_RTC_CMD:
-            return pcx.rtc_cmd;
+    if (reg >= PCX_RTC_SIZE)
+        return 0xff;
 
-        default:
-            return pcx.rtc_data;
-    }
+    /* Register 0x0a carries the divider/update-in-progress bits; the POST
+       checks bits 4-6 == 0b010 there (v3 0xfcd80) and polls bit 7 while it
+       reads the 50 battery-backed bytes above it. */
+    if (reg == 0x0a)
+        return (uint8_t) ((pcx.rtc[0x0a] & 0x8f) | 0x20);
+
+    return pcx.rtc[reg];
 }
 
 static void
 pcx_rtc_write(uint16_t port, uint8_t val, UNUSED(void *priv))
 {
-    switch (port) {
-        case PCX_RTC_STATUS:
-            pcx.rtc_status = val;
-            break;
+    uint8_t reg = (uint8_t) (port - PCX_RTC_PORT);
 
-        case PCX_RTC_CMD:
-            pcx.rtc_cmd = val;
-            /* Any command completes immediately: clear the busy bit. */
-            pcx.rtc_status &= 0x7f;
-            break;
+    if (reg >= PCX_RTC_SIZE)
+        return;
 
-        default:
-            pcx.rtc_data = val;
-            break;
-    }
+    pcx.rtc[reg] = val;
 }
 
 /* Placeholders: return open bus so the POST at least does not hang on them.
@@ -351,9 +345,8 @@ machine_pcx_init(const machine_t *model)
     pcx.dskctl2 = 0x00;
 
     memset(pcx.nvram, 0x00, sizeof(pcx.nvram)); /* an unconfigured battery */
-    pcx.rtc_data   = 0x00;
-    pcx.rtc_status = 0x20; /* bits 4-6 = 0b010, idle */
-    pcx.rtc_cmd    = 0x00;
+    memset(pcx.rtc, 0x00, sizeof(pcx.rtc));
+    pcx.rtc[0x0a] = 0x20; /* divider/status: bits 4-6 = 0b010, no update in progress */
     pcx.vid_data   = 0x00;
     pcx.vid_ctrl   = 0x00;
     pcx.vid_exec   = 0x00;
@@ -411,8 +404,20 @@ machine_pcx_init(const machine_t *model)
                   pcx_dskctl2_write, NULL, NULL, NULL);
     io_sethandler(PCX_NVRAM_PORT, PCX_NVRAM_SIZE, pcx_nvram_read, NULL, NULL,
                   pcx_nvram_write, NULL, NULL, NULL);
-    io_sethandler(PCX_RTC_PORT, 0x000c, pcx_rtc_read, NULL, NULL,
+    io_sethandler(PCX_RTC_PORT, PCX_RTC_SIZE, pcx_rtc_read, NULL, NULL,
                   pcx_rtc_write, NULL, NULL, NULL);
+    /* PC-X has no 8237: the 80186's on-chip DMA is programmed through the PCB
+       registers at 0xff50+.  dma_init() still installs the PC's 8237 handlers
+       on 0x0000-0x000f and the page registers at 0x0080-0x0087 for every
+       machine, and the POST's I/O walk (v3 0xfcd3a) writes a pattern to every
+       port -- on a real PC-X those two windows are empty, here they would arm
+       DMA channels and scribble over memory, so take them back.  Same idea as
+       m_tandy2k.c:1129, which shadows 0x0000-0x000f with its own latch. */
+    io_sethandler(0x0000, 0x0010, pcx_stub_readb, NULL, NULL,
+                  pcx_stub_writeb, NULL, NULL, NULL);
+    io_sethandler(0x0080, 0x0008, pcx_stub_readb, NULL, NULL,
+                  pcx_stub_writeb, NULL, NULL, NULL);
+
     /* The video board owns 0xf980-0xf98f itself; registering it here as well
        would shadow the device (io.c: later registration wins). */
     device_add(&pcx_video_device);
