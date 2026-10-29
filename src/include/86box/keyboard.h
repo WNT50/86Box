@@ -206,7 +206,6 @@ extern const device_t kbc_xt_jukost_device;
 extern const device_t kbc_xtclone_device;
 
 extern const device_t kbc_at_device;
-extern const device_t kbc_hp_8041_device;
 extern const device_t kbc_at_vectra_device;
 extern const device_t kbc_ps2_m25_device;
 extern const device_t kbc_tvis_device;
