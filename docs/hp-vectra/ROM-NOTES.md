@@ -78,3 +78,47 @@ python3 tools/verify_rom.py --even roms/machines/hpvectra/vectra45945a_even_1818
 ```
 
 脚本会校验 8 位和、复位向量、版本串，并统计 HIL/8041 端口引用。
+
+## 7. 上机实测补充（2026-10-29，86Box Phase 1）
+
+跑通 POST 后，静态笔记里有两处需要更正/补充：
+
+| 项 | 原先记录 | 实测 |
+|---|---|---|
+| 视频寄存器寻址 | `3D0-3D7` 偶数索引/奇数数据 | POST 实际走 **`3D4`/`3D5`**（CGA 式索引/数据），随后写 `3D8 = 0x2D`；`vid_cga` 正好接管这两对端口，直接就能出字 |
+| 文本显存布局 | 「属性字节 + 字符字节」 | 实测 **字符在前、属性在后**（`20 07` = 空格+灰字），与 CGA 一致；按 attr-first 解码会得到乱码/空屏 |
+
+POST 状态行（屏幕首行，逐段刷新）：
+
+```
+7255 0302 0323 00NNNK
+```
+
+- `7255` = 版本相关字段；
+- `0302` / `0323` = 8041 键盘接口自检的错误码（`F1DBE: mov ax,0x302`、`F1DC8: mov ax,0x303` 那两条路径）；
+- `00NNNK` = 内存自检计数（实测爬到 `00640K`）。
+
+### 7.1 8041 握手（照 ROM 实现）
+
+```asm
+F1DC2  in al,0x60 / cmp al,0x55   ; BAT OK，不符 -> 0x303
+F1DCC  out 0x6a,al                ; 清 HPINT
+F1DD1  in al,0x69 / or al,al / loopne 0x1dd1   ; 65536 次上限，读到非 0 即退
+F1DDE  mov ah,0x60 / mov dx,0x64  ; 命令 0x60 写 0x64
+F1DEC  mov ah,0x45 / mov dx,0x60  ; 再写 0x60 = 0x45 -> 读 8041 Port 1
+F1DFD  in al,0x69 / cmp al,0x6 / loopne        ; 等到 0x69 == 0x06 才算成功
+```
+
+即 `0x69` 必须最终读到 **0x06**，读到别的值会走 `or ax,0xd000` 的错误返回。
+
+### 7.2 HIL 枚举（U777）
+
+```
+out 6D=0D / out 6C=A5 -> 读回 6D/6C     ; 向设备地址 5 发 0xA5
+out 6D=0D / out 6C=5A -> 读回 6D/6C     ; 发 0x5A（HIL 标识序列）
+out 6D=0A / out 6C=A5, 再 5A            ; 地址 2 同上
+out 6E=FE                               ; 
+out 6D=08 / out 6C=FE / 等 6F bit0      ; 命令模式寄存器 0 写 0xFE
+```
+
+枚举失败时该函数返回 `0xFFFF`（`F381C: mov ax,0xffff; ret`），调用方随即跳到意外地址——目前 86Box 就停在这一点之后（详见 PLAN 的 Phase 1 状态）。
