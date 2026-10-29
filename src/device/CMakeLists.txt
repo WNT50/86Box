@@ -39,6 +39,7 @@ add_library(dev OBJECT
     ibm_pc700_readout.c
     inboard386.c
     ibm_xma.c
+    ibm5250.c
     mcamem.c
     isamem.c
     isarom.c
