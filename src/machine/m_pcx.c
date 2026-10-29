@@ -44,6 +44,7 @@
 #include <86box/pic.h>
 #include <86box/rom.h>
 #include <86box/i8018x.h>
+#include <86box/wd2791.h>
 #include <86box/plat_unused.h>
 #include "cpu.h"
 
@@ -108,6 +109,7 @@ typedef struct pcx_t {
     uint8_t vid_data, vid_ctrl, vid_exec;
     uint8_t err_seg; /* A19..A12 of the last bus timeout / parity error */
 
+    wd2791_t *fdc;   /* WD2791 formatter, 0xf900-0xf903 */
 } pcx_t;
 
 static pcx_t pcx;
@@ -210,8 +212,10 @@ pcx_dskctl_write(UNUSED(uint16_t port), uint8_t val, UNUSED(void *priv))
 {
     /* bit 0/1 = drive 0/1 select, bit 2 = motor on, bit 3 = side select,
        bit 4 = DDEN (1 = FM single density, 0 = MFM).  Same mapping MAME uses
-       in pcd.cpp:190-214.  Consumed by the WD2791 model once it exists. */
+       in pcd.cpp:190-214.  The controller latches what it needs for drive,
+       side and density; the byte is also kept for a read back. */
     pcx.dskctl = val;
+    wd2791_set_dskctl(pcx.fdc, val);
 }
 
 static uint8_t
@@ -378,6 +382,7 @@ machine_pcx_init(const machine_t *model)
 
     pcx.stat   = 0x00;
     pcx.dskctl = 0x00;
+    pcx.fdc    = NULL;
     /* 0xf841 read = S9.  Bit 0 is "no MMU" (set on the PC-D, clear on the
        PC-X); bits 4/5 ask the POST to drop into the monitor after/before POST,
        bit 6 skips the early RAM clear.  MAME hardcodes 0x01 because it models
@@ -452,10 +457,12 @@ machine_pcx_init(const machine_t *model)
     io_sethandler(PCX_VIDEO_DATA, 0x0010, pcx_video_read, NULL, NULL,
                   pcx_video_write, NULL, NULL, NULL);
 
+    /* WD2791 formatter: registers at 0xf900-0xf903, INTRQ on IR6, DRQ on the
+       80186 DMA channel 1.  The 0xf904 latch above feeds it drive/side/DDEN. */
+    pcx.fdc = wd2791_init();
+
     /* Not implemented yet -- see the TODO list below. */
 
-    io_sethandler(PCX_FDC_PORT, 0x0004, pcx_stub_readb, NULL, NULL,
-                  pcx_stub_writeb, NULL, NULL, NULL);
     io_sethandler(PCX_SCSI_PORT, 0x0004, pcx_stub_readb, NULL, NULL,
                   pcx_stub_writeb, NULL, NULL, NULL);
 
