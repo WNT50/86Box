@@ -36,6 +36,7 @@
 #include <86box/86box.h>
 #include "cpu.h"
 #include <86box/io.h>
+#include <86box/timer.h>
 #include <86box/device.h>
 #include <86box/keyboard.h>
 
@@ -67,6 +68,10 @@ typedef struct kbc_hp_t {
     uint8_t svc;         /* 0x69 service request status */
     uint8_t port1;       /* 8041 port 1 (HP path data) */
     uint8_t kbd_enabled;
+    uint8_t pending_out;   /* byte to be placed in the output buffer */
+    uint8_t pending_svc;   /* service code to be published in 0x69 */
+    uint8_t has_pending;
+    pc_timer_t resp_timer;
 } kbc_hp_t;
 
 static kbc_hp_t *kbc_hp_dev;
@@ -80,6 +85,34 @@ kbc_hp_out(uint8_t val)
 
     dev->out   = val;
     dev->obf   = 1;
+}
+
+/* The 8041 answers a command after a short delay: the ROM writes a command,
+   discards whatever was in 0x60, and only then waits for OBF (F1DA9-F1DB9).
+   Publishing the response immediately would let that discard read eat it. */
+static void
+kbc_hp_resp(void *priv)
+{
+    kbc_hp_t *dev = (kbc_hp_t *) priv;
+
+    if (!dev->has_pending)
+        return;
+
+    dev->out         = dev->pending_out;
+    dev->obf         = 1;
+    dev->svc         = dev->pending_svc;
+    dev->has_pending = 0;
+}
+
+static void
+kbc_hp_schedule(uint8_t out, uint8_t svc, uint64_t usec)
+{
+    kbc_hp_t *dev = (kbc_hp_t *) kbc_hp_dev;
+
+    dev->pending_out = out;
+    dev->pending_svc = svc;
+    dev->has_pending = 1;
+    timer_set_delay_u64(&dev->resp_timer, usec);
 }
 
 static void
@@ -97,12 +130,11 @@ kbc_hp_write(uint16_t port, uint8_t val, void *priv)
                 switch (dev->cmd) {
                     case 0x60:
                         /* HP path: 0x45 asks the 8041 for its port 1. */
-                        if (val == 0x45) {
-                            kbc_hp_out(dev->port1);
-                            dev->svc = 0x06;
-                        } else {
+                        if (val == 0x45)
+                            kbc_hp_schedule(dev->port1, 0x06, 200);
+                        else {
                             dev->hp_ctrl = val;
-                            dev->svc     = 0x06;
+                            kbc_hp_schedule(0xfa, 0x06, 200);
                         }
                         break;
                     default:
@@ -124,20 +156,20 @@ kbc_hp_write(uint16_t port, uint8_t val, void *priv)
                 case 0x60: /* HP path: data follows */
                     dev->awaiting = 1;
                     break;
-                case 0xaa: /* self test */
-                    kbc_hp_out(0x55);
+                case 0xaa: /* self test: 0x55 lands after the self test */
+                    kbc_hp_schedule(0x55, 0x00, 1000);
                     break;
                 case 0xab: /* keyboard interface test */
                 case 0xae: /* enable keyboard interface */
                     dev->kbd_enabled = 1;
-                    kbc_hp_out(0x00);
+                    kbc_hp_schedule(0x00, 0x00, 200);
                     break;
                 case 0xad: /* disable keyboard interface */
                     dev->kbd_enabled = 0;
-                    kbc_hp_out(0x00);
+                    kbc_hp_schedule(0x00, 0x00, 200);
                     break;
                 default:
-                    kbc_hp_out(0xfa);
+                    kbc_hp_schedule(0xfa, 0x00, 200);
                     break;
             }
             dev->ibf = 0;
@@ -208,6 +240,8 @@ kbc_hp_init(const device_t *info)
     dev->port1       = 0x00;
     dev->kbd_enabled = 0;
 
+    timer_add(&dev->resp_timer, kbc_hp_resp, dev, 0);
+
     kbc_hp_reset(dev);
 
     io_sethandler(0x0060, 1, kbc_hp_read, NULL, NULL, kbc_hp_write, NULL, NULL, dev);
@@ -245,6 +279,9 @@ kbc_hp_reset(void *priv)
     dev->awaiting = 0;
     dev->cmd      = 0x00;
     dev->svc      = 0x00;
+
+    dev->has_pending = 0;
+    timer_disable(&dev->resp_timer);
 
     /* The 8041 reports BAT OK (0x55) after a reset; POST compares it. */
     dev->out = 0x55;
