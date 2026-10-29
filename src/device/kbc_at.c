@@ -2705,9 +2705,26 @@ kbc_at_process_cmd(void *priv)
     }
 }
 
+/* Vendor hook: boards with extra logic behind the controller (HP Vectra's
+   0x68-0x6A block) need to see the traffic. */
+void (*kbc_at_ext_write)(uint16_t port, uint8_t val) = NULL;
+
+static atkbc_t *kbc_at_cur = NULL;
+
+/* Put a byte in the output buffer without going through the keyboard queue. */
+void
+kbc_at_ext_out(uint8_t val)
+{
+    if (kbc_at_cur != NULL)
+        kbc_delay_to_ob(kbc_at_cur, val, 0, 0x00);
+}
+
 static void
 kbc_at_port_1_write(uint16_t port, uint8_t val, void *priv)
 {
+    if (kbc_at_ext_write)
+        kbc_at_ext_write(port, val);
+
     atkbc_t *dev = (atkbc_t *) priv;
     uint8_t kbc_ven = dev->flags & KBC_VEN_MASK;
     uint8_t fast_a20 = (kbc_ven != KBC_VEN_SIEMENS);
@@ -3004,6 +3021,7 @@ kbc_at_init(const device_t *info)
     int max_ports;
 
     dev = (atkbc_t *) calloc(1, sizeof(atkbc_t));
+    kbc_at_cur = dev;
 
     dev->kblock_switch = 1;
 
