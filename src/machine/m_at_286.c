@@ -45,6 +45,7 @@
 #include <86box/vid_cga_comp.h>
 #include <86box/flash.h>
 #include <86box/machine.h>
+#include <86box/pic.h>
 #include <86box/hp_hil.h>
 
 /* ISA */
@@ -325,6 +326,9 @@ machine_at_vectra_init(const machine_t *model)
         return ret;
 
     machine_at_ibm_common_init(model);
+
+    /* Third 8259 on 0x7c-0x7d, cascaded into master IR1. */
+    pic3_init();
 
     /* HP-HIL host controller (U777) at 0x6C-0x6F. */
     device_add(&hp_hil_device);
