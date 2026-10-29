@@ -38,7 +38,9 @@
 #include <86box/86box.h>
 #include <86box/device.h>
 #include "cpu.h"
+#include <86box/plat.h>
 #include <86box/i8018x.h>
+#include <86box/ibm5250.h>
 #include <86box/timer.h>
 #include <86box/io.h>
 #include <86box/dma.h>
@@ -1688,6 +1690,23 @@ epoch_cram_writew(uint32_t addr, uint16_t val, void *priv)
     epoch_cram_write(addr + 1, val >> 8, epoch);
 }
 
+/* 适配器共享 RAM 窗口 0xE400:0000..00FF（块 0x9D0 的 0xA5B 判据：
+   第 i 个字节必须等于 i）。窗口在 hiram 里，但内容由 5250 设备在
+   客人写 0x1C2=09 时重写。 */
+static uint8_t  adr_shram[0x100];
+static int      adr_shram_on;
+
+static void
+epoch_adr_shared_clear(void *priv)
+{
+    int i;
+
+    (void) priv;
+    for (i = 0; i < 0x100; i++)
+        adr_shram[i] = (uint8_t) i;
+    adr_shram_on = 1;
+}
+
 static uint8_t
 epoch_hiram_readb(uint32_t addr, void *priv)
 {
@@ -1696,6 +1715,9 @@ epoch_hiram_readb(uint32_t addr, void *priv)
     if (epoch_is_3477 && (addr >= EPOCH_GEN_BASE))
         return epoch->gen[((uint32_t) epoch->genbank * EPOCH_GEN_SIZE) +
                           (addr - EPOCH_GEN_BASE)];
+
+    if (adr_shram_on && (addr >= 0xE4000) && (addr < 0xE4100))
+        return adr_shram[addr - 0xE4000];
 
     return epoch->hiram[(addr - EPOCH_HIRAM_BASE) % EPOCH_HIRAM_SIZE];
 }
@@ -1714,6 +1736,11 @@ epoch_hiram_writeb(uint32_t addr, uint8_t val, void *priv)
     if (epoch_is_3477 && (addr >= EPOCH_GEN_BASE)) {
         /* The generator banks stay as the IPL left them: IBMBIO's clear pass
            would otherwise wipe the only font on this panel. */
+        return;
+    }
+
+    if (adr_shram_on && (addr >= 0xE4000) && (addr < 0xE4100)) {
+        adr_shram[addr - 0xE4000] = val;
         return;
     }
 
@@ -3686,6 +3713,66 @@ epoch_rom_pages_load(void)
 /* IBM 3477-S: a cut-down Multistation on an 80186-12, with the 5550's
    display and keyboard but the chip's own timers, DMA and interrupt
    controller. The system ROS lives in the F8000 window. */
+
+/* Onboard IBM 5250 communications adapter: INT0 of the 80186 ICU.
+   The guest's handlers acknowledge with EOI type 12 (INT0). */
+/* Diagnostic terminal's result channel: the self-test reports on port 0x1B0
+   with the code in AX (segment 0x01 = result, 0x00 = pass counter). */
+static void
+ibm3477_diag_out(uint16_t port, uint8_t val, void *priv)
+{
+    (void) priv;
+
+    if (port != 0x1B0)
+        return;
+
+    {
+        uint32_t dsb = ((uint32_t) cpu_state.seg_ds.seg) << 4;
+        pclog("3477: OUT1B0 %02X ax=%04X pc=%04X [2A]=%02X [2B]=%02X [2D]=%02X\n",
+              val, AX, cpu_state.pc, mem_readb_phys(dsb + 0x2A),
+              mem_readb_phys(dsb + 0x2B), mem_readb_phys(dsb + 0x2D));
+        pclog("  PORTS [4]=%04X [6]=%04X [8]=%04X [A]=%04X [C]=%04X [E]=%04X [12]=%04X\n",
+              mem_readw_phys(dsb + 0x4), mem_readw_phys(dsb + 0x6),
+              mem_readw_phys(dsb + 0x8), mem_readw_phys(dsb + 0xA),
+              mem_readw_phys(dsb + 0xC), mem_readw_phys(dsb + 0xE),
+              mem_readw_phys(dsb + 0x12));
+        for (int v = 0x0B; v <= 0x0F; v++)
+            pclog("  IVT %02X -> %04X:%04X\n", v,
+                  mem_readw_phys((uint32_t) v * 4 + 2), mem_readw_phys((uint32_t) v * 4));
+    }
+
+    if (getenv("EPOCH3477_EXIT_ON_REPORT") && (val == 0x01)) {
+        pclog("3477: POWEROFF on report ax=%04X\n", AX);
+        plat_power_off();
+    }
+}
+
+static void
+ibm3477_5250_irq_raise(void *priv)
+{
+    static int n;
+    struct i8018x_pcb_t *pcb = (struct i8018x_pcb_t *) priv;
+
+    if (n++ < 20) pclog("5250: IRAISE #%d\n", n);
+    /* Force a fresh low->high edge: the adapter keeps its own level flag and
+       no longer gets an ack callback, so a bare level raise would be dropped. */
+    i8018x_pcb_icu_int(pcb, 0, 0);
+    i8018x_pcb_icu_int(pcb, 0, 1);
+}
+
+static int
+ibm3477_5250_ack(void *priv)
+{
+    ibm5250_irq_ack((ibm5250_t *) priv);
+    return 0;
+}
+
+static void
+ibm3477_5250_irq_clear(void *priv)
+{
+    i8018x_pcb_icu_int((struct i8018x_pcb_t *) priv, 0, 0);
+}
+
 int
 machine_xt_ibm3477_init(const machine_t *model)
 {
@@ -3726,6 +3813,15 @@ machine_xt_ibm3477_init(const machine_t *model)
     i8018x_pcb_set_dma_channels(pcb, FDC_PRIMARY_DMA, -1);
     i8018x_pcb_set_irq_map(pcb, 1, 1); /* Keyboard */
     i8018x_pcb_set_irq_map(pcb, 4, 2); /* Floppy */
+
+    {
+        ibm5250_t *ad = ibm5250_init(0, ibm3477_5250_irq_raise, pcb,
+                                     ibm3477_5250_irq_clear, pcb);
+        i8018x_pcb_set_ext_ack(pcb, 0, ibm3477_5250_ack, ad);
+        ibm5250_set_shared_clear(ad, epoch_adr_shared_clear, NULL);
+    }
+
+    io_sethandler(0x1B0, 0x0001, NULL, NULL, NULL, ibm3477_diag_out, NULL, NULL, NULL);
 
     return ret;
 }
