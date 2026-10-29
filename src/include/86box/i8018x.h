@@ -32,4 +32,10 @@ extern void i8018x_pcb_set_irq_map(struct i8018x_pcb_t *pcb, int pic_irq, int li
 extern void i8018x_pcb_set_dma_channels(struct i8018x_pcb_t *pcb, int dma0_ch, int dma1_ch);
 extern void i8018x_pcb_set_ext_ack(struct i8018x_pcb_t *pcb, int line, ext_ack_t ack, void *priv);
 
+/* Timer 0/1 can count the edges on their TIMERIN pin instead of the internal
+   clock (the EXT bit in the mode/control word).  The machine says how fast that
+   pin is clocked, in CPU clocks per event; 0 means nothing drives the pin, so a
+   timer that selects the external clock never advances. */
+extern void i8018x_pcb_set_timer_input(struct i8018x_pcb_t *pcb, int tmr, uint32_t cpu_clocks_per_event);
+
 #endif /* EMU_I8018X_H */
