@@ -45,6 +45,7 @@
 #include <86box/vid_cga_comp.h>
 #include <86box/flash.h>
 #include <86box/machine.h>
+#include <86box/hp_hil.h>
 
 /* ISA */
 static const device_config_t ibmat_config[] = {
@@ -136,6 +137,51 @@ const device_t ibmat_device = {
     .speed_changed = NULL,
     .force_redraw  = NULL,
     .config        = ibmat_config
+};
+
+/* HP Vectra 45945A (1985): 80286 @ 8 MHz, 64 KB system firmware made of two
+   32 KB EPROMs (U183 = even, U191 = odd). */
+static const device_config_t vectra_45945a_config[] = {
+    // clang-format off
+    {
+        .name           = "bios",
+        .description    = "BIOS Version",
+        .type           = CONFIG_BIOS,
+        .default_string = "hpvectra_090185",
+        .default_int    = 0,
+        .file_filter    = NULL,
+        .spinner        = { 0 },
+        .selection      = { { 0 } },
+        .bios           = {
+            {
+                .name          = "HP BIOS - Revision 45925 (09/01/85)",
+                .internal_name = "hpvectra_090185",
+                .bios_type     = BIOS_NORMAL,
+                .files_no      = 2,
+                .local         = 0,
+                .size          = 65536,
+                .files         = { "roms/machines/hpvectra/vectra45945a_even_1818-3784.bin", "roms/machines/hpvectra/vectra45945a_odd_1818-3785.bin", "" }
+            },
+
+            { .files_no = 0 }
+        },
+    },
+    { .name = "", .description = "", .type = CONFIG_END }
+    // clang-format on
+};
+
+const device_t vectra_45945a_device = {
+    .name          = "HP Vectra 45945A",
+    .internal_name = "vectra_45945a",
+    .flags         = 0,
+    .local         = 0,
+    .init          = NULL,
+    .close         = NULL,
+    .reset         = NULL,
+    .available     = NULL,
+    .speed_changed = NULL,
+    .force_redraw  = NULL,
+    .config        = vectra_45945a_config
 };
 
 static void
@@ -232,6 +278,59 @@ machine_at_ibmxt286_init(const machine_t *model)
 
     if (enable_5161)
         device_add(&ibm_5161_device);
+
+    return ret;
+}
+
+/* TEMPORARY Phase 1 scaffolding: the HP-HIL controller (0x6C-0x6F) and the
+   45981A video card (0x3B0-0x3DF) are not emulated yet, so their ports are
+   open bus. Log the accesses (with CS:IP) when HP_VECTRA_TRACE is set, which
+   is how POST progress is tracked until those devices exist. */
+static void
+hp_trace_write(uint16_t addr, uint8_t val, void *priv)
+{
+    pclog("[HPIO] out %03X = %02X at %04X:%04X\n", addr, val, CS, cpu_state.pc);
+}
+
+static uint8_t
+hp_trace_read(uint16_t addr, void *priv)
+{
+    pclog("[HPIO] in  %03X at %04X:%04X\n", addr, CS, cpu_state.pc);
+    return 0xff;
+}
+
+static void
+hp_trace_init(void)
+{
+    io_sethandler(0x03b0, 0x30, hp_trace_read, NULL, NULL, hp_trace_write, NULL, NULL, NULL);
+}
+
+int
+machine_at_vectra_init(const machine_t *model)
+{
+    int         ret = 0;
+    const char *fn[2];
+
+    /* No ROMs available. */
+    if (!device_available(model->device))
+        return ret;
+
+    device_context(model->device);
+    fn[0] = device_get_bios_file(model->device, device_get_config_bios("bios"), 0);
+    fn[1] = device_get_bios_file(model->device, device_get_config_bios("bios"), 1);
+    ret   = bios_load_interleaved(fn[0], fn[1], 0x000f0000, 65536, 0);
+    device_context_restore();
+
+    if (bios_only || !ret)
+        return ret;
+
+    machine_at_ibm_common_init(model);
+
+    /* HP-HIL host controller (U777) at 0x6C-0x6F. */
+    device_add(&hp_hil_device);
+
+    if (getenv("HP_VECTRA_TRACE") != NULL)
+        hp_trace_init();
 
     return ret;
 }

@@ -534,8 +534,10 @@ extern int             machine_pc3086_init(const machine_t *);
 /* ISA */
 #ifdef EMU_DEVICE_H
 extern const device_t  ibmat_device;
+extern const device_t  vectra_45945a_device;
 #endif
 extern int             machine_at_ibmat_init(const machine_t *);
+extern int             machine_at_vectra_init(const machine_t *);
 #ifdef EMU_DEVICE_H
 extern const device_t  ibmxt286_device;
 #endif

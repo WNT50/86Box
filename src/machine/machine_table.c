@@ -3760,6 +3760,54 @@ const machine_t machines[] = {
         .net_device               = NULL,
         .aliases                  = { "" }
     },
+    /* HP Vectra 45945A: 80286 @ 8 MHz, proprietary 8041 KBC + HP-HIL, HP 45981A video. */
+    {
+        .name              = "[ISA] HP Vectra 45945A",
+        .internal_name     = "hpvectra",
+        .type              = MACHINE_TYPE_286,
+        .chipset           = MACHINE_CHIPSET_DISCRETE,
+        .init              = machine_at_vectra_init,
+        .p1_handler        = machine_generic_p1_handler,
+        .gpio_handler      = NULL,
+        .available_flag    = MACHINE_AVAILABLE,
+        .gpio_acpi_handler = NULL,
+        .cpu               = {
+            .package     = CPU_PKG_286,
+            .block       = CPU_BLOCK_NONE,
+            .min_bus     = 8000000,
+            .max_bus     = 8000000,
+            .min_voltage = 0,
+            .max_voltage = 0,
+            .min_multi   = 0,
+            .max_multi   = 0
+        },
+        .bus_flags = MACHINE_AT,
+        .flags     = MACHINE_FLAGS_NONE,
+        .ram       = {
+            .min  = 256,
+            .max  = 3648,
+            .step = 128
+        },
+        .nvrmask                  = 63,
+        .jumpered_ecp_dma         = 0,
+        .default_jumpered_ecp_dma = -1,
+        .kbc_device               = &kbc_hp_8041_device,
+        .kbc_params               = 0x00000000,
+        .nvr_device               = &nvr_at_device,
+        .nvr_params               = NVR_AT,
+        .sio_device               = NULL,
+        .sio_params               = 0x00000000,
+        .kbc_p1                   = 0x000004f0,
+        .gpio                     = 0xffffffff,
+        .gpio_acpi                = 0xffffffff,
+        .device                   = &vectra_45945a_device,
+        .kbd_device               = NULL,
+        .fdc_device               = NULL,
+        .vid_device               = NULL,
+        .snd_device               = NULL,
+        .net_device               = NULL,
+        .aliases                  = { "HP Vectra 286", "" }
+    },
     /* Has IBM PS/2 Type 1 KBC firmware. */
     {
         .name              = "[ISA] IBM PS/1 model 2011",
