@@ -578,6 +578,16 @@ get_raw_tsize(const int side_flags, const int slower_rpm)
             break;
     }
 
+    /* The table above is keyed on the data rate and the spindle speed only, and
+       its figures are the double density (MFM) capacity. Single density frames
+       one data bit per two bit cells, so a track written that way holds half as
+       many bytes. Without this the loader works out a gap 3 that fits the MFM
+       track, the encoder then wraps half way round the much shorter FM track and
+       overwrites the sectors it already wrote -- a 16 sector single density
+       track ends up with only its last 8 IDs on it. */
+    if (!(side_flags & 8))
+        size /= 2;
+
     return size;
 }
 
