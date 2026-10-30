@@ -67,7 +67,7 @@ add_library(dev OBJECT
     phoenix_486_jumper.c
     postcard.c
     radisys_config.c
-    serial_8251.c
+    serial_i8251.c
     serial_backend.c
     serial_host.c
     serial_ns8250.c
