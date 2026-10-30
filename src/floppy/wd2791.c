@@ -113,9 +113,16 @@ wd2791_rate(wd2791_t *dev)
 static void
 wd2791_update_rate(wd2791_t *dev)
 {
-    dev->fdc.rate           = (uint8_t) wd2791_rate(dev);
-    dev->fdc.mfm            = dev->dden ? 0 : 1;
-    dev->fdc.bitcell_period = (uint32_t) fdd_get_bitcell_period(dev->fdc.rate);
+    dev->fdc.rate  = (uint8_t) wd2791_rate(dev);
+    dev->fdc.mfm   = dev->dden ? 0 : 1;
+    /* FM frames one data bit per two bit cells: at the same 250 kbps nominal
+       rate a single density track is written at 125 kbps, so its cell lasts
+       twice as long. The bitstream layer derives the medium's cell from the
+       track's own flags (16000 ns for an FM/250 kbps track) and refuses the
+       command outright when the controller disagrees, which is what made every
+       FM read come back as NO IDAM without ever searching the track. */
+    dev->fdc.bitcell_period = (uint32_t) fdd_get_bitcell_period(dev->fdc.rate) *
+                              (dev->dden ? 2 : 1);
 }
 
 static void
@@ -287,6 +294,7 @@ wd_data_in(void *priv, uint8_t data, int last)
     if ((dev->state != WD_ST_READ) && (dev->state != WD_ST_READID) &&
         (dev->state != WD_ST_READTRACK))
         return -1;
+
 
     if ((dev->state == WD_ST_READID) && (dev->id_count < (int) sizeof(dev->id_buf)))
         dev->id_buf[dev->id_count] = data;
