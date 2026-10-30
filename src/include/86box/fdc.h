@@ -195,6 +195,10 @@ typedef struct fdc_t {
     int (*ext_data)(void *ext, uint8_t data, int last);
     int (*ext_getdata)(void *ext, int last);
     void (*ext_noidam)(void *ext);
+    /* Some controllers do not drive the generic stat machine at all; this hook
+       hands them every error the drive layer reports so they can finish the
+       command themselves instead of leaving BUSY asserted. */
+    void (*ext_error)(void *ext, int st5, int st6);
     void (*ext_seek_done)(void *ext, int drive);
     void (*ext_diskchange)(void *ext, int drive);
 } fdc_t;

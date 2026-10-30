@@ -2442,6 +2442,11 @@ fdc_callback(void *priv)
 void
 fdc_error(fdc_t *fdc, int st5, int st6)
 {
+    if (fdc->ext_error != NULL) {
+        fdc->ext_error(fdc->ext, st5, st6);
+        return;
+    }
+
     fdc_log("FDC command %02X: Lower DRQ on error\n", fdc->processed_cmd);
     if (!(fdc->flags & FDC_FLAG_PCJX))
         dma_set_drq(fdc->dma_ch, 0);
