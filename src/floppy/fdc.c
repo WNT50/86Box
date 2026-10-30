@@ -687,7 +687,8 @@ fdc_get_densel(fdc_t *fdc, int drive)
 static int
 fdc_ps2_tdr_per_slot(void)
 {
-    return (machines[machine].init == machine_ps1_m2121_init);
+    return (machines[machine].init == machine_ps1_m2121_init) ||
+           (machines[machine].init == machine_ps2_m25_386sx_init);
 }
 
 static void
