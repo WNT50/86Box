@@ -208,11 +208,11 @@ i8018x_pcb_tmr_max(struct i8018x_pcb_t *dev, int i)
 
     uint64_t m = (uint64_t) dev->regs[reg / 2];
 
-    /* A maximum count register of 0 means 65536, not 1. Treating it as 1 makes
-       a prescaled timer see a huge jump in its source-event count the moment
-       the MAX register is written, latching a spurious request (the ROM's
-       timer test treats an early request as a failure). */
-    return m ? (m + 1u) : 0x10000u;
+    /* The maximum count is the register value itself; only zero is special,
+       standing for a full 16-bit period (270788-001 section 6.1).  Counting it
+       as value + 1 shortened every period by one event, which the POST's delay
+       helper cannot see but its timer self-test can. */
+    return m ? m : 0x10000u;
 }
 
 static uint32_t
@@ -281,14 +281,8 @@ i8018x_pcb_tmr_update(struct i8018x_pcb_t *dev)
                                          : 0u);
 
         uint64_t max = i8018x_pcb_tmr_max(dev, i);
-
-        /* A maximum count of zero is a full 16-bit period, not a divide by
-           zero: the POST's delay helper programs exactly that (v3 0xfc170
-           writes 0 to the maximum count of timer 0 and then spins on MC). */
-        if (max == 0)
-            max = 0x10000u;
-
-        uint64_t cyc = i8018x_pcb_tmr_events(dev, i) / max;
+        uint64_t ev  = i8018x_pcb_tmr_events(dev, i);
+        uint64_t cyc = ev / max;
 
 
         if (cyc <= dev->tmr_done[i])
@@ -758,13 +752,28 @@ i8018x_pcb_write_word(struct i8018x_pcb_t *dev, uint16_t off, uint16_t val)
         break;
     }
 
+    uint16_t old_val   = dev->regs[off / 2];
+
     dev->regs[off / 2] = val;
 
-    /* A control or count-register write (re)starts the count cycle; the request
-       latch itself is only touched through the interrupt controller registers. */
+    /* A count or maximum-count write reloads the counter and restarts the
+       cycle; the request latch itself is only touched through the interrupt
+       controller registers.  A control write restarts it only when it is the
+       one that starts the timer, because a write that leaves a running timer
+       running must not reload it -- the POST's delay helper writes the control
+       register on every pass and polls MC (v3 0xfc177), which only works if a
+       period survives those writes. */
     for (int i = 0; i < 3; i++) {
-        if ((off == I8018X_TMR_CON(i)) || (off == I8018X_TMR_COUNT(i)) ||
-            (off == I8018X_TMR_MAXA(i)) || (off == I8018X_TMR_MAXB(i)))
+        int restart = 0;
+
+        if ((off == I8018X_TMR_COUNT(i)) || (off == I8018X_TMR_MAXA(i)) ||
+            (off == I8018X_TMR_MAXB(i)))
+            restart = 1;
+        else if ((off == I8018X_TMR_CON(i)) &&
+                 !(old_val & I8018X_TMR_CON_EN) && (val & I8018X_TMR_CON_EN))
+            restart = 1;
+
+        if (restart)
             i8018x_pcb_tmr_restart(dev, i);
     }
 
