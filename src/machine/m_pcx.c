@@ -45,6 +45,7 @@
 #include <86box/rom.h>
 #include <86box/i8018x.h>
 #include <86box/wd2791.h>
+#include <86box/serial.h>
 #include <86box/pcx_vid.h>
 #include <86box/plat_unused.h>
 #include "cpu.h"
@@ -112,6 +113,7 @@ typedef struct pcx_t {
     uint8_t err_seg; /* A19..A12 of the last bus timeout / parity error */
 
     wd2791_t *fdc;   /* WD2791 formatter, 0xf900-0xf903 */
+    void *usart[3];  /* SCN2661B EPCI at 0xf9c0 / 0xf9d0 / 0xf9e0 */
 } pcx_t;
 
 static pcx_t pcx;
@@ -346,6 +348,20 @@ pcx_8259_ack(void *priv)
     return pic_irq_ack_instance((pic_t *) priv);
 }
 
+/* The three EPCI chips drive the first 8259.  INTR is a level line, so it has
+   to be withdrawn explicitly when the chip drops it; the IRQ number travels as
+   the callback's private pointer. */
+static void
+pcx_usart_irq(void *priv, int level)
+{
+    int irq = (int) (intptr_t) priv;
+
+    if (level)
+        picint(1 << irq);
+    else
+        picintc(1 << irq);
+}
+
 static void
 pcx_icu_int0(void *priv, int level)
 {
@@ -493,12 +509,27 @@ machine_pcx_init(const machine_t *model)
     io_sethandler(PCX_SCSI_PORT, 0x0004, pcx_stub_readb, NULL, NULL,
                   pcx_stub_writeb, NULL, NULL, NULL);
 
-    io_sethandler(PCX_USART1_PORT, 0x0004, pcx_stub_readb, NULL, NULL,
-                  pcx_stub_writeb, NULL, NULL, NULL);
-    io_sethandler(PCX_USART2_PORT, 0x0004, pcx_stub_readb, NULL, NULL,
-                  pcx_stub_writeb, NULL, NULL, NULL);
-    io_sethandler(PCX_USART3_PORT, 0x0004, pcx_stub_readb, NULL, NULL,
-                  pcx_stub_writeb, NULL, NULL, NULL);
+    /* The three USARTs are board devices with nothing behind them, so the
+       machine claims no COM port and each chip runs with no backend.  The chip
+       decodes no address of its own: the four consecutive ports are registered
+       here and A1:A0 picks the register.  INTR is a level line on the system
+       PIC, IR3 / IR2 / IR4 for the first / second / third USART. */
+    serial_set_next_inst(SERIAL_MAX - 1);
+
+    pcx.usart[0] = device_add(&scn2661_device);
+    scn26x1_set_irq(pcx.usart[0], 1 << 3);
+    io_sethandler(PCX_USART1_PORT, 0x0004, scn26x1_read, NULL, NULL,
+                  scn26x1_write, NULL, NULL, pcx.usart[0]);
+
+    pcx.usart[1] = device_add(&scn2661_device);
+    scn26x1_set_irq(pcx.usart[1], 1 << 2);
+    io_sethandler(PCX_USART2_PORT, 0x0004, scn26x1_read, NULL, NULL,
+                  scn26x1_write, NULL, NULL, pcx.usart[1]);
+
+    pcx.usart[2] = device_add(&scn2661_device);
+    scn26x1_set_irq(pcx.usart[2], 1 << 4);
+    io_sethandler(PCX_USART3_PORT, 0x0004, scn26x1_read, NULL, NULL,
+                  scn26x1_write, NULL, NULL, pcx.usart[2]);
 
     /* The MMU sits on port 0x8000-0x8fff and translates every CPU access to the
        RAM window in 1 KB pages; it is also the place that catches the hole when
