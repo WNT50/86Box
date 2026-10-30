@@ -25,8 +25,10 @@
  *              (2 reads per bit, 16 bits: start + 8 data + 3 addr + parity + 3 fill)
  *            - bit1 mirrors the 0x1C2 phase (always 0 for command 0x40)
  *
- *          The payload for 0x40 is d=0x55 with address 111 and odd parity
- *          over the 12 bits B15..B4; for 0x08 it is d=0xFF with even parity.
+ *          Parity is even over the 12 bits B15..B4 for every command, as the
+ *          protocol requires (audit item: the earlier odd-parity fit for 0x40
+ *          is gone). The payloads are d=0x2A for 0x40 and d=0xFF for 0x08,
+ *          both with station 111 (7) = EOM on single-frame replies.
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -183,6 +185,7 @@ struct ibm5250_t {
     int      c1_42;        /* 写 0x1C1=0x42 后，下一次 0x1C6 读 bit1=0（一次性） */
     int      c2_rst;       /* 写完 0x1C2=0x04 后 0x1C1 bit1 必须读 0 */      /* 最后一次写 0x1C1 的值 */   /* IRQ 已投递、尚未 ack：ISR 采样窗口 */
     int      txn_station;   /* 本帧站号（协议事务层） */
+    int      txn_station_valid; /* 收到过轮询帧：站号才可用作非末帧的 B6–B4 */
     int      txn_cmd;       /* 本帧命令字 */      /* this poll gets a reply */
     int      done40;     /* the 0x40 frame has been served once */
     int      pre;        /* 帧前空槽（每槽 2 读）*/
@@ -476,12 +479,21 @@ static uint8_t
 ibm5250_frame_bit(ibm5250_t *dev, int k)
 {
     const ibm5250_frame_desc_t *f = ibm5250_frame_desc(dev->cmdlat);
-    int d, ones, o12;
+    int d, ones, o12, st;
 
     if (f == NULL)
         f = ibm5250_frame_desc(0x08);
 
     d = f->data[(dev->cmdlat == 0x64) ? (dev->seq64 % f->nframes) : 0];
+
+    /* B6–B4 是站号 0–6，末帧用 7 表示 EOM。表里恒填 7 是 EMDIAG 的实测值
+       （0xB11 的 (BH|0xF1)+1==0 要求 W8..W11 全 1），单帧命令因此保持不变；
+       多帧命令（0x64 三帧）的非末帧改用本次轮询的站号，且只在确实收到过
+       轮询帧时生效，未收到时退回表值。 */
+    st = f->station;
+    if ((f->nframes > 2) && dev->txn_station_valid
+        && (((dev->cmdlat == 0x64) ? (dev->seq64 % f->nframes) : 0) < (f->nframes - 1)))
+        st = dev->txn_station & 7;
 
     if (dev->cmdlat == 0x40 && getenv("EPOCH5250_D40"))   /* 实验覆盖 */
         d = (int) strtoul(getenv("EPOCH5250_D40"), NULL, 16);
@@ -494,13 +506,13 @@ ibm5250_frame_bit(ibm5250_t *dev, int k)
 
     if (k == 0)                 return 1;                 /* B15 sync */
     if (k <= 8)                 return (uint8_t) ((d >> (k - 1)) & 1);  /* B14..B7 */
-    if (k <= 11)                return (uint8_t) ((f->station >> (k - 9)) & 1); /* B6..B4 */
+    if (k <= 11)                return (uint8_t) ((st >> (k - 9)) & 1); /* B6..B4 */
     if (k == 12) {
         ones = 1;                                          /* sync */
         for (int t = 0; t < 8; t++)
             ones += (d >> t) & 1;                          /* data */
         for (int t = 0; t < 3; t++)
-            ones += (f->station >> t) & 1;                 /* station */
+            ones += (st >> t) & 1;                         /* station */
         o12 = ones;
         if (dev->cmdlat == 0x40 && getenv("EPOCH5250_P40"))
             return (uint8_t) atoi(getenv("EPOCH5250_P40"));
@@ -1978,6 +1990,7 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
                            0x21 = 扫描（0x500 的 8 站轮询）-> 只答本机站 7
                            其它（0x30/0x61 单站命令）-> 地址解析到本机即答 */
                         dev->txn_station = (dev->word >> 9) & 7;
+                        dev->txn_station_valid = 1;
                         dev->txn_cmd     = (dev->word >> 1) & 0xFF;
                         dev->serve = (dev->txn_cmd == 0x21) ? (dev->txn_station == 7) : 1;
                         pclog("5250: FRAME %04X serve=%d\n", dev->word, dev->serve);
