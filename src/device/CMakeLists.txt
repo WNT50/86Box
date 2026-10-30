@@ -69,6 +69,7 @@ add_library(dev OBJECT
     radisys_config.c
     serial_8251.c
     serial.c
+    serial_backend.c
     softpower.c
     smbus_ali7101.c
     smbus_piix4.c

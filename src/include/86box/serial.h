@@ -21,6 +21,7 @@
 #define EMU_SERIAL_H
 
 #include <86box/char.h>
+#include <86box/serial_backend.h>
 
 #define SERIAL_8250          0
 #define SERIAL_8250_PCJR_3F8 1
@@ -105,6 +106,9 @@ typedef struct serial_s {
     double     transmit_period;
 
     struct serial_device_s *sd;
+
+    /* Whatever is on the other side of the port; NULL when nothing is attached. */
+    const serial_backend_t *be;
 
 } serial_t;
 
