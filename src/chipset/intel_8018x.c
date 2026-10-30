@@ -673,6 +673,7 @@ i8018x_pcb_read_word(struct i8018x_pcb_t *dev, uint16_t off)
     if (off == I8018X_RELOC_OFF)
         return dev->reloc;
 
+
     /* The count registers free-run while their timer is enabled (270788-001
        section 6.1: the count resets to zero when it equals the maximum). */
     i8018x_pcb_tmr_update(dev);
@@ -734,9 +735,14 @@ i8018x_pcb_write_word(struct i8018x_pcb_t *dev, uint16_t off, uint16_t val)
     }
 
     /* CHG/NOCHG gates the ST/STOP bit: a control word write that leaves it
-       clear keeps the channel running as it was (270788-001 section 8.2). */
-    if (((off == I8018X_DMA_CTRL(0)) || (off == I8018X_DMA_CTRL(1))) && !(val & I8018X_DMA_CHG))
-        val = (uint16_t) ((val & ~I8018X_DMA_ST) | (dev->regs[off / 2] & I8018X_DMA_ST));
+       clear keeps the channel running as it was, and the bit itself is write
+       only -- it always reads back as zero (270788-001 section 8.2). */
+    if ((off == I8018X_DMA_CTRL(0)) || (off == I8018X_DMA_CTRL(1))) {
+        if (!(val & I8018X_DMA_CHG))
+            val = (uint16_t) ((val & ~I8018X_DMA_ST) | (dev->regs[off / 2] & I8018X_DMA_ST));
+
+        val &= (uint16_t) ~I8018X_DMA_CHG;
+    }
 
     /* A timer control register keeps neither its INHibit bit, which is what
        lets a write reach the ENable bit at all, nor its read-only RIU bit
