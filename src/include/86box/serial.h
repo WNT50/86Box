@@ -134,6 +134,9 @@ typedef struct serial_port_s {
 
 extern serial_port_t com_ports[SERIAL_MAX];
 
+/* Storage for an in-machine device's callbacks; owned by serial_host.c. */
+extern serial_device_t *serial_device_get(int port);
+
 extern serial_t *serial_attach_ex(int port,
                                   void (*rcr_callback)(struct serial_s *serial, void *priv),
                                   void (*dev_write)(struct serial_s *serial, void *priv, uint8_t data),
