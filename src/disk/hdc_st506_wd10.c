@@ -208,7 +208,9 @@ wd10_hdc_reset_state(wd10_hdc_t *dev)
     timer_disable(&dev->timer);
 
     dev->sector    = 0x00;
-    dev->errors    = 0x00;
+    /* After a reset the error register reads 01h, which is how an AT BIOS
+       knows the controller came back (the IBM POST compares it with 1). */
+    dev->errors    = 0x01;
     dev->cyl_lo    = 0x00;
     dev->cyl_hi    = 0x00;
     dev->count     = 0x00;
@@ -267,10 +269,12 @@ wd10_hdc_command(wd10_hdc_t *dev, uint8_t command)
                  dev->head, dev->sector, dev->count);
 
     if (!dev->present[dev->unit]) {
-        /* Nothing on that unit: stay not ready so the host gives up instead of
-           waiting for a transfer that will never happen. */
+        /* Nothing on that unit: the command still completes and asserts INTRQ,
+           otherwise a host that waits for the interrupt hangs until it times
+           out (the VAXmate BIOS probes both drives this way at boot). */
         dev->errors = ERR_AC;
-        dev->status = 0x00;
+        dev->status = ST_RDY | ST_SC | ST_ERR;
+        wd10_hdc_irq_raise(dev);
         return;
     }
 
@@ -278,10 +282,15 @@ wd10_hdc_command(wd10_hdc_t *dev, uint8_t command)
         case CMD_RESTORE:
             dev->cyl_lo = 0x00;
             dev->cyl_hi = 0x00;
+            dev->status = ST_RDY | ST_SC;
+            wd10_hdc_irq_raise(dev);
             break;
 
         case CMD_SEEK:
-            /* The cylinder registers already hold the target. */
+            /* The cylinder registers already hold the target; the head is
+               there once the command completes, which is what INTRQ reports. */
+            dev->status = ST_RDY | ST_SC;
+            wd10_hdc_irq_raise(dev);
             break;
 
         case 0x90:
