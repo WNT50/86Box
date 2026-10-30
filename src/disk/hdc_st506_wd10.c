@@ -269,11 +269,25 @@ wd10_hdc_command(wd10_hdc_t *dev, uint8_t command)
                  dev->head, dev->sector, dev->count);
 
     if (!dev->present[dev->unit]) {
-        /* Nothing on that unit: the command still completes and asserts INTRQ,
-           otherwise a host that waits for the interrupt hangs until it times
-           out (the VAXmate BIOS probes both drives this way at boot). */
-        dev->errors = ERR_AC;
-        dev->status = ST_RDY | ST_SC | ST_ERR;
+        /* Nothing on that unit. The controller itself cannot tell: selecting a
+           drive is just a bit in the SDH register, so the head positioning
+           commands complete and interrupt as usual, and only a command that
+           needs an ID field fails. Reporting an error for everything instead
+           makes the VAXmate BIOS abandon the controller reset (its reset
+           handler re-initialises every drive it knows about) and the boot
+           record then prints "Bad disk". */
+        switch (command & 0xf0) {
+            case CMD_RESTORE:
+            case CMD_SEEK:
+            case 0x90:
+                dev->errors = 0x00;
+                dev->status = ST_RDY | ST_SC;
+                break;
+            default:
+                dev->errors = ERR_AC;
+                dev->status = ST_RDY | ST_SC | ST_ERR;
+                break;
+        }
         wd10_hdc_irq_raise(dev);
         return;
     }
