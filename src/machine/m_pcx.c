@@ -33,6 +33,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #define HAVE_STDARG_H
 #include <86box/86box.h>
 #include <86box/device.h>
@@ -107,7 +108,8 @@ typedef struct pcx_t {
     uint8_t dskctl2; /* 0xf905: second latch, read-modify-written by the POST */
 
     uint8_t nvram[PCX_NVRAM_SIZE];
-    uint8_t rtc[PCX_RTC_SIZE]; /* 0xf880-0xf8bf, MC146818 register file */
+    uint8_t       rtc[PCX_RTC_SIZE]; /* 0xf880-0xf8bf, MC146818 register file */
+    pc_timer_t    rtc_timer;         /* one-second time base for registers 0-9 */
 
     uint8_t vid_data, vid_ctrl, vid_exec;
     uint8_t err_seg; /* A19..A12 of the last bus timeout / parity error */
@@ -295,6 +297,37 @@ pcx_nvram_write(uint16_t port, uint8_t val, UNUSED(void *priv))
    bits 4-6 to read 0b010, then checks bit 7 of 0xf88b as "calibrated"; after
    writing 0x20/0x02 it polls bit 7 of 0xf88a until it clears, so the status
    register reports idle at once. */
+/* The register file is a real clock, not a scratch array: the POST compares
+   the seconds register with a RAM byte (v3 0xfcd8b) and wants them to differ,
+   and later the guest sets and reads the time through the same registers.
+   Registers 0-9 are the time in BCD (or binary when register 0x0b bit 2 says
+   so); everything from 0x0e up is battery-backed RAM the guest owns. */
+static uint8_t
+pcx_rtc_bcd(int val)
+{
+    return (uint8_t) (((val / 10) << 4) | (val % 10));
+}
+
+static void
+pcx_rtc_tick(void *priv)
+{
+    time_t     now = time(NULL);
+    struct tm *tm  = localtime(&now);
+    int        bin = (pcx.rtc[0x0b] & 0x04) ? 1 : 0;
+
+    if (tm != NULL) {
+        pcx.rtc[0x00] = bin ? (uint8_t) tm->tm_sec : pcx_rtc_bcd(tm->tm_sec);
+        pcx.rtc[0x02] = bin ? (uint8_t) tm->tm_min : pcx_rtc_bcd(tm->tm_min);
+        pcx.rtc[0x04] = bin ? (uint8_t) tm->tm_hour : pcx_rtc_bcd(tm->tm_hour);
+        pcx.rtc[0x06] = bin ? (uint8_t) tm->tm_wday : pcx_rtc_bcd(tm->tm_wday);
+        pcx.rtc[0x07] = bin ? (uint8_t) tm->tm_mday : pcx_rtc_bcd(tm->tm_mday);
+        pcx.rtc[0x08] = bin ? (uint8_t) (tm->tm_mon + 1) : pcx_rtc_bcd(tm->tm_mon + 1);
+        pcx.rtc[0x09] = bin ? (uint8_t) (tm->tm_year % 100) : pcx_rtc_bcd(tm->tm_year % 100);
+    }
+
+    timer_on_auto(&pcx.rtc_timer, 1000000.0);
+}
+
 static uint8_t
 pcx_rtc_read(uint16_t port, UNUSED(void *priv))
 {
@@ -406,7 +439,10 @@ machine_pcx_init(const machine_t *model)
 
     memset(pcx.nvram, 0x00, sizeof(pcx.nvram)); /* an unconfigured battery */
     memset(pcx.rtc, 0x00, sizeof(pcx.rtc));
-    pcx.rtc[0x0a] = 0x20; /* divider/status: bits 4-6 = 0b010, no update in progress */
+    pcx.rtc[0x0a] = 0x20; /* divider running, no update in progress */
+
+    timer_add(&pcx.rtc_timer, pcx_rtc_tick, NULL, 0);
+    pcx_rtc_tick(NULL); /* load the host clock, and arm the one-second tick */ /* divider/status: bits 4-6 = 0b010, no update in progress */
     pcx.vid_data   = 0x00;
     pcx.vid_ctrl   = 0x00;
     pcx.vid_exec   = 0x00;
