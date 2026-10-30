@@ -49,6 +49,7 @@ add_library(dev OBJECT
     kbc_at_dev.c
     kbc_ps2_m25.c
     kbc_tvis.c
+    kbc_siemens.c
     kbc_xt.c
     keyboard.c
     keyboard_at.c
