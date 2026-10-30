@@ -523,16 +523,19 @@ wd_force_interrupt(wd2791_t *dev, uint8_t val)
 {
     uint8_t cond = val & 0x0f;
 
-    /* i3 (0x08) terminates immediately; the other bits are the conditions
-       (ready, index, ...) the chip waits for.  Terminating on any request is
-       close enough for the drivers we have seen, and it never hangs. */
-    (void) cond;
-
+    /* The low nibble picks what ends the operation: i3 means "interrupt now",
+       the others wait for ready/index (which this model does not follow), and
+       zero terminates without raising INTRQ at all.  A command write already
+       cleared the line, so 0xd0 must leave it low -- the PC-X POST issues
+       exactly that pair, 0xd0 then 0xd8, and expects one interrupt from the
+       second one (v3 BIOS 0xfcc20). */
     timer_disable(&dev->timer);
     dev->busy  = 0;
     dev->state = WD_ST_IDLE;
     dev->drq   = 0;
-    wd_irq_raise(dev);
+
+    if (cond & 0x08)
+        wd_irq_raise(dev);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -601,6 +604,7 @@ wd2791_reg_read(uint16_t port, UNUSED(void *priv))
     if (dev == NULL)
         return 0xff;
 
+
     switch (port & 3) {
         case 0x00:
             /* Reading the status register drops INTRQ. */
@@ -629,6 +633,7 @@ wd2791_reg_write(uint16_t port, uint8_t val, UNUSED(void *priv))
 
     if (dev == NULL)
         return;
+
 
     switch (port & 3) {
         case 0x00:
