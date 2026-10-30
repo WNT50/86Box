@@ -310,6 +310,7 @@ wd_data_in(void *priv, uint8_t data, int last)
         return -1;
 
 
+
     if ((dev->state == WD_ST_READID) && (dev->id_count < (int) sizeof(dev->id_buf)))
         dev->id_buf[dev->id_count] = data;
 
@@ -1002,6 +1003,12 @@ wd2791_init(void)
     dev->fdc.dma    = 1;
     dev->fdc.dma_ch = WD2791_DMA;
     dev->fdc.bus    = 0;
+
+    /* The WD279x has no DTL register: when the ID says the sector is 128 bytes
+       the transfer is exactly one sector. fdd_86f works the length out as
+       128 << N, but only when DTL is not smaller than 128, so leave it there
+       instead of the zero a reset leaves behind. */
+    dev->fdc.dtl = 128;
 
     dev->fdc.ext          = dev;
     dev->fdc.ext_data     = wd_data_in;
