@@ -341,7 +341,6 @@ wd_data_in(void *priv, uint8_t data, int last)
     dev->byte_count++;
     dev->id_count++;
 
-
     if (dev->state == WD_ST_READID) {
         /* C, H, R, N and the two CRC bytes. */
         if (dev->id_count >= 6) {
@@ -372,12 +371,26 @@ wd_data_in(void *priv, uint8_t data, int last)
 
     if (last || (dev->byte_count >= dev->sector_size)) {
         if (dev->multi) {
+            dev->byte_count = 0;
+
             /* A real 2791 paces the chain with the data register: it only looks
                for the next record once the host has taken the last byte of this
                one.  Reading ahead turned a single-sector request into a run off
-               the end of the track and a spurious record-not-found. */
+               the end of the track and a spurious record-not-found.
+
+               A polled driver, however, never reads the data register just to
+               let the chain advance -- it waits for DRQ, which the next record
+               has to supply.  With the chain deferred such a driver and the
+               controller wait for each other with BUSY still asserted, so the
+               next record is searched for at once when no DMA channel is
+               armed. */
+            if (!dev->fdc.dma) {
+                dev->sector_reg = (uint8_t) (dev->sector_reg + 1);
+                wd_sector_read(dev, dev->sector_reg);
+                return -1;
+            }
+
             dev->chain_pending = 1;
-            dev->byte_count    = 0;
             /* DRQ still reflects the byte queued behind the register. */
             return -1;
         }
