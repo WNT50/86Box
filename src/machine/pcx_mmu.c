@@ -45,7 +45,8 @@ typedef struct {
     uint16_t ctl;
     uint16_t pg[PCX_MMU_PAGES];
     int      type;
-    int      ack;                                  /* 0x8400 latch */
+    int      ack;                                  /* system call latched at 0x8800 */
+    int      fpend;                                /* protection fault latched */
     uint32_t fault;                                /* last faulted address */
 } pcx_mmu_t;
 
@@ -105,11 +106,14 @@ pcx_mmu_translate(uint32_t addr, int rw)
     entry = pcx_mmu.pg[idx];
 
     /* entry bit 1 permits reads, bit 0 permits writes; bits 15-7 are the 1 KB
-       page number.  A denied or absent entry is not an x86 exception: the
-       board raises NMI, like the rest of the machine's error handling. */
+       page number.  A denied or absent entry is not an x86 exception either:
+       the board raises the same PIC request it uses for a system call, and the
+       entry register reads back the fault status in bits 7-6 so the handler can
+       tell the two apart. */
     if (!(entry & (rw ? 0x0001 : 0x0002))) {
         pcx_mmu.fault = addr;
-        nmi_raise();
+        pcx_mmu.fpend = 1;
+        picint(0x0001);
         return 0xffffffffu;
     }
 
@@ -146,15 +150,27 @@ pcx_mmu_inw(uint16_t port, UNUSED(void *priv))
     if ((off >= PCX_MMU_REG) && (off < PCX_MMU_ACK) && !(off & 3)) {
         uint16_t entry = pcx_mmu.pg[pcx_mmu_slot(pcx_mmu.ctl, off)];
 
-        /* The entry is written and read back through a rotated data path; the
-           0xC0 is what MAME reports in the top of the first slot's read-back
-           while its "table changed" latch is still set. */
-        return (uint16_t) ((entry << 4) | (entry >> 12) |
-                           ((pcx_mmu.ack && (off == PCX_MMU_REG)) ? 0x00c0 : 0x0000));
+        /* The entry is written and read back through a rotated data path.  The
+           first slot's read-back also carries the fault status: bit 6 says a
+           fault is pending, and bit 7 distinguishes a system call from a
+           protection fault. */
+        uint16_t status = 0x0000;
+
+        if (off == PCX_MMU_REG) {
+            if (pcx_mmu.ack)
+                status = 0x00c0;
+            else if (pcx_mmu.fpend)
+                status = 0x0040;
+        }
+
+        return (uint16_t) ((entry << 4) | (entry >> 12) | status);
     }
 
     if (off == PCX_MMU_ACK) {
-        pcx_mmu.ack = 0;
+        /* Reading the acknowledge port drops the request and clears whichever
+           fault latched it. */
+        pcx_mmu.ack   = 0;
+        pcx_mmu.fpend = 0;
         picintc(0x0001);
         return 0;
     }
@@ -192,6 +208,7 @@ pcx_mmu_reset(void)
 {
     pcx_mmu.ctl   = 0;
     pcx_mmu.ack   = 0;
+    pcx_mmu.fpend = 0;
     pcx_mmu.fault = 0;
     memset(pcx_mmu.pg, 0x00, sizeof(pcx_mmu.pg));
 }
