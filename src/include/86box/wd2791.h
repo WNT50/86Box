@@ -103,6 +103,7 @@ typedef struct wd2791_t {
     int     buf_len;
     int     done_pending;
     int     chain_pending;
+    int     tc_seen;      /* the DMA channel reported terminal count */
 
     pc_timer_t timer;
 } wd2791_t;
