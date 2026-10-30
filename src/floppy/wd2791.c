@@ -316,9 +316,6 @@ wd_data_in(void *priv, uint8_t data, int last)
     dev->id_count++;
 
 
-        pclog("[CNT] %d size=%d last=%d state=%d buf=%d\n", dev->byte_count,
-              dev->sector_size, last, dev->state, dev->buf_len);
-
     if (dev->state == WD_ST_READID) {
         /* C, H, R, N and the two CRC bytes. */
         if (dev->id_count >= 6) {
@@ -425,17 +422,11 @@ wd_seek_finish(wd2791_t *dev)
         }
     }
 
-    if (dev->verify && ((dev->status & WD_S_SEEKERR) == 0)) {
-        /* V verifies the target track by reading its first ID field. */
-        if (drv != NULL) {
-            fdd_set_head(drv, 0);
-            fdd_readaddress(drv, 0, dev->fdc.rate);
-            dev->state       = WD_ST_READID;
-            dev->id_count    = 0;
-            dev->byte_count  = 0;
-            return;
-        }
-    }
+    /* V (verify) is folded into the comparison above: the head has already
+       been stepped to the target track, so the track the drive reports *is*
+       the answer.  Reading the ID field here would mean waiting on an
+       asynchronous Read Address that nothing completes for a Type I command,
+       which leaves BUSY set and wedges the driver in its status poll. */
 
     if ((dev->command & 0xf0) == 0x00)
         dev->track_reg = 0x00;
