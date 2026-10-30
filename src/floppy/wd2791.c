@@ -384,13 +384,20 @@ wd_data_in(void *priv, uint8_t data, int last)
                controller wait for each other with BUSY still asserted, so the
                next record is searched for at once when no DMA channel is
                armed. */
-            if (!dev->fdc.dma) {
+            /* Both kinds of driver need the next record started here: a polled
+               one because it waits for DRQ instead of making the extra data
+               register read, a DMA one because the channel paces the transfer
+               itself and would otherwise stall waiting for a record that is
+               never searched for.  The command ends when the DMA channel
+               reports terminal count. */
+            if (!dev->fdc.tc) {
                 dev->sector_reg = (uint8_t) (dev->sector_reg + 1);
                 wd_sector_read(dev, dev->sector_reg);
                 return -1;
             }
 
-            dev->chain_pending = 1;
+            wd_done(dev);
+            return -1;
             /* DRQ still reflects the byte queued behind the register. */
             return -1;
         }
