@@ -125,14 +125,20 @@ pcx_mmu_inb(UNUSED(uint16_t port), UNUSED(void *priv))
 }
 
 static void
-pcx_mmu_outb(UNUSED(uint16_t port), UNUSED(uint8_t val), UNUSED(void *priv))
+pcx_mmu_outb(uint16_t port, uint8_t val, UNUSED(void *priv))
 {
+    uint16_t off = (uint16_t) ((port - PCX_MMU_BASE) >> 1);
+
+    /* A byte write to the control register carries only the low half, which is
+       where every control bit lives. */
+    if (off == PCX_MMU_CTL)
+        pcx_mmu.ctl = (uint16_t) ((pcx_mmu.ctl & 0xff00) | val);
 }
 
 static uint16_t
 pcx_mmu_inw(uint16_t port, UNUSED(void *priv))
 {
-    uint16_t off = (uint16_t) (port - PCX_MMU_BASE);
+    uint16_t off = (uint16_t) ((port - PCX_MMU_BASE) >> 1);
 
     if (off == PCX_MMU_CTL)
         return pcx_mmu.ctl;
@@ -159,9 +165,10 @@ pcx_mmu_inw(uint16_t port, UNUSED(void *priv))
 static void
 pcx_mmu_outw(uint16_t port, uint16_t val, UNUSED(void *priv))
 {
-    uint16_t off = (uint16_t) (port - PCX_MMU_BASE);
+    uint16_t off = (uint16_t) ((port - PCX_MMU_BASE) >> 1);
 
     if (off == PCX_MMU_CTL) {
+
         /* Bit 5 turns translation on.  Nothing has to be rebuilt: the entry is
            read on every access, unlike a mapping-based model. */
         pcx_mmu.ctl = val;
