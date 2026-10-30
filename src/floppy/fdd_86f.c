@@ -2800,7 +2800,14 @@ d86f_poll(void *priv)
 
     d86f_advance_bit(drv, side);
 
-    if ((dev->index_count == 2) && (dev->state != STATE_IDLE)) {
+    /* Two revolutions without finding anything ends the operation.  The state
+       check used to require a live state, but a scan that gives up can already
+       have parked itself in STATE_IDLE, and then the abort never ran again
+       because index_count stayed at 2 -- the controller kept BUSY for ever.
+       A controller that installed ext_noidam still wants the answer then; for
+       any other controller the idle state means nothing is pending, so the
+       check stays as it was. */
+    if ((dev->index_count == 2) && ((dev->state != STATE_IDLE) || (((fdc_t *) drv->fdc)->ext_noidam != NULL))) {
         switch (dev->state) {
             case STATE_0A_FIND_ID:
             case STATE_SECTOR_NOT_FOUND:
