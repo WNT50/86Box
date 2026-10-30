@@ -101,6 +101,7 @@ typedef struct wd2791_t {
     int     buf_tail;
     int     buf_len;
     int     done_pending;
+    int     chain_pending;
 
     pc_timer_t timer;
 } wd2791_t;
