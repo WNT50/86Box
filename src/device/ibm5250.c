@@ -62,9 +62,20 @@ ibm5250_norm(uint16_t port)
 
 /* 19-read handshake, measured on the real EMDIAG/0x840 sequence.  idx 18 must
    stay 0: giving it the start bit breaks the 0x500 subtest (AH=0x13). */
-/* 0x1C1 状态位：各判据链要求的并集
-   bit7|bit6 = 完成/服务可用，bit4|bit3 = 命令就绪，bit1 = 本机被轮询，bit2 = 0 */
-#define IBMR_ST_READY  (0x80 | 0x40 | 0x10 | 0x08 | 0x02)
+/* 0x1C1 状态位：客机判据的并集，逐位都有出处（不是猜测的硬件语义）
+   bit7 = 本帧服务完成  —— 写 0x1C1=0x80 清（0x62B 判 0）、帧发完置 1（0x616 判 1）
+                          独立字段 dev->c1_b7，不参与强制掩码
+   bit6 = 适配器签名    —— 0x4AD 的 (al|0xAF)+1==0、0x8D3 的 (al|0xBD)+1==0 都要求它
+   bit4 = 适配器签名    —— 同上 0x4AD
+   bit3 = 命令就绪      —— 0xA17（0x1C1 read 后 & 8）
+   bit1 = 本机被轮询    —— 0x8D3 要求 bit6|bit1；各块 READY 读法同上
+   bit2 = 恒 0          —— 0x683 判 bit2=0
+   逐位出处见 references/3477s-emdiag-protocol-table.md；这里只做并集常量。 */
+#define IBMR_ST_SIGNATURE  (0x40 | 0x10 | 0x08 | 0x02)
+/* 写 0x1C1 时锁存进 latch 的位：bit6/bit4 会被 0x1C6 的 base()（0x7C 掩码）读到，
+   所以必须保留；bit1 在 latch 里没有任何读者（base() 的掩码已排除它，读 0x1C1
+   时由 IBMR_ST_SIGNATURE 补上），因此不再写进去 —— 之前 val|0x42 多置的正是它。 */
+#define IBMR_LATCH_SIG     (0x40 | 0x10)
 
 
 
@@ -431,12 +442,14 @@ ibm5250_arm_irq(ibm5250_t *dev)
 static uint8_t
 ibm5250_base(ibm5250_t *dev)
 {
-    /* 协议（见 references/3477s-emdiag-protocol-table.md）：
-       0x1C6 bit7 = 数据位、bit1 = 错误位（正常必须为 0）、bit0 = 就绪。
-       phase 不是 0x1C6 的内容，绝不映射到 bit1 —— 之前正是它让每个块
-       的 `1C6 & 2` 判据直接失败（AH=0x03 / 0xA1 …）。 */
-    /* bit1 不来自 latch：0x1C1 写入置 1，0x1C2 状态重选按选择器重算。
-       否则 0x1C1=0x48 置的 bit1 会一直留到 0x1C2=0x04 之后的 0xA48 判据。 */
+    /* 0x1C6 是状态/数据混合口：bit7 = 数据位、bit0 = 0x1C2 选择器的结果、
+       其余位镜像 0x1C1 的锁存（0x7C 掩码，bit1 除外）。
+       bit1 是**同一根线**，只是有两个采样点：
+         · 普通读（这里）→ dev->b1，由 0x1C1 写入置 1、0x1C2=0x04 时按 b1_pulse 重算
+           （0xA2C/0x8E8 要求 1、0xA48 要求 0）
+         · ISR 采样窗口 → dev->ready，见 in 0x1C6 的 ISR 分支
+       之前把这两处写成“错误位/phase 两个字段”，是同一信号的两种说法，
+       不是两条线；值本身两边都各自有判据，所以没有合并成一个来源。 */
     uint8_t v = (uint8_t) (dev->latch & 0x7C);
 
     /* 0x1C2←0x0A 之后的一次性 bit1 脉冲：给下一次非 ISR 的 0x1C6 读 */
@@ -1136,12 +1149,12 @@ ibm5250_in_real(uint16_t port, void *priv)
                (0x50 两位都为 1) */
             if (getenv("EPOCH5250_PCLOG"))
                 pclog("5250: IN 0x1C1 = %02X pc=%04X (ISR=%d)\n",
-                      (unsigned) (dev->latch | 0x52), cpu_state.pc,
+                      (unsigned) (dev->latch | IBMR_ST_SIGNATURE), cpu_state.pc,
                       dev->isr_active);
             /* 全部 0x1C1 判据的并集：bit7|6|4|3|1 = 1、bit2 = 0 ⇒ 0xDA
                （0x4AD 要 6|4、0x616 要 7、0x683 要 2=0、0x8D3 要 6|1、0xA17 要 6|3） */
             {
-                uint8_t u = (uint8_t) (dev->latch | IBMR_ST_READY);
+                uint8_t u = (uint8_t) (dev->latch | IBMR_ST_SIGNATURE);
                 if (getenv("EPOCH5250_TRACE") &&
                     ((cpu_state.pc == 0x02D7) || (cpu_state.pc == 0x02DF)))
                     pclog("ISRS pc=%04X port=%03X cmd=%02X latch=%02X b7=%d\n",
@@ -1151,7 +1164,9 @@ ibm5250_in_real(uint16_t port, void *priv)
                     (cpu_state.pc >= 0x05B0) && (cpu_state.pc <= 0x06A0))
                     pclog("B5 C1 pc=%04X u=%02X b7=%d lat=%02X\n",
                           cpu_state.pc, u, dev->c1_b7, dev->latch);
-                if (!dev->c1_b7)
+                if (dev->c1_b7)
+                    u |= 0x80;
+                else
                     u &= (uint8_t) ~0x80;
                 /* 采样窗口：投递中断后 ISR 的第一次 0x1C1 读。
                    用事件标志代替 pc==0x02D7。 */
@@ -1742,7 +1757,7 @@ ibm5250_out(uint16_t port, uint8_t val, void *priv)
             }
             /* 写 0x1C1=0x80 是"清 bit7"：0x5B0 在 0x626 写它，
                0x62B 随即回读要求 bit7=0（AH=0xA4）。 */
-            dev->latch = (val == 0x80) ? (uint8_t) 0x42 : (uint8_t) (val | 0x42);
+            dev->latch = (val == 0x80) ? (uint8_t) IBMR_LATCH_SIG : (uint8_t) (val | IBMR_LATCH_SIG);
             if ((val == 0x80) && dev->blk5b0)
                 dev->b5_clr++;   /* 每轮询帧一次：0 → 首帧, 1..15 → 循环内, ≥15 → 循环后 */
             dev->b1    = 1;   /* 0x1C1 写入即置状态 bit1（0xA2C/0x8E8 判据） */
