@@ -526,7 +526,6 @@ wd10_read(uint16_t port, void *priv)
     mfm_t  *mfm = (mfm_t *) priv;
     uint8_t ret = 0xff;
 
-
     switch (port) {
         case 0x01f0: /* data */
             ret = wd10_readw(port, mfm) & 0xff;
@@ -602,7 +601,14 @@ do_callback(void *priv)
         mfm->cylinder = 0;
 
         drive->steprate = 0x0f; /* default steprate */
-        drive->cfg_spt  = 0;    /* need new parameters */
+
+        /* WD1003 复位后要求主机重发 0x91 重新编程几何。AT 的 BIOS 会做，
+           VAXmate 的 BIOS 不会——扩展箱控制卡上的 ROM 代为编程，所以这里
+           直接按驱动器自身参数恢复；之后若真收到 0x91 仍会覆盖。 */
+        for (int i = 0; i < MFM_NUM; i++) {
+            mfm->drives[i].cfg_spt = mfm->drives[i].spt;
+            mfm->drives[i].cfg_hpc = mfm->drives[i].hpc;
+        }
 
         mfm->reset = 0;
 
@@ -802,6 +808,12 @@ wd10_attach(mfm_t *mfm, int unit, int hdd_num, int spt, int hpc, int tracks)
     drive->tracks  = tracks;
     drive->hdd_num = hdd_num;
     drive->present = 1;
+
+    /* 已配置几何：AT 的 BIOS 会在 POST 里发 0x91 把类型表的参数写进来，
+       VAXmate 的 BIOS 不发（它把几何留在自己的驱动器描述符表里，由扩展箱
+       控制卡上的 ROM 负责编程）。这里直接用镜像参数做初值，行为等价。 */
+    drive->cfg_spt = spt;
+    drive->cfg_hpc = hpc;
 }
 
 void

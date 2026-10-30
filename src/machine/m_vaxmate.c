@@ -27,6 +27,8 @@
 #include <86box/mem.h>
 #include <86box/io.h>
 #include <86box/fdc.h>
+#include <86box/hdc.h>
+#include <86box/nvr.h>
 #include <86box/machine.h>
 #include <86box/rom.h>
 #include "cpu.h"
@@ -523,6 +525,20 @@ machine_at_vaxmate_init(const machine_t *model)
                   &vax_uart[1]);
     device_add(&vaxmate_video_device);
     device_add(&lance_device);
+
+    /* AT 兼容的 RTC/CMOS。VAXmate 主机的配置存在 0x0C00 的串行 NVM 里，
+       但 BIOS 仍按 AT 惯例从 CMOS 0x12 取固定盘类型（高半字节 = 0 号盘，
+       低半字节 = 1 号盘），见 F000:F4AC5 的 mov al,0x92 / in al,0x71。
+       类型 2 在 ROM 内置参数表（F000:E401 + (type-1)*16）里正好是
+       615 柱面 / 4 磁头 / 17 扇区，也就是扩展箱里的 RD31。 */
+    nvr_t *nvr = device_add(&nvr_at_device);
+    if (nvr != NULL)
+        nvr->regs[0x12] = 0x20;
+
+    /* 扩展箱 RCD31-EA：WD2010 @ 01F0-01F7 / IRQ14，20 MB MFM（615/4/17）。
+       控制器在扩展箱里，与主机板一起出现，故无条件上设备；盘片由
+       [Hard disks] 段的 hdd_01_* 提供，没有镜像时驱动按“无盘”处理。 */
+    device_add(&st506_at_wd2010_device);
 
     io_sethandler(0x0c00, 0x0020,
                   vaxmate_csr_in, NULL, NULL,
