@@ -99,6 +99,7 @@ wd_irq_lower(wd2791_t *dev)
 static void
 wd_done(wd2791_t *dev)
 {
+
     dev->busy  = 0;
     dev->state = WD_ST_IDLE;
     dev->drq   = 0;
@@ -418,6 +419,7 @@ wd_start_write(wd2791_t *dev)
 static void
 wd_transfer_start(wd2791_t *dev)
 {
+
     if ((dev->command & 0xf0) == 0x80 || (dev->command & 0xf0) == 0x90)
         wd_start_read(dev);
     else
@@ -427,6 +429,7 @@ wd_transfer_start(wd2791_t *dev)
 static void
 wd_rw_sector(wd2791_t *dev, uint8_t val)
 {
+
     fdd_drive_t *drv = wd_drive(dev);
 
     dev->multi    = (val & 0x10) ? 1 : 0;
@@ -679,6 +682,7 @@ wd_noidam(void *priv)
 {
     wd2791_t *dev = (wd2791_t *) priv;
 
+
     if ((dev->state != WD_ST_READ) && (dev->state != WD_ST_READID) &&
         (dev->state != WD_ST_WRITE) && (dev->state != WD_ST_READTRACK))
         return;
@@ -755,7 +759,11 @@ wd2791_set_dskctl(wd2791_t *dev, uint8_t val)
         return;
 
     dev->dskctl = val;
-    dev->drive  = val & 0x03;
+    /* The drive select is one hot: the v3 boot loader writes 0x05 for drive A
+       and 0x06 for drive B (0xfde1c: 1 << drive, or 0x04 for the motor), so
+       reading the pair as a binary number picked drive B whenever A was
+       asked for and every boot read ended in Record Not Found. */
+    dev->drive  = (val & 0x01) ? 0 : ((val & 0x02) ? 1 : 0);
     dev->side   = (val & 0x08) ? 1 : 0;
     dev->dden   = (val & 0x10) ? 1 : 0;
 
