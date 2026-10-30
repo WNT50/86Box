@@ -143,6 +143,21 @@ wd_done(wd2791_t *dev)
     wd_irq_raise(dev);
 }
 
+
+/* The drive layer wants the sector size as the N code of the ID field (0 = 128
+   bytes, 2 = 512 bytes), not a byte count; passing 512 there set N to 0 and no
+   sector on the medium ever matched. */
+static int
+wd_size_code(wd2791_t *dev)
+{
+    int n = 0;
+
+    while ((n < 7) && ((128 << n) < dev->sector_size))
+        n++;
+
+    return n;
+}
+
 static uint8_t
 wd_status(wd2791_t *dev)
 {
@@ -183,7 +198,6 @@ wd_data_in(void *priv, uint8_t data, int last)
 {
     wd2791_t *dev = (wd2791_t *) priv;
     int       res;
-
 
     if ((dev->state != WD_ST_READ) && (dev->state != WD_ST_READID) &&
         (dev->state != WD_ST_READTRACK))
@@ -255,7 +269,7 @@ wd_data_in(void *priv, uint8_t data, int last)
             dev->byte_count = 0;
             dev->drq        = 0;
             fdd_readsector(wd_drive(dev), dev->sector_reg, dev->track_reg,
-                           dev->side, dev->fdc.rate, dev->sector_size);
+                           dev->side, dev->fdc.rate, wd_size_code(dev));
             return -1;
         }
         wd_done(dev);
@@ -430,7 +444,7 @@ wd_start_read(wd2791_t *dev)
     dev->byte_count = 0;
     dev->state      = WD_ST_READ;
     fdd_readsector(drv, dev->sector_reg, dev->track_reg, dev->side,
-                   dev->fdc.rate, dev->sector_size);
+                   dev->fdc.rate, wd_size_code(dev));
 }
 
 static void
@@ -451,7 +465,7 @@ wd_start_write(wd2791_t *dev)
     dev->state      = WD_ST_WRITE;
     dev->drq        = 0;
     fdd_writesector(drv, dev->sector_reg, dev->track_reg, dev->side,
-                    dev->fdc.rate, dev->sector_size);
+                    dev->fdc.rate, wd_size_code(dev));
 }
 
 static void
@@ -543,7 +557,7 @@ wd_read_track(wd2791_t *dev, uint8_t val)
     dev->byte_count = 0;
     dev->state      = WD_ST_READTRACK;
     fdd_readsector(drv, SECTOR_FIRST, dev->track_reg, dev->side,
-                   dev->fdc.rate, dev->sector_size);
+                   dev->fdc.rate, wd_size_code(dev));
 }
 
 static void
