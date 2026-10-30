@@ -168,7 +168,6 @@ pcx_mmu_outw(uint16_t port, uint16_t val, UNUSED(void *priv))
     uint16_t off = (uint16_t) ((port - PCX_MMU_BASE) >> 1);
 
     if (off == PCX_MMU_CTL) {
-
         /* Bit 5 turns translation on.  Nothing has to be rebuilt: the entry is
            read on every access, unlike a mapping-based model. */
         pcx_mmu.ctl = val;

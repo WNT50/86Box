@@ -574,6 +574,17 @@ machine_pcx_init(const machine_t *model)
     return ret;
 }
 
+/* A machine reset clears the translation table: the part comes out of reset
+   with translation off and an empty table, and a driver that turns it on and
+   then resets the machine expects the next POST to run untranslated. */
+static void
+pcx_reset(void *priv)
+{
+    (void) priv;
+
+    pcx_mmu_reset();
+}
+
 const device_t pcx_device = {
     .name          = "Siemens PC-X",
     .internal_name = "pcx",
@@ -581,7 +592,7 @@ const device_t pcx_device = {
     .local         = 0,
     .init          = NULL,
     .close         = NULL,
-    .reset         = NULL,
+    .reset         = pcx_reset,
     .available     = NULL,
     .speed_changed = NULL,
     .force_redraw  = NULL,
