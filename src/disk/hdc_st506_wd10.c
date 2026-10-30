@@ -637,10 +637,23 @@ wd10_hdc_readw(uint16_t addr, void *priv)
 {
     wd10_hdc_t *dev = (wd10_hdc_t *) priv;
 
-    if (wd10_hdc_reg(dev, addr) != REG_DATA)
-        return wd10_hdc_read(addr, priv);
+    uint16_t ret;
 
-    return (uint16_t) (wd10_hdc_read_data(dev) | (wd10_hdc_read_data(dev) << 8));
+    if (wd10_hdc_reg(dev, addr) != REG_DATA) {
+        ret = wd10_hdc_read(addr, priv);
+        if (addr == 0x01f7)
+            ret |= 0xff00;
+        else if (addr < 0x01f7)
+            ret |= (wd10_hdc_read(addr + 1, priv) << 8);
+        return ret;
+    }
+
+    /* The order of the two fetches is part of the data stream, so they must
+       be sequenced explicitly: C leaves the operand order unspecified. */
+    ret  = wd10_hdc_read_data(dev);
+    ret |= (uint16_t) (wd10_hdc_read_data(dev) << 8);
+
+    return ret;
 }
 
 static void
@@ -726,8 +739,8 @@ wd10_hdc_init(const device_t *info)
 
         io_sethandler(0x01f0, 0x0001, wd10_hdc_read, wd10_hdc_readw, NULL,
                       wd10_hdc_write, wd10_hdc_writew, NULL, dev);
-        io_sethandler(0x01f1, 0x0007, wd10_hdc_read, NULL, NULL,
-                      wd10_hdc_write, NULL, NULL, dev);
+        io_sethandler(0x01f1, 0x0007, wd10_hdc_read, wd10_hdc_readw, NULL,
+                      wd10_hdc_write, wd10_hdc_writew, NULL, dev);
     } else {
         io_sethandler(0x026c, 0x0002, wd10_hdc_reset_r, NULL, NULL,
                       wd10_hdc_reset_w, NULL, NULL, dev);
