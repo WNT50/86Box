@@ -238,6 +238,20 @@ wd_buf_push(wd2791_t *dev, uint8_t data)
     return 1;
 }
 
+/* A Read Sector command never carries the sector's size: the chip takes the N
+   field out of the ID it just matched. Single density is the one case where the
+   medium fixes it -- FM on 5.25" media always uses 128-byte sectors -- while a
+   double density track may be 256, 512 or 1024 depending on how it was written,
+   so there the command's own size code stays the best guess. */
+static int
+wd_sector_size_code(wd2791_t *dev)
+{
+    if (dev->dden)
+        return 0;
+
+    return wd_size_code(dev);
+}
+
 /* Every sector operation starts its scan at the index hole: a bitstream scan
    that begins inside a sync run never arms the address-mark detector. */
 static void
@@ -250,7 +264,7 @@ wd_sector_read(wd2791_t *dev, int sector)
 
     d86f_set_track_pos(drv, 0);
     fdd_readsector(drv, sector, dev->track_reg, dev->side, dev->fdc.rate,
-                   wd_size_code(dev));
+                   wd_sector_size_code(dev));
 }
 
 static int
