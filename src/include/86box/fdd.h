@@ -72,6 +72,7 @@ extern int  fdd_get_audio_profile(void *priv);
 
 extern int fdd_get_flags(void *priv);
 extern int fdd_get_densel(void *priv);
+extern int fdd_get_bitcell_period(int rate);
 
 extern char *fdd_getname(int type);
 
