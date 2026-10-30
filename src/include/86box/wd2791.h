@@ -92,6 +92,16 @@ typedef struct wd2791_t {
     int id_count;
     uint8_t id_buf[8];
 
+    /* The one byte data register has a sector buffer behind it: a polling
+       driver reads 0xf903 a byte at a time, while the bitstream layer may hand
+       the whole sector over in a single burst, so the bytes queue up here and
+       BUSY stays asserted until the host has drained them. */
+    uint8_t buf[1024];
+    int     buf_head;
+    int     buf_tail;
+    int     buf_len;
+    int     done_pending;
+
     pc_timer_t timer;
 } wd2791_t;
 

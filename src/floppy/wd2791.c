@@ -33,6 +33,7 @@
 #include <86box/pic.h>
 #include <86box/dma.h>
 #include <86box/fdd.h>
+#include <86box/fdd_86f.h>
 #include <86box/fdc.h>
 #include <86box/io.h>
 #include <86box/log.h>
@@ -113,7 +114,7 @@ static void
 wd2791_update_rate(wd2791_t *dev)
 {
     dev->fdc.rate           = (uint8_t) wd2791_rate(dev);
-    dev->fdc.mfm            = dev->dden ? 1 : 0;
+    dev->fdc.mfm            = dev->dden ? 0 : 1;
     dev->fdc.bitcell_period = (uint32_t) fdd_get_bitcell_period(dev->fdc.rate);
 }
 
@@ -134,13 +135,27 @@ wd_irq_lower(wd2791_t *dev)
 /* Finish the command: drop busy, latch the interrupt and let the registers
    read back.  Every path out of the state machine ends here. */
 static void
+wd_finish(wd2791_t *dev)
+{
+    dev->busy         = 0;
+    dev->state        = WD_ST_IDLE;
+    dev->drq          = 0;
+    dev->done_pending = 0;
+    wd_irq_raise(dev);
+}
+
+static void
 wd_done(wd2791_t *dev)
 {
+    /* Hold the command open until the host has read the bytes still queued
+       behind the data register, or a polling driver would see BUSY drop in the
+       middle of the sector. */
+    if (dev->buf_len > 0) {
+        dev->done_pending = 1;
+        return;
+    }
 
-    dev->busy  = 0;
-    dev->state = WD_ST_IDLE;
-    dev->drq   = 0;
-    wd_irq_raise(dev);
+    wd_finish(dev);
 }
 
 
@@ -190,6 +205,40 @@ wd_status(wd2791_t *dev)
 /* Type II/III data path                                                     */
 /* ------------------------------------------------------------------------- */
 
+static int
+wd_buf_push(wd2791_t *dev, uint8_t data)
+{
+    if (dev->buf_len >= (int) sizeof(dev->buf))
+        return 0;
+
+    dev->buf[dev->buf_head] = data;
+    dev->buf_head           = (dev->buf_head + 1) % (int) sizeof(dev->buf);
+    dev->buf_len++;
+    dev->drq = 1;
+
+    return 1;
+}
+
+static int
+wd_buf_pop(wd2791_t *dev)
+{
+    if (dev->buf_len <= 0) {
+        dev->drq = 0;
+        return -1;
+    }
+
+    dev->data_reg = dev->buf[dev->buf_tail];
+    dev->buf_tail = (dev->buf_tail + 1) % (int) sizeof(dev->buf);
+    dev->buf_len--;
+    dev->drq = (dev->buf_len > 0);
+
+    if ((dev->buf_len == 0) && dev->done_pending) {
+        wd_finish(dev);
+    }
+
+    return dev->data_reg;
+}
+
 /* Called by the drive layer for every byte it takes off the medium.  Returns
    0 to keep the transfer going and -1 when the controller no longer wants
    bytes (which is how the drive layer learns that the sector is over). */
@@ -198,6 +247,7 @@ wd_data_in(void *priv, uint8_t data, int last)
 {
     wd2791_t *dev = (wd2791_t *) priv;
     int       res;
+
 
     if ((dev->state != WD_ST_READ) && (dev->state != WD_ST_READID) &&
         (dev->state != WD_ST_READTRACK))
@@ -209,30 +259,29 @@ wd_data_in(void *priv, uint8_t data, int last)
     if (dev->fdc.dma) {
         res = dma_channel_write(dev->fdc.dma_ch, data);
         if (res == DMA_NODATA) {
-            /* The guest has not armed the DMA channel: fall back to the data
-               register so a polling driver still gets its bytes. */
-            if (dev->drq) {
+            /* The guest has not armed the DMA channel: queue the byte for the
+               data register so a polling driver still gets it. */
+            if (!wd_buf_push(dev, data)) {
                 dev->status |= WD_S_LOST;
                 wd_done(dev);
                 return -1;
             }
-            dev->data_reg = data;
-            dev->drq      = 1;
         } else if (res & DMA_OVER) {
             dev->fdc.tc = 1;
         }
     } else {
-        if (dev->drq) {
+        if (!wd_buf_push(dev, data)) {
             dev->status |= WD_S_LOST;
             wd_done(dev);
             return -1;
         }
-        dev->data_reg = data;
-        dev->drq      = 1;
     }
 
     dev->byte_count++;
     dev->id_count++;
+
+        pclog("[CNT] %d size=%d last=%d state=%d buf=%d\n", dev->byte_count,
+              dev->sector_size, last, dev->state, dev->buf_len);
 
     if (dev->state == WD_ST_READID) {
         /* C, H, R, N and the two CRC bytes. */
@@ -443,6 +492,13 @@ wd_start_read(wd2791_t *dev)
 
     dev->byte_count = 0;
     dev->state      = WD_ST_READ;
+
+    /* Start every sector operation at the index hole: the bitstream finder
+       only arms its sync detector from the start of a revolution, and a scan
+       that begins inside a sync run never sees the address mark that follows
+       it. */
+    d86f_set_track_pos(drv, 0);
+
     fdd_readsector(drv, dev->sector_reg, dev->track_reg, dev->side,
                    dev->fdc.rate, wd_size_code(dev));
 }
@@ -600,6 +656,13 @@ wd_force_interrupt(wd2791_t *dev, uint8_t val)
 static void
 wd2791_command(wd2791_t *dev, uint8_t val)
 {
+
+    /* A new command abandons whatever the previous one left in the buffer. */
+    dev->buf_head     = 0;
+    dev->buf_tail     = 0;
+    dev->buf_len      = 0;
+    dev->done_pending = 0;
+
     /* A command register write clears INTRQ (die behaviour, see MAME
        cmd_w()). */
     wd_irq_lower(dev);
@@ -666,6 +729,9 @@ wd2791_reg_read(uint16_t port, UNUSED(void *priv))
             {
                 uint8_t ret = wd_status(dev);
 
+                    pclog("[ST] %02X state=%d buf=%d drq=%d\n", ret, dev->state,
+                          dev->buf_len, dev->drq);
+
 
                 wd_irq_lower(dev);
                 return ret;
@@ -678,7 +744,9 @@ wd2791_reg_read(uint16_t port, UNUSED(void *priv))
             return dev->sector_reg;
 
         default:
-            dev->drq = 0;
+
+            if (wd_buf_pop(dev) < 0)
+                return dev->data_reg;
             return dev->data_reg;
     }
 }
@@ -773,6 +841,11 @@ wd2791_reset(void)
     if (dev == NULL)
         return;
 
+    dev->buf_head     = 0;
+    dev->buf_tail     = 0;
+    dev->buf_len      = 0;
+    dev->done_pending = 0;
+
     timer_disable(&dev->timer);
 
     dev->command    = 0x00;
@@ -819,6 +892,9 @@ wd2791_set_dskctl(wd2791_t *dev, uint8_t val)
        asked for and every boot read ended in Record Not Found. */
     dev->drive  = (val & 0x01) ? 0 : ((val & 0x02) ? 1 : 0);
     dev->side   = (val & 0x08) ? 1 : 0;
+    /* The 0xf904 latch selects single density when bit 4 is set: the POST
+       reads the boot sector with the latch at 0x05, which has to be MFM on a
+       360k medium. */
     dev->dden   = (val & 0x10) ? 1 : 0;
 
     /* The drive layer has to know which density the controller asked for: the
