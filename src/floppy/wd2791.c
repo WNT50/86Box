@@ -767,6 +767,12 @@ wd2791_set_dskctl(wd2791_t *dev, uint8_t val)
     dev->side   = (val & 0x08) ? 1 : 0;
     dev->dden   = (val & 0x10) ? 1 : 0;
 
+    /* The drive layer has to know which density the controller asked for: the
+       bitstream layer refuses a sector with "wrong densel" when it does not
+       match the medium, which is what turned every boot read into Record Not
+       Found. */
+    fdd_set_densel(dev->fdc.bus, dev->dden);
+
     for (int i = 0; i < 2; i++) {
         void *d = dev->fdc.fdd[i];
 
