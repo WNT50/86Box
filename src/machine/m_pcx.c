@@ -442,7 +442,10 @@ machine_pcx_init(const machine_t *model)
     pcx.led  = 0x00;
     pcx.dskctl2 = 0x00;
 
-    memset(pcx.nvram, 0x00, sizeof(pcx.nvram)); /* an unconfigured battery */
+    /* MAME's pcd/pcx driver uses nvram_device::DEFAULT_ALL_1, i.e. an erased
+       battery reads 0xFF.  All-zero makes the boot loader's config scan take a
+       different (and fatal) path. */
+    memset(pcx.nvram, 0xff, sizeof(pcx.nvram));
     memset(pcx.rtc, 0x00, sizeof(pcx.rtc));
     pcx.rtc[0x0a] = 0x20; /* divider running, no update in progress */
 
