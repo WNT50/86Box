@@ -3451,6 +3451,7 @@ d86f_readsector(void *priv, const int sector, const int track, const int side,
     d86f_t *     dev = (d86f_t *) drv->d86f_priv;
     int     ret = 0;
 
+
     ret = d86f_common_command(drv, sector, track, side, rate, sector_size);
     if (!ret)
         return;
