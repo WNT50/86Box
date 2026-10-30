@@ -585,7 +585,12 @@ wd_rw_sector(wd2791_t *dev, uint8_t val)
     fdd_drive_t *drv = wd_drive(dev);
 
     dev->multi    = (val & 0x10) ? 1 : 0;
-    dev->side     = (val & 0x08) ? 1 : 0;
+    /* The side select on this board lives in the 0xf904 latch, not in the
+       command byte: the BIOS issues a bare 0x94 for every read and flips the
+       head through the latch.  Reading the command's bit 3 here would clear
+       the head the latch just asked for. */
+    if (!dev->side_latched)
+        dev->side = (val & 0x08) ? 1 : 0;
     dev->settle   = (val & 0x04) ? 1 : 0;
     dev->compare  = (val & 0x02) ? 1 : 0;
     dev->deleted  = (val & 0x01) ? 1 : 0; /* a0 only on write */
@@ -942,6 +947,7 @@ wd2791_set_dskctl(wd2791_t *dev, uint8_t val)
         return;
 
     dev->dskctl = val;
+    dev->side_latched = 1;
     /* The drive select is one hot: the v3 boot loader writes 0x05 for drive A
        and 0x06 for drive B (0xfde1c: 1 << drive, or 0x04 for the motor), so
        reading the pair as a binary number picked drive B whenever A was

@@ -76,6 +76,7 @@ typedef struct wd2791_t {
     int drive;
     int side;
     int dden;     /* 1 = FM single density */
+    int side_latched; /* side comes from the 0xf904 latch on this board */
 
     int multi;    /* m bit */
     int settle;   /* E bit */
