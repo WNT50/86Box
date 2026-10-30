@@ -106,7 +106,6 @@ typedef struct serial_s {
 
     struct serial_device_s *sd;
 
-    char_port_t char_port;
 } serial_t;
 
 typedef struct serial_device_s {
@@ -122,6 +121,9 @@ typedef struct serial_port_s {
     uint8_t enabled;
     uint8_t hotunplug;
     int     device;
+
+    /* The host-side backend lives with the port, not with the chip. */
+    char_port_t char_port;
 
     serial_t *serial;
 } serial_port_t;
