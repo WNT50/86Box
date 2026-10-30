@@ -865,8 +865,12 @@ wd_noidam(void *priv)
     wd2791_t *dev = (wd2791_t *) priv;
 
 
-    if ((dev->state != WD_ST_READ) && (dev->state != WD_ST_READID) &&
-        (dev->state != WD_ST_WRITE) && (dev->state != WD_ST_READTRACK))
+    /* A Type I command has no data phase, so a "no address mark" report that
+       arrives while one is running belongs to a stale sector operation.  Any
+       other command that is still busy is waiting for exactly this answer --
+       keying off the state instead left an FM scan that gave up while the
+       controller sat in another state with BUSY stuck for ever. */
+    if ((dev->type1) || (!dev->busy))
         return;
 
     dev->status |= WD_S_RNF;

@@ -1852,14 +1852,31 @@ d86f_advance_bit(void *priv, const int side)
     fdd_drive_t *drv = (fdd_drive_t *) priv;
     d86f_t *     dev = (d86f_t *) drv->d86f_priv;
 
-    dev->track_pos++;
-    dev->track_pos %= drv->d86f_handler.get_raw_size(drv, side);
+    {
+        const uint32_t raw  = drv->d86f_handler.get_raw_size(drv, side);
+        const uint32_t hole = drv->d86f_handler.index_hole_pos(drv, side);
+        const uint32_t prev = dev->track_pos;
+        int            crossed;
 
-    if (dev->track_pos == drv->d86f_handler.index_hole_pos(drv, side)) {
-        drv->d86f_handler.read_revolution(drv);
+        dev->track_pos++;
+        dev->track_pos %= raw;
 
-        if (dev->state != STATE_IDLE)
-            dev->index_count++;
+        /* Count the revolution when the head *passes* the index hole, not only
+           when it happens to land on the exact bit.  A track whose raw size is
+           not a multiple of the step that advances it would otherwise step over
+           the hole every time and the two-revolution abort in d86f_poll() could
+           never fire, leaving the command busy for ever. */
+        if (dev->track_pos >= prev)
+            crossed = (prev < hole) && (hole <= dev->track_pos);
+        else
+            crossed = (hole >= prev) || (hole <= dev->track_pos);
+
+        if (crossed) {
+            drv->d86f_handler.read_revolution(drv);
+
+            if (dev->state != STATE_IDLE)
+                dev->index_count++;
+        }
     }
 }
 
