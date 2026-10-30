@@ -1546,7 +1546,17 @@ d86f_read_sector_id(void *priv, const int side, const int match)
                     dev->id_find.sync_marks = dev->id_find.bits_obtained =
                     dev->id_find.bytes_obtained = 0;
                     dev->id_found |= 1;
-                    if ((dev->last_sector.dword == dev->req_sector.dword) || !match) {
+                    /* The datasheet lists what has to match: track number,
+                       sector number, side number and a good CRC -- the sector
+                       length byte is not among them, and the length that is
+                       transferred comes from the ID field.  Comparing the whole
+                       dword made every sector of a track formatted with a
+                       different sector size report "record not found" (SINIX
+                       track 1 holds 256-byte sectors, the driver asked for
+                       512). */
+                    if (((dev->last_sector.id.c == dev->req_sector.id.c) &&
+                         (dev->last_sector.id.h == dev->req_sector.id.h) &&
+                         (dev->last_sector.id.r == dev->req_sector.id.r)) || !match) {
                         drv->d86f_handler.set_sector(drv, side,
                                                      dev->last_sector.id.c,
                                                      dev->last_sector.id.h,
@@ -1688,9 +1698,14 @@ d86f_read_sector_data(void *priv, const int side)
                 } else {
                     if (dev->data_find.bytes_obtained < d86f_get_data_len(drv)) {
                         if (dev->state != STATE_16_VERIFY_DATA) {
+                            /* The end of the transfer is the end of the sector
+                               as the ID describes it, which is not necessarily
+                               the length the command asked for. */
                             const int read_status = fdc_data(drv->fdc, data,
-                                                    dev->data_find.bytes_obtained ==
-                                                    (d86f_get_data_len(drv) - 1));
+                                                    (dev->data_find.bytes_obtained ==
+                                                     (d86f_get_data_len(drv) - 1)) ||
+                                                    (dev->data_find.bytes_obtained ==
+                                                     (sector_len - 1)));
                             if (read_status == -1)
                                 dev->dma_over++;
                         }
