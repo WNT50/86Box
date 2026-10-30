@@ -540,6 +540,11 @@ extern int             machine_at_ibmat_init(const machine_t *);
 extern const device_t  ibmxt286_device;
 #endif
 extern int             machine_at_ibmxt286_init(const machine_t *);
+/* m_vaxmate.c */
+#ifdef EMU_DEVICE_H
+extern const device_t  vaxmate_device;
+#endif
+extern int             machine_at_vaxmate_init(const machine_t *);
 extern int             machine_at_cmdpc_init(const machine_t *);
 extern int             machine_at_portableii_init(const machine_t *);
 extern int             machine_at_portableiii_init(const machine_t *);
