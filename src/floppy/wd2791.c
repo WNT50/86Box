@@ -252,8 +252,12 @@ wd_sector_size_code(wd2791_t *dev)
     return wd_size_code(dev);
 }
 
-/* Every sector operation starts its scan at the index hole: a bitstream scan
-   that begins inside a sync run never arms the address-mark detector. */
+/* A *command* starts its scan at the index hole: a bitstream scan that begins
+   inside a sync run never arms the address-mark detector.  Chained sectors of
+   the same command keep scanning forward from where the previous one ended --
+   rewinding the position for every sector would also rewind it before it ever
+   reaches the index hole, so a scan that finds no address mark could never
+   report the two revolutions it is allowed to take. */
 static void
 wd_sector_read(wd2791_t *dev, int sector)
 {
@@ -262,7 +266,6 @@ wd_sector_read(wd2791_t *dev, int sector)
     if (drv == NULL)
         return;
 
-    d86f_set_track_pos(drv, 0);
     fdd_readsector(drv, sector, dev->track_reg, dev->side, dev->fdc.rate,
                    wd_sector_size_code(dev));
 }
@@ -544,6 +547,7 @@ wd_start_read(wd2791_t *dev)
     dev->byte_count = 0;
     dev->state      = WD_ST_READ;
 
+    d86f_set_track_pos(drv, 0);
     wd_sector_read(dev, dev->sector_reg);
 }
 
