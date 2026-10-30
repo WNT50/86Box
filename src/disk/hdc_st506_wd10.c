@@ -6,11 +6,15 @@
  *
  *          This file is part of the 86Box distribution.
  *
- *          Tandy 2000 hard disk controller emulation.
+ *          WD1010 and WD2010 hard disk controller emulation. WD2010
+ *          extends WD1010 controller with a 32-bit ECC engine and
+ *          one more cylinder address bit.
  *
- * Authors: Curt Coder
+ * Authors: Karl-Ludwig Deisenhofer
+ *          Curt Coder
  *          WNT50
  *
+ *          Copyright 2015-2017 Karl-Ludwig Deisenhofer.
  *          Copyright 2010-2026 Curt Coder.
  *          Copyright 2026 WNT50.
  */
@@ -73,6 +77,16 @@
 #define STATE_FORMAT_SEEK 3
 #define STATE_FORMAT_SEND 4
 
+/* The WD2010 is the same task file with a 32-bit ECC engine (READ/WRITE
+   with ECC is accepted) and one more cylinder address bit. */
+typedef struct wd10_variant_t {
+    uint8_t cyl_mask; /* mask applied to the high cylinder register */
+    uint8_t ecc;      /* accept READ/WRITE with ECC (command bit 1) */
+} wd10_variant_t;
+
+static const wd10_variant_t wd10_variant_1010 = { 0xff, 0 };
+static const wd10_variant_t wd10_variant_2010 = { 0x07, 1 };
+
 #ifdef ENABLE_WD10_HDC_LOG
 int wd10_hdc_do_log = ENABLE_WD10_HDC_LOG;
 
@@ -92,6 +106,8 @@ wd10_hdc_log(const char *fmt, ...)
 #endif
 
 typedef struct wd10_hdc_t {
+    const wd10_variant_t *var;
+
     uint8_t  buf[SECTOR_SIZE];
     uint16_t buf_ptr;
 
@@ -214,6 +230,15 @@ wd10_hdc_command(wd10_hdc_t *dev, uint8_t command)
 
         case CMD_READ_SECTOR:
         case CMD_WRITE_SECTOR:
+            /* Command bit 1 selects the ECC form of the transfer; the WD1010
+               has no ECC engine and aborts, the WD2010 accepts it (the ECC
+               itself is not modelled, the data path is unchanged). */
+            if ((command & 0x02) && !dev->var->ecc) {
+                dev->status |= ST_ERR;
+                dev->errors  = ERR_AC;
+                break;
+            }
+
             if (!wd10_hdc_lba(dev, &lba)) {
                 dev->status |= ST_ERR;
                 dev->errors  = ERR_ID;
@@ -441,7 +466,7 @@ wd10_hdc_write(UNUSED(uint16_t addr), uint8_t val, void *priv)
             dev->cyl_lo = val;
             break;
         case REG_CYL_HI:
-            dev->cyl_hi = val;
+            dev->cyl_hi = val & dev->var->cyl_mask;
             break;
         case REG_SDH:
             dev->sdh  = val;
@@ -492,9 +517,11 @@ wd10_hdc_reset(void *priv)
 }
 
 static void *
-wd10_hdc_init(UNUSED(const device_t *info))
+wd10_hdc_init(const device_t *info)
 {
     wd10_hdc_t *dev = (wd10_hdc_t *) calloc(1, sizeof(wd10_hdc_t));
+
+    dev->var = info->local ? &wd10_variant_2010 : &wd10_variant_1010;
 
     for (uint8_t i = 0; i < HDD_NUM; i++) {
         if ((hdd[i].bus_type != HDD_BUS_MFM) || (hdd[i].mfm_channel >= MFM_NUM))
@@ -540,6 +567,20 @@ const device_t st506_wd1010_device = {
     .internal_name = "st506_wd1010",
     .flags         = 0,
     .local         = 0,
+    .init          = wd10_hdc_init,
+    .close         = wd10_hdc_close,
+    .reset         = wd10_hdc_reset,
+    .available     = NULL,
+    .speed_changed = NULL,
+    .force_redraw  = NULL,
+    .config        = NULL
+};
+
+const device_t st506_wd2010_device = {
+    .name          = "WD2010 Hard Disk Controller",
+    .internal_name = "st506_wd2010",
+    .flags         = 0,
+    .local         = 1,
     .init          = wd10_hdc_init,
     .close         = wd10_hdc_close,
     .reset         = wd10_hdc_reset,
