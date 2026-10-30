@@ -46,6 +46,7 @@
 #include <86box/rom.h>
 #include <86box/i8018x.h>
 #include <86box/wd2791.h>
+#include <86box/scsi_sm912.h>
 #include <86box/serial_scn26x1.h>
 #include <86box/kbc_siemens.h>
 #include <86box/pcx_vid.h>
@@ -117,6 +118,7 @@ typedef struct pcx_t {
 
     wd2791_t *fdc;   /* WD2791 formatter, 0xf900-0xf903 */
     scn26x1_t  *usart[3]; /* SCN2661B EPCI at 0xf9c0 / 0xf9d0 / 0xf9e0 */
+    scsi_sm912_t *scsi;   /* SM912 SCSI adapter at 0xf940, IRQ 5 */
     kbc_siemens_t *kbc;   /* keyboard/terminal channel behind 0xf980 */
 } pcx_t;
 
@@ -246,6 +248,7 @@ pcx_dip_write(UNUSED(uint16_t port), uint8_t val, UNUSED(void *priv))
     /* Reading 0xf841 returns the S9 switches, writing it drives the LED latch:
        the POST writes 0x3e there (v3 BIOS 0x5e2) and 0xc0 to 0xf840 before it
        touches anything else.  Keep the value for a display model later. */
+
     pcx.led = val;
 }
 
@@ -551,8 +554,7 @@ machine_pcx_init(const machine_t *model)
 
     /* Not implemented yet -- see the TODO list below. */
 
-    io_sethandler(PCX_SCSI_PORT, 0x0004, pcx_stub_readb, NULL, NULL,
-                  pcx_stub_writeb, NULL, NULL, NULL);
+    pcx.scsi = scsi_sm912_init(PCX_SCSI_PORT, pcx_usart_irq, (void *) (intptr_t) 5);
 
     pcx.usart[0] = scn26x1_init(PCX_USART1_PORT, pcx_usart_irq, (void *) (intptr_t) 3);
     pcx.usart[1] = scn26x1_init(PCX_USART2_PORT, pcx_usart_irq, (void *) (intptr_t) 2);
