@@ -881,6 +881,27 @@ wd_noidam(void *priv)
     wd_done(dev);
 }
 
+/* Every error the drive layer reports for a data-phase command.  The generic
+   path rewrites fdc->stat, which this controller never looks at, so without
+   this hook a chained sector that fails left the command busy for ever. */
+static void
+wd_ext_error(void *priv, int st5, int st6)
+{
+    wd2791_t *dev = (wd2791_t *) priv;
+
+    if ((dev->type1) || (!dev->busy))
+        return;
+
+    if (st5 & 0x01)
+        dev->status |= WD_S_RNF;
+    if (st5 & 0x10)
+        dev->status |= WD_S_CRC;
+    if (st6 & 0x20)
+        dev->status |= WD_S_CRC;
+
+    wd_done(dev);
+}
+
 static void
 wd_seek_complete(void *priv, UNUSED(int drive))
 {
@@ -1028,6 +1049,7 @@ wd2791_init(void)
     dev->fdc.ext_data     = wd_data_in;
     dev->fdc.ext_getdata  = wd_data_out;
     dev->fdc.ext_noidam   = wd_noidam;
+    dev->fdc.ext_error    = wd_ext_error;
     dev->fdc.ext_seek_done = wd_seek_complete;
     dev->fdc.ext_diskchange = wd_diskchange;
 
