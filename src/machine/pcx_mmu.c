@@ -8,16 +8,18 @@
  *
  *          Siemens PC-X MMU (I/O ports 0x8000-0x8fff).
  *
- *          Layout, taken from MAME's pcd.cpp:
+ *          Layout, taken from MAME's pcd.cpp (offsets there are word offsets on
+ *          the 0x8000-0x8fff window, i.e. twice the byte address):
  *            0x8000        control: bit 5 = translate, bits 0-4 = which
  *                          32-entry table group the register file edits,
  *                          bits 3-4 also take part in the index (window)
- *            0x8200-0x83FF  entry window, one slot every 4 bytes; the slot
+ *            0x8400-0x87FF  entry window, one slot every 4 words; the slot
  *                          number is (off >> 2) & 0x1F, so the 32 distinct
  *                          entries repeat four times across the window, and
- *                          only a word access at the slot address is decoded
- *            0x8400        "table updated" latch, written/read to hand the
- *                          change over to the driver as a PIC interrupt
+ *                          only a word access at the slot address is decoded.
+ *                          Slot 0 reads back the fault status in bits 7-6.
+ *            0x8800        strobe: a write is a system call, a read drops the
+ *                          request; both are handed to the driver as IRQ0
  */
 #include <stdint.h>
 #include <string.h>
@@ -120,23 +122,53 @@ pcx_mmu_translate(uint32_t addr, int rw)
     return ((uint32_t) (entry << 3) & 0x7fc00u) | (addr & (PCX_MMU_PGSIZE - 1));
 }
 
+static uint16_t pcx_mmu_inw(uint16_t port, void *priv);
+static void     pcx_mmu_outw(uint16_t port, uint16_t val, void *priv);
+
+/* The registers are 16 bits wide on a 16-bit bus, and the loader does read some
+   of them a byte at a time -- a byte access has to answer with the matching
+   half, not 0xff, or a poll loop never sees the bit it is waiting for. */
 static uint8_t
-pcx_mmu_inb(UNUSED(uint16_t port), UNUSED(void *priv))
+pcx_mmu_inb(uint16_t port, void *priv)
 {
-    /* MAME declares only 16-bit handlers for this window: byte accesses are
-       not decoded by the part. */
-    return 0xff;
+    uint16_t word = pcx_mmu_inw((uint16_t) (port & ~1), priv);
+
+    return (uint8_t) ((port & 1) ? (word >> 8) : (word & 0xff));
 }
 
 static void
-pcx_mmu_outb(uint16_t port, uint8_t val, UNUSED(void *priv))
+pcx_mmu_outb(uint16_t port, uint8_t val, void *priv)
 {
-    uint16_t off = (uint16_t) ((port - PCX_MMU_BASE) >> 1);
+    uint16_t off  = (uint16_t) (((port & ~1) - PCX_MMU_BASE) >> 1);
+    uint16_t word;
 
-    /* A byte write to the control register carries only the low half, which is
-       where every control bit lives. */
-    if (off == PCX_MMU_CTL)
-        pcx_mmu.ctl = (uint16_t) ((pcx_mmu.ctl & 0xff00) | val);
+    /* The handshake port is a strobe: any write to it fires the request. */
+    if (off == PCX_MMU_ACK) {
+        pcx_mmu_outw((uint16_t) (port & ~1), val, priv);
+        return;
+    }
+
+    if ((off >= PCX_MMU_REG) && (off < PCX_MMU_ACK) && !(off & 3)) {
+        /* Entry access is rotated on the way in and out, so the half has to be
+           replaced in the word the driver would have read back. */
+        uint16_t entry = pcx_mmu.pg[pcx_mmu_slot(pcx_mmu.ctl, off)];
+
+        word = (uint16_t) ((entry << 4) | (entry >> 12));
+        if (port & 1)
+            word = (uint16_t) ((word & 0x00ff) | ((uint16_t) val << 8));
+        else
+            word = (uint16_t) ((word & 0xff00) | (uint16_t) val);
+
+        pcx_mmu.pg[pcx_mmu_slot(pcx_mmu.ctl, off)] =
+            (uint16_t) ((word >> 4) | (word << 12));
+        return;
+    }
+
+    /* Control register and anything else: only the low half carries bits. */
+    if (off == PCX_MMU_CTL) {
+        pcx_mmu.ctl = (uint16_t) ((port & 1) ? (((uint16_t) val) << 8)
+                                             : ((pcx_mmu.ctl & 0xff00) | (uint16_t) val));
+    }
 }
 
 static uint16_t
