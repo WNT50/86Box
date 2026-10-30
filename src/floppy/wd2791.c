@@ -177,13 +177,13 @@ static uint8_t
 wd_status(wd2791_t *dev)
 {
     fdd_drive_t *drv = wd_drive(dev);
-    uint8_t      ret = dev->status & (WD_S_CRC | WD_S_RNF | WD_S_WP | WD_S_TRK0 | WD_S_LOST);
-
-    if (dev->busy)
-        ret |= WD_S_BUSY;
+    uint8_t      ret;
 
     if (dev->type1) {
-        /* Type I reports the mechanical state instead of the transfer state. */
+        /* Type I carries the mechanical state: S4 seek error, S2 track 0,
+           S1 index pulse, S5 head loaded. */
+        ret = dev->status & (WD_S_CRC | WD_S_RNF | WD_S_WP | WD_S_TRK0 | WD_S_LOST);
+
         if (!drv || !fdd_can_read_medium(drv))
             ret |= WD_S_NOTRDY;
         if (drv && fdd_track0(drv))
@@ -192,11 +192,22 @@ wd_status(wd2791_t *dev)
             ret |= WD_S_INDEX;
         ret |= WD_S_HLD;
     } else {
+        /* Type II/III redefines two bits: S2 is LOST DATA, not track 0, and S6
+           is write protect only while writing.  Letting a stale track-0 or
+           protect bit from the Type I status fall through reported a lost byte
+           on every plain read. */
+        ret = dev->status & (WD_S_CRC | WD_S_RNF | WD_S_LOST);
+
+        if (dev->state == WD_ST_WRITE)
+            ret |= dev->status & WD_S_WP;
         if (dev->deleted)
             ret |= WD_S_RECTYPE;
         if (dev->drq)
             ret |= WD_S_DRQ;
     }
+
+    if (dev->busy)
+        ret |= WD_S_BUSY;
 
     return ret;
 }
@@ -641,6 +652,16 @@ wd_force_interrupt(wd2791_t *dev, uint8_t val)
        exactly that pair, 0xd0 then 0xd8, and expects one interrupt from the
        second one (v3 BIOS 0xfcc20). */
     timer_disable(&dev->timer);
+
+    /* Force Interrupt is the one command that does not set BUSY.  If a command
+       was executing it is terminated and the remaining status bits are left
+       as they were; with nothing executing the status switches back to the
+       Type I view, which is what a driver polling for a clean status expects. */
+    if (!dev->busy) {
+        dev->type1   = 1;
+        dev->status &= ~(WD_S_RNF | WD_S_LOST);
+    }
+
     dev->busy  = 0;
     dev->state = WD_ST_IDLE;
     dev->drq   = 0;
