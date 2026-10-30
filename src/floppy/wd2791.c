@@ -140,7 +140,8 @@ wd_finish(wd2791_t *dev)
     dev->busy         = 0;
     dev->state        = WD_ST_IDLE;
     dev->drq          = 0;
-    dev->done_pending = 0;
+    dev->done_pending  = 0;
+    dev->chain_pending = 0;
     wd_irq_raise(dev);
 }
 
@@ -230,6 +231,21 @@ wd_buf_push(wd2791_t *dev, uint8_t data)
     return 1;
 }
 
+/* Every sector operation starts its scan at the index hole: a bitstream scan
+   that begins inside a sync run never arms the address-mark detector. */
+static void
+wd_sector_read(wd2791_t *dev, int sector)
+{
+    fdd_drive_t *drv = wd_drive(dev);
+
+    if (drv == NULL)
+        return;
+
+    d86f_set_track_pos(drv, 0);
+    fdd_readsector(drv, sector, dev->track_reg, dev->side, dev->fdc.rate,
+                   wd_size_code(dev));
+}
+
 static int
 wd_buf_pop(wd2791_t *dev)
 {
@@ -243,8 +259,16 @@ wd_buf_pop(wd2791_t *dev)
     dev->buf_len--;
     dev->drq = (dev->buf_len > 0);
 
-    if ((dev->buf_len == 0) && dev->done_pending) {
-        wd_finish(dev);
+    if (dev->buf_len == 0) {
+        if (dev->chain_pending) {
+            /* The host has taken the last byte of this record, so the next one
+               can be searched for. */
+            dev->chain_pending = 0;
+            dev->sector_reg    = (uint8_t) (dev->sector_reg + 1);
+            wd_sector_read(dev, dev->sector_reg);
+        } else if (dev->done_pending) {
+            wd_finish(dev);
+        }
     }
 
     return dev->data_reg;
@@ -291,6 +315,7 @@ wd_data_in(void *priv, uint8_t data, int last)
     dev->byte_count++;
     dev->id_count++;
 
+
         pclog("[CNT] %d size=%d last=%d state=%d buf=%d\n", dev->byte_count,
               dev->sector_size, last, dev->state, dev->buf_len);
 
@@ -324,12 +349,13 @@ wd_data_in(void *priv, uint8_t data, int last)
 
     if (last || (dev->byte_count >= dev->sector_size)) {
         if (dev->multi) {
-            dev->multi      = 1;
-            dev->sector_reg = (uint8_t) (dev->sector_reg + 1);
-            dev->byte_count = 0;
-            dev->drq        = 0;
-            fdd_readsector(wd_drive(dev), dev->sector_reg, dev->track_reg,
-                           dev->side, dev->fdc.rate, wd_size_code(dev));
+            /* A real 2791 paces the chain with the data register: it only looks
+               for the next record once the host has taken the last byte of this
+               one.  Reading ahead turned a single-sector request into a run off
+               the end of the track and a spurious record-not-found. */
+            dev->chain_pending = 1;
+            dev->byte_count    = 0;
+            /* DRQ still reflects the byte queued behind the register. */
             return -1;
         }
         wd_done(dev);
@@ -504,14 +530,7 @@ wd_start_read(wd2791_t *dev)
     dev->byte_count = 0;
     dev->state      = WD_ST_READ;
 
-    /* Start every sector operation at the index hole: the bitstream finder
-       only arms its sync detector from the start of a revolution, and a scan
-       that begins inside a sync run never sees the address mark that follows
-       it. */
-    d86f_set_track_pos(drv, 0);
-
-    fdd_readsector(drv, dev->sector_reg, dev->track_reg, dev->side,
-                   dev->fdc.rate, wd_size_code(dev));
+    wd_sector_read(dev, dev->sector_reg);
 }
 
 static void
@@ -682,7 +701,8 @@ wd2791_command(wd2791_t *dev, uint8_t val)
     dev->buf_head     = 0;
     dev->buf_tail     = 0;
     dev->buf_len      = 0;
-    dev->done_pending = 0;
+    dev->done_pending  = 0;
+    dev->chain_pending = 0;
 
     /* A command register write clears INTRQ (die behaviour, see MAME
        cmd_w()). */
@@ -865,7 +885,8 @@ wd2791_reset(void)
     dev->buf_head     = 0;
     dev->buf_tail     = 0;
     dev->buf_len      = 0;
-    dev->done_pending = 0;
+    dev->done_pending  = 0;
+    dev->chain_pending = 0;
 
     timer_disable(&dev->timer);
 
