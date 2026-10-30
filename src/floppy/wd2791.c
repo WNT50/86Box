@@ -816,10 +816,6 @@ wd2791_reg_read(uint16_t port, UNUSED(void *priv))
             {
                 uint8_t ret = wd_status(dev);
 
-                    pclog("[ST] %02X state=%d buf=%d drq=%d\n", ret, dev->state,
-                          dev->buf_len, dev->drq);
-
-
                 wd_irq_lower(dev);
                 return ret;
             }
