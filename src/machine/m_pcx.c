@@ -64,7 +64,7 @@
    monochrome board the BIOS reports the RAM ceiling as 0xf0000; the colour
    option moves it down to 0xc0000 and a third board to 0xd8000.  Values from
    the BIOS POST, see the file header. */
-#define PCX_RAM_CEIL      0x000f0000
+#define PCX_RAM_CEIL      0x000f8000
 #define PCX_GRAPH_TOP     0x000fc000
 
 /* I/O */
@@ -451,8 +451,10 @@ machine_pcx_init(const machine_t *model)
     pcx.err_seg = 0x00;
 
     /* RAM is contiguous up to the graphics board, unlike the PC layout that
-       stops at A0000h: the machine keeps RAM all the way to 0xf0000 when it is
-       fitted with 1 MB, and the BIOS sizes what is actually there. */
+       stops at A0000h: the machine keeps RAM all the way to 0xf8000 when it is
+       fitted with 1 MB, and the BIOS sizes what is actually there.  The POST
+       proves it by filling 0xf0000-0xf7fff with 0xaa and reading it back (v3
+       0xfd935), so the ceiling has to include that last 32 KB block. */
     {
         uint32_t ram_top   = (uint32_t) mem_size << 10;
         uint32_t ram_limit = (ram_top < PCX_RAM_CEIL) ? ram_top : PCX_RAM_CEIL;

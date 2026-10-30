@@ -281,6 +281,13 @@ i8018x_pcb_tmr_update(struct i8018x_pcb_t *dev)
                                          : 0u);
 
         uint64_t max = i8018x_pcb_tmr_max(dev, i);
+
+        /* A maximum count of zero is a full 16-bit period, not a divide by
+           zero: the POST's delay helper programs exactly that (v3 0xfc170
+           writes 0 to the maximum count of timer 0 and then spins on MC). */
+        if (max == 0)
+            max = 0x10000u;
+
         uint64_t cyc = i8018x_pcb_tmr_events(dev, i) / max;
 
 
