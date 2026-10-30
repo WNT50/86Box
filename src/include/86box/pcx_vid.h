@@ -21,4 +21,7 @@ extern const device_t pcx_video_device;
    the host reads at 0xf980.  Takes the device pointer device_add() returned. */
 extern void pcx_video_set_key(void *dev, uint8_t val);
 
+struct kbc_siemens_t;
+extern void pcx_video_set_kbc(void *dev, struct kbc_siemens_t *kbc);
+
 #endif /*EMU_PCX_VID_H*/

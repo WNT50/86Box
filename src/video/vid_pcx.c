@@ -35,6 +35,7 @@
 #include <86box/plat.h>
 #include <86box/pcx_term.h>
 #include <86box/pcx_vid.h>
+#include <86box/kbc_siemens.h>
 
 #define PCX_VIDEO_XSIZE 960
 #define PCX_VIDEO_YSIZE 350
@@ -46,8 +47,9 @@ typedef struct pcx_video_t {
 
     uint32_t fb[PCX_VIDEO_XSIZE * PCX_VIDEO_YSIZE];
 
-    uint8_t regs[16]; /* 0xf980-0xf98f as seen by the host */
-    int     mon;
+    uint8_t       regs[16]; /* 0xf980-0xf98f as seen by the host */
+    int           mon;
+    kbc_siemens_t *kbc;     /* protocol level keyboard/terminal channel */
 } pcx_video_t;
 
 static video_timings_t timing_pcx = { VIDEO_ISA, 8, 16, 32, 8, 16, 32 };
@@ -87,14 +89,13 @@ pcx_video_read(uint16_t addr, void *priv)
 
     switch (reg) {
         case 0x00:
-            /* 0xf980: keyboard byte from the 8031; the POST reads it back while
-               probing the board, so return something harmless. */
-            return 0x00;
+            /* 0xf980: what the keyboard/terminal side has to say.  The POST's
+               identity check (v3 0xfd8d3) reads its answer here. */
+            return kbc_siemens_read_data(dev->kbc);
 
         case 0x01:
-            /* 0xf981: status.  Bit 1 is "the 8031 has not taken the character
-               yet"; the model consumes the stream immediately. */
-            return 0x00;
+            /* 0xf981: bit 0 "a byte waits", bit 1 "not taken yet". */
+            return kbc_siemens_read_status(dev->kbc);
 
         default:
             return dev->regs[reg];
@@ -113,8 +114,22 @@ pcx_video_write(uint16_t addr, uint8_t val, void *priv)
         pclog("[PCXV] %05i %02X %c\n", pcx_vid_log_n++, val,
               ((val >= 0x20) && (val < 0x7f)) ? val : '.');
 
-    if (reg == 0x00)
+    if (reg == 0x00) {
         pcx_term_write(&dev->term, val);
+        /* The 8031 sees the same stream and answers queries that need one. */
+        kbc_siemens_rx(dev->kbc, val);
+    }
+}
+
+/* The machine creates the controller and hands it to the board, which owns the
+   two ports it appears on. */
+void
+pcx_video_set_kbc(void *priv, kbc_siemens_t *kbc)
+{
+    pcx_video_t *dev = (pcx_video_t *) priv;
+
+    if (dev != NULL)
+        dev->kbc = kbc;
 }
 
 /* Called by the machine once the keyboard is modelled; a byte from the 8031 to

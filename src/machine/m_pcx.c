@@ -47,6 +47,7 @@
 #include <86box/i8018x.h>
 #include <86box/wd2791.h>
 #include <86box/serial_scn26x1.h>
+#include <86box/kbc_siemens.h>
 #include <86box/pcx_vid.h>
 #include <86box/plat_unused.h>
 #include "cpu.h"
@@ -116,6 +117,7 @@ typedef struct pcx_t {
 
     wd2791_t *fdc;   /* WD2791 formatter, 0xf900-0xf903 */
     scn26x1_t  *usart[3]; /* SCN2661B EPCI at 0xf9c0 / 0xf9d0 / 0xf9e0 */
+    kbc_siemens_t *kbc;   /* keyboard/terminal channel behind 0xf980 */
 } pcx_t;
 
 static pcx_t pcx;
@@ -534,7 +536,12 @@ machine_pcx_init(const machine_t *model)
 
     /* The video board owns 0xf980-0xf98f itself; registering it here as well
        would shadow the device (io.c: later registration wins). */
-    device_add(&pcx_video_device);
+    void *video = device_add(&pcx_video_device);
+
+    /* The keyboard and the terminal share one channel on the video board; the
+       controller answers what the POST asks it and will carry key strokes. */
+    pcx.kbc = kbc_siemens_init();
+    pcx_video_set_kbc(video, pcx.kbc);
 
     /* WD2791 formatter: registers at 0xf900-0xf903, INTRQ on IR6, DRQ on the
        80186 DMA channel 1.  The 0xf904 latch above feeds it drive/side/DDEN. */

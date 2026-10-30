@@ -67,6 +67,7 @@ add_library(dev OBJECT
     phoenix_486_jumper.c
     postcard.c
     radisys_config.c
+    kbc_siemens.c
     serial_8251.c
     serial_scn26x1.c
     serial.c
