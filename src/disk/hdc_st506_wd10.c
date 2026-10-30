@@ -31,6 +31,7 @@
 #include <86box/io.h>
 #include <86box/ui.h>
 #include <86box/timer.h>
+#include <86box/pic.h>
 #include <86box/plat_unused.h>
 
 /* The 2000HD option is a WD1010 with a one-sector buffer in front of it. The
@@ -62,6 +63,7 @@
 #define CMD_SECT_SCAN_ID 0x40
 #define CMD_WRITE_FORMAT 0x50
 #define CMD_SEEK         0x70
+#define CMD_SET_PARAMETERS 0x91
 
 #define SECTOR_SIZE      512
 
@@ -108,6 +110,12 @@ wd10_hdc_log(const char *fmt, ...)
 typedef struct wd10_hdc_t {
     const wd10_variant_t *var;
 
+    /* The WD1010 sits on the Tandy 2000HD board (task file on even addresses
+       of 270h, no interrupt). The WD2010 is modelled where it actually
+       shipped: an AT adapter with the task file at 1F0h, a device control
+       register at 3F6h and IRQ 14. */
+    uint8_t  at;
+
     uint8_t  buf[SECTOR_SIZE];
     uint16_t buf_ptr;
 
@@ -118,6 +126,8 @@ typedef struct wd10_hdc_t {
     uint8_t  cyl_hi;
     uint8_t  count;
     uint8_t  sdh;
+    uint8_t  fdisk;  /* AT device control register */
+    uint8_t  irqstat;
 
     uint8_t  head;
     uint8_t  unit;
@@ -127,7 +137,10 @@ typedef struct wd10_hdc_t {
     uint32_t tracks[MFM_NUM];
     uint32_t spt[MFM_NUM];
     uint32_t hpc[MFM_NUM];
+    uint32_t cfg_spt[MFM_NUM]; /* SET DRIVE PARAMETERS overrides */
+    uint32_t cfg_hpc[MFM_NUM];
 
+    uint32_t   xfers; /* sectors left in the current transfer */
     uint32_t   fmt_bytes;
     uint32_t   lba_prev;
     uint32_t   sectors;
@@ -149,6 +162,46 @@ wd10_hdc_led(wd10_hdc_t *dev, int write)
     ui_sb_update_icon_write(SB_HDD | HDD_BUS_MFM, write);
 }
 
+/* INTRQ is a level the host clears by reading the status register. On the
+   Tandy board nothing is wired to it. */
+static void
+wd10_hdc_irq_update(wd10_hdc_t *dev)
+{
+    if (!dev->at)
+        return;
+
+    /* Device control bit 1 (nIEN) masks the line. */
+    picint_common(1 << 14, PIC_IRQ_EDGE, !(dev->fdisk & 0x02) && dev->irqstat, NULL);
+}
+
+static void
+wd10_hdc_irq_raise(wd10_hdc_t *dev)
+{
+    dev->irqstat = 1;
+    wd10_hdc_irq_update(dev);
+}
+
+static void
+wd10_hdc_irq_lower(wd10_hdc_t *dev)
+{
+    dev->irqstat = 0;
+    wd10_hdc_irq_update(dev);
+}
+
+/* SET DRIVE PARAMETERS can override the geometry the image reports; the
+   physical values stay untouched, so a reset cannot lose them. */
+static uint32_t
+wd10_hdc_spt(wd10_hdc_t *dev, uint8_t unit)
+{
+    return dev->cfg_spt[unit] ? dev->cfg_spt[unit] : dev->spt[unit];
+}
+
+static uint32_t
+wd10_hdc_hpc(wd10_hdc_t *dev, uint8_t unit)
+{
+    return dev->cfg_hpc[unit] ? dev->cfg_hpc[unit] : dev->hpc[unit];
+}
+
 static void
 wd10_hdc_reset_state(wd10_hdc_t *dev)
 {
@@ -167,6 +220,9 @@ wd10_hdc_reset_state(wd10_hdc_t *dev)
     dev->lba_prev  = 0;
     dev->fmt_bytes = 0;
     dev->state     = STATE_IDLE;
+
+    dev->xfers = 0;
+    wd10_hdc_irq_lower(dev);
 
     dev->status = dev->present[0] ? (ST_RDY | ST_SC) : 0x00;
 }
@@ -188,11 +244,11 @@ wd10_hdc_lba(wd10_hdc_t *dev, uint32_t *lba)
     head   = dev->head;
     sector = dev->sector;
 
-    if ((sector < 1) || (sector > dev->spt[unit]) || (head >= dev->hpc[unit]) ||
+    if ((sector < 1) || (sector > wd10_hdc_spt(dev, unit)) || (head >= wd10_hdc_hpc(dev, unit)) ||
         (cyl >= dev->tracks[unit]))
         return 0;
 
-    *lba = ((cyl * dev->hpc[unit]) + head) * dev->spt[unit] + (sector - 1);
+    *lba = ((cyl * wd10_hdc_hpc(dev, unit)) + head) * wd10_hdc_spt(dev, unit) + (sector - 1);
 
     return 1;
 }
@@ -228,6 +284,21 @@ wd10_hdc_command(wd10_hdc_t *dev, uint8_t command)
             /* The cylinder registers already hold the target. */
             break;
 
+        case 0x90:
+            /* SET DRIVE PARAMETERS (91h): the AT BIOS announces the geometry
+               it is about to use before the first transfer. */
+            if (command == CMD_SET_PARAMETERS) {
+                uint8_t unit = dev->unit;
+
+                dev->cfg_spt[unit] = dev->count ? dev->count : dev->spt[unit];
+                dev->cfg_hpc[unit] = (dev->sdh & 0x07) + 1;
+                break;
+            }
+
+            dev->status |= ST_ERR;
+            dev->errors  = ERR_AC;
+            break;
+
         case CMD_READ_SECTOR:
         case CMD_WRITE_SECTOR:
             /* Command bit 1 selects the ECC form of the transfer; the WD1010
@@ -246,8 +317,9 @@ wd10_hdc_command(wd10_hdc_t *dev, uint8_t command)
             }
 
             dev->lba_prev = lba;
-            dev->status |= ST_BUSY;
-            dev->state   = ((command & 0xf0) == CMD_READ_SECTOR) ? STATE_READ_WAIT : STATE_WRITE_WAIT;
+            dev->xfers    = dev->count ? dev->count : 256;
+            dev->status  |= ST_BUSY;
+            dev->state    = ((command & 0xf0) == CMD_READ_SECTOR) ? STATE_READ_WAIT : STATE_WRITE_WAIT;
 
             wd10_hdc_led(dev, dev->state == STATE_WRITE_WAIT);
 
@@ -262,16 +334,16 @@ wd10_hdc_command(wd10_hdc_t *dev, uint8_t command)
             uint32_t cyl     = ((uint32_t) dev->cyl_hi << 8) | dev->cyl_lo;
             uint32_t sectors = dev->count ? dev->count : 256;
 
-            if ((dev->head >= dev->hpc[dev->unit]) || (cyl >= dev->tracks[dev->unit])) {
+            if ((dev->head >= wd10_hdc_hpc(dev, dev->unit)) || (cyl >= dev->tracks[dev->unit])) {
                 dev->status |= ST_ERR;
                 dev->errors  = ERR_ID;
                 break;
             }
 
-            if (sectors > dev->spt[dev->unit])
-                sectors = dev->spt[dev->unit];
+            if (sectors > wd10_hdc_spt(dev, dev->unit))
+                sectors = wd10_hdc_spt(dev, dev->unit);
 
-            dev->lba_prev  = ((cyl * dev->hpc[dev->unit]) + dev->head) * dev->spt[dev->unit];
+            dev->lba_prev  = ((cyl * wd10_hdc_hpc(dev, dev->unit)) + dev->head) * wd10_hdc_spt(dev, dev->unit);
             dev->fmt_bytes = 0;
             dev->sectors   = sectors;
             dev->status   |= ST_BUSY;
@@ -291,6 +363,10 @@ wd10_hdc_command(wd10_hdc_t *dev, uint8_t command)
             dev->errors  = ERR_AC;
             break;
     }
+
+    /* A command that ends without a data transfer interrupts the host. */
+    if (!(dev->status & (ST_BUSY | ST_DRQ)))
+        wd10_hdc_irq_raise(dev);
 }
 
 /* Fills the track the format command selected with the E5 pattern the chip
@@ -334,12 +410,14 @@ wd10_hdc_callback(void *priv)
             }
 
             dev->status |= ST_DRQ;
+            wd10_hdc_irq_raise(dev);
             break;
 
         case STATE_WRITE_WAIT:
             dev->state   = STATE_IDLE;
             dev->status &= ~ST_BUSY;
             dev->status |= ST_DRQ;
+            wd10_hdc_irq_raise(dev);
             break;
 
         case STATE_FORMAT_SEEK:
@@ -376,6 +454,19 @@ wd10_hdc_read_data(wd10_hdc_t *dev)
         dev->buf_ptr = 0;
         dev->status &= ~ST_DRQ;
         wd10_hdc_led_off();
+        wd10_hdc_irq_lower(dev);
+
+        if (dev->xfers > 1) {
+            /* Multi-sector transfer: the mechanism has to reach the next
+               sector before the chip raises DRQ again. */
+            dev->xfers--;
+            dev->lba_prev++;
+            dev->status |= ST_BUSY;
+            dev->state   = STATE_READ_WAIT;
+            timer_set_delay_u64(&dev->timer, ACCESS_TIME);
+        } else {
+            dev->xfers = 0;
+        }
     }
 
     return ret;
@@ -407,23 +498,49 @@ wd10_hdc_write_data(wd10_hdc_t *dev, uint8_t val)
         dev->buf_ptr = 0;
         dev->status &= ~ST_DRQ;
         wd10_hdc_led_off();
+        wd10_hdc_irq_lower(dev);
 
         if (hdd_image_write(dev->hdd_num[dev->unit], dev->lba_prev, 1, dev->buf) < 0) {
             dev->status |= ST_ERR;
             dev->errors  = ERR_BB;
+            dev->xfers   = 0;
+            return;
+        }
+
+        if (dev->xfers > 1) {
+            dev->xfers--;
+            dev->lba_prev++;
+            dev->status |= ST_BUSY;
+            dev->state   = STATE_WRITE_WAIT;
+            timer_set_delay_u64(&dev->timer, ACCESS_TIME);
+        } else {
+            dev->xfers = 0;
         }
     }
 }
 
+static int
+wd10_hdc_reg(wd10_hdc_t *dev, uint16_t addr)
+{
+    /* The Tandy task file spreads the eight registers over 270h - 27Fh, the
+       AT task file packs them into 1F0h - 1F7h. */
+    if (dev->at)
+        return addr - 0x01f0;
+
+    return (addr - 0x0270) >> 1;
+}
+
 static uint8_t
-wd10_hdc_read(UNUSED(uint16_t addr), void *priv)
+wd10_hdc_read(uint16_t addr, void *priv)
 {
     wd10_hdc_t *dev = (wd10_hdc_t *) priv;
 
-    switch ((addr & 0x000f) >> 1) {
+    switch (wd10_hdc_reg(dev, addr)) {
         case REG_DATA:
             return wd10_hdc_read_data(dev);
         case REG_STATUS:
+            /* Reading the status register acknowledges the interrupt. */
+            wd10_hdc_irq_lower(dev);
             return dev->status;
         case REG_SECTOR:
             return dev->sector;
@@ -436,6 +553,9 @@ wd10_hdc_read(UNUSED(uint16_t addr), void *priv)
         case REG_COUNT:
             return dev->count;
         case REG_SDH:
+            /* An AT adapter reports the drive select back in bits 4 and 0-2. */
+            if (dev->at)
+                return 0xa0 | dev->head | (dev->unit ? 0x10 : 0x00);
             return dev->sdh;
         default:
             break;
@@ -445,11 +565,11 @@ wd10_hdc_read(UNUSED(uint16_t addr), void *priv)
 }
 
 static void
-wd10_hdc_write(UNUSED(uint16_t addr), uint8_t val, void *priv)
+wd10_hdc_write(uint16_t addr, uint8_t val, void *priv)
 {
     wd10_hdc_t *dev = (wd10_hdc_t *) priv;
 
-    switch ((addr & 0x000f) >> 1) {
+    switch (wd10_hdc_reg(dev, addr)) {
         case REG_DATA:
             wd10_hdc_write_data(dev, val);
             break;
@@ -471,11 +591,15 @@ wd10_hdc_write(UNUSED(uint16_t addr), uint8_t val, void *priv)
         case REG_SDH:
             dev->sdh  = val;
             dev->head = val & 0x07;
-            dev->unit = (val >> 3) & 0x03;
+            /* The AT task file selects the drive with bit 4; the Tandy board
+               uses bits 3-4 as a straight unit number. */
+            dev->unit = dev->at ? ((val >> 4) & 0x01) : ((val >> 3) & 0x03);
 
             /* Selecting a drive clears a transfer that was left pending. */
-            if (dev->status & ST_DRQ)
+            if (dev->status & ST_DRQ) {
                 wd10_hdc_led_off();
+                wd10_hdc_irq_lower(dev);
+            }
 
             dev->status &= ~ST_DRQ;
             break;
@@ -506,6 +630,60 @@ wd10_hdc_reset_w(UNUSED(uint16_t addr), UNUSED(uint8_t val), void *priv)
     wd10_hdc_reset_state((wd10_hdc_t *) priv);
 }
 
+/* The AT BIOS moves a whole sector with REP INSW / REP OUTSW, so the data
+   register has to answer 16-bit accesses with two bytes at a time. */
+static uint16_t
+wd10_hdc_readw(uint16_t addr, void *priv)
+{
+    wd10_hdc_t *dev = (wd10_hdc_t *) priv;
+
+    if (wd10_hdc_reg(dev, addr) != REG_DATA)
+        return wd10_hdc_read(addr, priv);
+
+    return (uint16_t) (wd10_hdc_read_data(dev) | (wd10_hdc_read_data(dev) << 8));
+}
+
+static void
+wd10_hdc_writew(uint16_t addr, uint16_t val, void *priv)
+{
+    wd10_hdc_t *dev = (wd10_hdc_t *) priv;
+
+    if (wd10_hdc_reg(dev, addr) != REG_DATA) {
+        wd10_hdc_write(addr, (uint8_t) val, priv);
+        return;
+    }
+
+    wd10_hdc_write_data(dev, (uint8_t) val);
+    wd10_hdc_write_data(dev, (uint8_t) (val >> 8));
+}
+
+/* AT device control register (3F6h write): bit 2 holds the controller in
+   reset, bit 1 masks the interrupt. 3F7h mirrors the status. */
+static void
+wd10_hdc_ctrl_w(UNUSED(uint16_t addr), uint8_t val, void *priv)
+{
+    wd10_hdc_t *dev = (wd10_hdc_t *) priv;
+    uint8_t     old = dev->fdisk;
+
+    val &= 0x0f;
+
+    if (!(old & 0x04) && (val & 0x04))
+        dev->status = ST_BUSY; /* held in reset */
+    else if ((old & 0x04) && !(val & 0x04))
+        wd10_hdc_reset_state(dev);
+
+    dev->fdisk = val;
+
+    if (!(val & 0x02) && (old & 0x02))
+        wd10_hdc_irq_update(dev);
+}
+
+static uint8_t
+wd10_hdc_status_r(UNUSED(uint16_t addr), void *priv)
+{
+    return ((wd10_hdc_t *) priv)->status;
+}
+
 static void
 wd10_hdc_reset(void *priv)
 {
@@ -521,7 +699,10 @@ wd10_hdc_init(const device_t *info)
 {
     wd10_hdc_t *dev = (wd10_hdc_t *) calloc(1, sizeof(wd10_hdc_t));
 
+    /* The WD1010 keeps the Tandy 2000HD board; the WD2010 is wired as the AT
+       adapter it shipped on (task file 1F0h-1F7h, control 3F6h, IRQ 14). */
     dev->var = info->local ? &wd10_variant_2010 : &wd10_variant_1010;
+    dev->at  = info->local ? 1 : 0;
 
     for (uint8_t i = 0; i < HDD_NUM; i++) {
         if ((hdd[i].bus_type != HDD_BUS_MFM) || (hdd[i].mfm_channel >= MFM_NUM))
@@ -537,10 +718,22 @@ wd10_hdc_init(const device_t *info)
         dev->tracks[hdd[i].mfm_channel]  = hdd[i].tracks;
     }
 
-    io_sethandler(0x026c, 0x0002, wd10_hdc_reset_r, NULL, NULL,
-                  wd10_hdc_reset_w, NULL, NULL, dev);
-    io_sethandler(0x0270, 0x0010, wd10_hdc_read, NULL, NULL,
-                  wd10_hdc_write, NULL, NULL, dev);
+    if (dev->at) {
+        io_sethandler(0x03f6, 0x0001, NULL, NULL, NULL,
+                      wd10_hdc_ctrl_w, NULL, NULL, dev);
+        io_sethandler(0x03f7, 0x0001, wd10_hdc_status_r, NULL, NULL,
+                      NULL, NULL, NULL, dev);
+
+        io_sethandler(0x01f0, 0x0001, wd10_hdc_read, wd10_hdc_readw, NULL,
+                      wd10_hdc_write, wd10_hdc_writew, NULL, dev);
+        io_sethandler(0x01f1, 0x0007, wd10_hdc_read, NULL, NULL,
+                      wd10_hdc_write, NULL, NULL, dev);
+    } else {
+        io_sethandler(0x026c, 0x0002, wd10_hdc_reset_r, NULL, NULL,
+                      wd10_hdc_reset_w, NULL, NULL, dev);
+        io_sethandler(0x0270, 0x0010, wd10_hdc_read, NULL, NULL,
+                      wd10_hdc_write, NULL, NULL, dev);
+    }
 
     timer_add(&dev->timer, wd10_hdc_callback, dev, 0);
 
