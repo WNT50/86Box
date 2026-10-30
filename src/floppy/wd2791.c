@@ -329,6 +329,7 @@ wd_data_in(void *priv, uint8_t data, int last)
             }
         } else if (res & DMA_OVER) {
             dev->fdc.tc = 1;
+            dev->tc_seen = 1;
         }
     } else {
         if (!wd_buf_push(dev, data)) {
@@ -390,7 +391,7 @@ wd_data_in(void *priv, uint8_t data, int last)
                itself and would otherwise stall waiting for a record that is
                never searched for.  The command ends when the DMA channel
                reports terminal count. */
-            if (!dev->fdc.tc) {
+            if (!dev->tc_seen) {
                 dev->sector_reg = (uint8_t) (dev->sector_reg + 1);
                 wd_sector_read(dev, dev->sector_reg);
                 return -1;
@@ -609,6 +610,8 @@ wd_rw_sector(wd2791_t *dev, uint8_t val)
     fdd_drive_t *drv = wd_drive(dev);
 
     dev->multi    = (val & 0x10) ? 1 : 0;
+    dev->tc_seen  = 0;
+
     /* The side select on this board lives in the 0xf904 latch, not in the
        command byte: the BIOS issues a bare 0x94 for every read and flips the
        head through the latch.  Reading the command's bit 3 here would clear
