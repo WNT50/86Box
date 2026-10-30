@@ -80,6 +80,43 @@ wd_drive(wd2791_t *dev)
     return (fdd_drive_t *) drv;
 }
 
+
+/* The bitcell period the drive layer samples with comes from the data rate the
+   controller has selected, and the WD279x only has the one DDEN pin to say it.
+   Leaving fdc.bitcell_period at zero made the bitstream layer search every
+   sector at a zero-length bit cell, which is why every read ended in Record
+   Not Found even with the right drive, track and sector. */
+static int
+wd2791_rate(wd2791_t *dev)
+{
+    fdd_drive_t *drv = wd_drive(dev);
+
+    if ((drv != NULL) && !dev->dden) {
+        /* Single density: same 250 kbps cell timing, FM framing. */
+        return 2;
+    }
+
+    if ((drv != NULL) && (fdd_get_flags(drv) & 0x02)) {
+        /* A 1.2M 5.25" drive spins at 360 rpm, so its double density rate is
+           300 kbps rather than 250. */
+        if (!fdd_hole(drv))
+            return 1;
+    }
+
+    if ((drv != NULL) && fdd_hole(drv))
+        return 0;   /* high density medium */
+
+    return 2;
+}
+
+static void
+wd2791_update_rate(wd2791_t *dev)
+{
+    dev->fdc.rate           = (uint8_t) wd2791_rate(dev);
+    dev->fdc.mfm            = dev->dden ? 1 : 0;
+    dev->fdc.bitcell_period = (uint32_t) fdd_get_bitcell_period(dev->fdc.rate);
+}
+
 static void
 wd_irq_raise(wd2791_t *dev)
 {
@@ -146,6 +183,7 @@ wd_data_in(void *priv, uint8_t data, int last)
 {
     wd2791_t *dev = (wd2791_t *) priv;
     int       res;
+
 
     if ((dev->state != WD_ST_READ) && (dev->state != WD_ST_READID) &&
         (dev->state != WD_ST_READTRACK))
@@ -217,7 +255,7 @@ wd_data_in(void *priv, uint8_t data, int last)
             dev->byte_count = 0;
             dev->drq        = 0;
             fdd_readsector(wd_drive(dev), dev->sector_reg, dev->track_reg,
-                           dev->side, WD_DENSITY, dev->sector_size);
+                           dev->side, dev->fdc.rate, dev->sector_size);
             return -1;
         }
         wd_done(dev);
@@ -260,7 +298,7 @@ wd_data_out(void *priv, int last)
         dev->sector_reg = (uint8_t) (dev->sector_reg + 1);
         dev->byte_count = 0;
         fdd_writesector(wd_drive(dev), dev->sector_reg, dev->track_reg,
-                        dev->side, WD_DENSITY, dev->sector_size);
+                        dev->side, dev->fdc.rate, dev->sector_size);
         return data & 0xff;
     }
 
@@ -291,7 +329,7 @@ wd_seek_finish(wd2791_t *dev)
         /* V verifies the target track by reading its first ID field. */
         if (drv != NULL) {
             fdd_set_head(drv, 0);
-            fdd_readaddress(drv, 0, WD_DENSITY);
+            fdd_readaddress(drv, 0, dev->fdc.rate);
             dev->state       = WD_ST_READID;
             dev->id_count    = 0;
             dev->byte_count  = 0;
@@ -392,7 +430,7 @@ wd_start_read(wd2791_t *dev)
     dev->byte_count = 0;
     dev->state      = WD_ST_READ;
     fdd_readsector(drv, dev->sector_reg, dev->track_reg, dev->side,
-                   WD_DENSITY, dev->sector_size);
+                   dev->fdc.rate, dev->sector_size);
 }
 
 static void
@@ -413,7 +451,7 @@ wd_start_write(wd2791_t *dev)
     dev->state      = WD_ST_WRITE;
     dev->drq        = 0;
     fdd_writesector(drv, dev->sector_reg, dev->track_reg, dev->side,
-                    WD_DENSITY, dev->sector_size);
+                    dev->fdc.rate, dev->sector_size);
 }
 
 static void
@@ -483,7 +521,7 @@ wd_read_address(wd2791_t *dev, uint8_t val)
     dev->id_count   = 0;
     dev->byte_count = 0;
     dev->state      = WD_ST_READID;
-    fdd_readaddress(drv, dev->side, WD_DENSITY);
+    fdd_readaddress(drv, dev->side, dev->fdc.rate);
 }
 
 static void
@@ -505,7 +543,7 @@ wd_read_track(wd2791_t *dev, uint8_t val)
     dev->byte_count = 0;
     dev->state      = WD_ST_READTRACK;
     fdd_readsector(drv, SECTOR_FIRST, dev->track_reg, dev->side,
-                   WD_DENSITY, dev->sector_size);
+                   dev->fdc.rate, dev->sector_size);
 }
 
 static void
@@ -613,6 +651,8 @@ wd2791_reg_read(uint16_t port, UNUSED(void *priv))
             /* Reading the status register drops INTRQ. */
             {
                 uint8_t ret = wd_status(dev);
+
+
                 wd_irq_lower(dev);
                 return ret;
             }
@@ -772,6 +812,7 @@ wd2791_set_dskctl(wd2791_t *dev, uint8_t val)
        match the medium, which is what turned every boot read into Record Not
        Found. */
     fdd_set_densel(dev->fdc.bus, dev->dden);
+    wd2791_update_rate(dev);
 
     for (int i = 0; i < 2; i++) {
         void *d = dev->fdc.fdd[i];
