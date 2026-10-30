@@ -59,12 +59,12 @@
 
 /* Descriptor word indices from a channel base (270788-001 Figure 66): source
    pointer, destination pointer, transfer count, control word. */
-#define I8018X_DMA_SRC_LO(i)    ((I8018X_DMA0_BASE + ((i) * 0x10u)) / 2)
-#define I8018X_DMA_SRC_HI(i)    ((I8018X_DMA0_BASE + ((i) * 0x10u) + 2u) / 2)
-#define I8018X_DMA_DST_LO(i)    ((I8018X_DMA0_BASE + ((i) * 0x10u) + 4u) / 2)
-#define I8018X_DMA_DST_HI(i)    ((I8018X_DMA0_BASE + ((i) * 0x10u) + 6u) / 2)
-#define I8018X_DMA_COUNT(i)     ((I8018X_DMA0_BASE + ((i) * 0x10u) + 8u) / 2)
-#define I8018X_DMA_CTRL(i)      ((I8018X_DMA0_BASE + ((i) * 0x10u) + 10u) / 2)
+#define I8018X_DMA_SRC_LO(i)    (I8018X_DMA0_BASE + ((i) * 0x10u))
+#define I8018X_DMA_SRC_HI(i)    (I8018X_DMA0_BASE + ((i) * 0x10u) + 2u)
+#define I8018X_DMA_DST_LO(i)    (I8018X_DMA0_BASE + ((i) * 0x10u) + 4u)
+#define I8018X_DMA_DST_HI(i)    (I8018X_DMA0_BASE + ((i) * 0x10u) + 6u)
+#define I8018X_DMA_COUNT(i)     (I8018X_DMA0_BASE + ((i) * 0x10u) + 8u)
+#define I8018X_DMA_CTRL(i)      (I8018X_DMA0_BASE + ((i) * 0x10u) + 10u)
 
 /* DMA control word (270788-001 Figure 67). The source and destination fields
    are three separate bits each: M/IO selects memory, INC/DEC move the pointer
@@ -74,12 +74,17 @@
 #define I8018X_DMA_DST_MIO      0x8000u
 #define I8018X_DMA_DST_DEC      0x4000u
 #define I8018X_DMA_DST_INC      0x2000u
+#define I8018X_DMA_SRC_MIO      0x1000u
 #define I8018X_DMA_SRC_DEC      0x0800u
 #define I8018X_DMA_SRC_INC      0x0400u
 #define I8018X_DMA_TC           0x0200u
 #define I8018X_DMA_INT          0x0100u
+#define I8018X_DMA_SYN          0x00C0u /* bits 7-6: 00 none, 01 source, 10 destination */
+#define I8018X_DMA_PRIO         0x0020u
+#define I8018X_DMA_TDRQ         0x0010u
 #define I8018X_DMA_CHG          0x0004u /* write only; always reads back as 0 */
 #define I8018X_DMA_ST           0x0002u
+#define I8018X_DMA_BW           0x0001u /* 0 = bytes, 1 = words */
 
 /* Interrupt controller, master mode (270788-001 section 9.5, Figures 80-87). */
 #define I8018X_ICU_EOI          0x22u /* End of Interrupt Register */
@@ -518,8 +523,9 @@ i8018x_pcb_icu_acknowledge(struct i8018x_pcb_t *pcb)
     /* Cascade mode: the 8259 supplies the vector on the INTA pair. */
     if (((i == 5) || (i == 6)) &&
         (pcb->regs[I8018X_ICU_INT_CON(i - 5) / 2] & I8018X_ICU_CON_C) &&
-        (pcb->ext_ack[i - 5] != NULL))
+        (pcb->ext_ack[i - 5] != NULL)) {
         return pcb->ext_ack[i - 5](pcb->ext_ack_priv[i - 5]);
+    }
 
     return i8018x_icu_type[i];
 }
@@ -702,6 +708,8 @@ i8018x_pcb_read_word(struct i8018x_pcb_t *dev, uint16_t off)
     return i8018x_pcb_decoded(off) ? dev->regs[off / 2] : 0xFFFF;
 }
 
+static int i8018x_pcb_dma_freerun(struct i8018x_pcb_t *dev, int slot);
+
 static void
 i8018x_pcb_write_word(struct i8018x_pcb_t *dev, uint16_t off, uint16_t val)
 {
@@ -752,6 +760,12 @@ i8018x_pcb_write_word(struct i8018x_pcb_t *dev, uint16_t off, uint16_t val)
             (off == I8018X_TMR_MAXA(i)) || (off == I8018X_TMR_MAXB(i)))
             i8018x_pcb_tmr_restart(dev, i);
     }
+
+    /* A control-word write that carries CHG programs ST, and a channel that is
+       started this way runs on its own when nothing has to synchronize it. */
+    if (((off == I8018X_DMA_CTRL(0)) || (off == I8018X_DMA_CTRL(1))) &&
+        (val & I8018X_DMA_ST))
+        i8018x_pcb_dma_freerun(dev, (off == I8018X_DMA_CTRL(0)) ? 0 : 1);
 
     /* Writing the status register sets or clears the individual timer request
        bits (270788-001 Figure 26) -- the ROM forces a request with 0x8001 and
@@ -903,7 +917,7 @@ i8018x_pcb_dma_armed(struct i8018x_pcb_t *dev, int slot)
     if (dev->regs[I8018X_ICU_STATUS / 2] & I8018X_ICU_DHLT)
         return 0;
 
-    return !!(dev->regs[I8018X_DMA_CTRL(slot)] & I8018X_DMA_ST);
+    return !!(dev->regs[I8018X_DMA_CTRL(slot) / 2] & I8018X_DMA_ST);
 }
 
 /* 20-bit pointer the channel transfers through. */
@@ -913,7 +927,7 @@ i8018x_pcb_dma_ptr(struct i8018x_pcb_t *dev, int slot, int dst)
     uint16_t lo = (uint16_t) (dst ? I8018X_DMA_DST_LO(slot) : I8018X_DMA_SRC_LO(slot));
     uint16_t hi = (uint16_t) (dst ? I8018X_DMA_DST_HI(slot) : I8018X_DMA_SRC_HI(slot));
 
-    return ((uint32_t) dev->regs[lo]) | ((uint32_t) dev->regs[hi] << 16);
+    return ((uint32_t) dev->regs[lo / 2]) | ((uint32_t) dev->regs[hi / 2] << 16);
 }
 
 /* Move one pointer on as its INC/DEC bits ask; all 20 bits are affected. The
@@ -922,22 +936,24 @@ i8018x_pcb_dma_ptr(struct i8018x_pcb_t *dev, int slot, int dst)
 static void
 i8018x_pcb_dma_step_ptr(struct i8018x_pcb_t *dev, int slot, int dst)
 {
-    uint16_t ctrl = dev->regs[I8018X_DMA_CTRL(slot)];
+    uint16_t ctrl = dev->regs[I8018X_DMA_CTRL(slot) / 2];
     uint16_t inc  = dst ? I8018X_DMA_DST_INC : I8018X_DMA_SRC_INC;
     uint16_t dec  = dst ? I8018X_DMA_DST_DEC : I8018X_DMA_SRC_DEC;
     uint16_t lo   = (uint16_t) (dst ? I8018X_DMA_DST_LO(slot) : I8018X_DMA_SRC_LO(slot));
     uint16_t hi   = (uint16_t) (dst ? I8018X_DMA_DST_HI(slot) : I8018X_DMA_SRC_HI(slot));
     uint32_t ptr  = i8018x_pcb_dma_ptr(dev, slot, dst);
 
+    uint32_t step = (ctrl & I8018X_DMA_BW) ? 2u : 1u;
+
     if ((ctrl & inc) && !(ctrl & dec))
-        ptr++;
+        ptr += step;
     else if ((ctrl & dec) && !(ctrl & inc))
-        ptr--;
+        ptr -= step;
 
     ptr &= 0x000FFFFFu;
 
-    dev->regs[lo] = (uint16_t) (ptr & 0xFFFFu);
-    dev->regs[hi] = (uint16_t) ((ptr >> 16) & 0x0Fu);
+    dev->regs[lo / 2] = (uint16_t) (ptr & 0xFFFFu);
+    dev->regs[hi / 2] = (uint16_t) ((ptr >> 16) & 0x0Fu);
 }
 
 /* Drop the transfer count by one and answer whether this transfer ended the
@@ -949,20 +965,61 @@ i8018x_pcb_dma_step_ptr(struct i8018x_pcb_t *dev, int slot, int dst)
 static int
 i8018x_pcb_dma_count_down(struct i8018x_pcb_t *dev, int slot)
 {
-    dev->regs[I8018X_DMA_COUNT(slot)]--;
+    dev->regs[I8018X_DMA_COUNT(slot) / 2]--;
 
-    if ((dev->regs[I8018X_DMA_COUNT(slot)] != 0) ||
-        !(dev->regs[I8018X_DMA_CTRL(slot)] & I8018X_DMA_TC))
+    if (dev->regs[I8018X_DMA_COUNT(slot) / 2] != 0)
         return 0;
 
-    dev->regs[I8018X_DMA_CTRL(slot)] &= (uint16_t) ~I8018X_DMA_ST;
+    /* The ST bit clears when the count reaches zero whatever TC says (iAPX 186
+       datasheet, Figure 18 note); TC only decides whether a non-zero INT bit is
+       allowed to ask for an interrupt on top of that. */
+    dev->regs[I8018X_DMA_CTRL(slot) / 2] &= (uint16_t) ~I8018X_DMA_ST;
 
     /* A terminal count with INT set asks the interrupt controller
        for service (270788-001 Figure 67, section 8.2). */
-    if (dev->regs[I8018X_DMA_CTRL(slot)] & I8018X_DMA_INT)
+    if (dev->regs[I8018X_DMA_CTRL(slot) / 2] & I8018X_DMA_INT)
         dev->icu_dma |= I8018X_ICU_SRC_DMA(slot);
 
     return 1;
+}
+
+/* An unsynchronized channel with both pointers in memory has nothing to wait
+   for, so the controller walks the whole block by itself the moment the guest
+   sets ST (iAPX 186 datasheet section "DMA Programming").  Channels that move
+   data for a board device keep going through the dma controller interface
+   below instead, which is why this one only takes memory-to-memory work. */
+static int
+i8018x_pcb_dma_freerun(struct i8018x_pcb_t *dev, int slot)
+{
+    uint16_t ctrl = dev->regs[I8018X_DMA_CTRL(slot) / 2];
+    uint32_t guard;
+
+    if ((ctrl & I8018X_DMA_SYN) != 0x0000u)
+        return 0;
+    if (!(ctrl & I8018X_DMA_SRC_MIO) || !(ctrl & I8018X_DMA_DST_MIO))
+        return 0;
+
+    for (guard = 0; guard < 0x40000u; guard++) {
+        uint32_t src = i8018x_pcb_dma_ptr(dev, slot, 0);
+        uint32_t dst = i8018x_pcb_dma_ptr(dev, slot, 1);
+
+        if (dev->regs[I8018X_DMA_CTRL(slot) / 2] & I8018X_DMA_BW)
+            mem_writew_phys(dst, mem_readw_phys(src));
+        else
+            mem_writeb_phys(dst, mem_readb_phys(src));
+
+        i8018x_pcb_dma_step_ptr(dev, slot, 0);
+        i8018x_pcb_dma_step_ptr(dev, slot, 1);
+
+        if (i8018x_pcb_dma_count_down(dev, slot))
+            return 1;
+
+        /* The guest may clear ST or reprogram the channel while it runs. */
+        if (!(dev->regs[I8018X_DMA_CTRL(slot) / 2] & I8018X_DMA_ST))
+            break;
+    }
+
+    return 0;
 }
 
 /* The 80186 has no transfer mode register, so a channel that is ours is always
@@ -1065,7 +1122,7 @@ i8018x_pcb_dma_mode(int channel, void *priv)
         return 0x00;
 
     /* Destination in memory: the byte is deposited, otherwise it is fetched. */
-    return (dev->regs[I8018X_DMA_CTRL(slot)] & I8018X_DMA_DST_MIO) ? 0x04 : 0x08;
+    return (dev->regs[I8018X_DMA_CTRL(slot) / 2] & I8018X_DMA_DST_MIO) ? 0x04 : 0x08;
 }
 
 /* set_service_handler stays out: with no request scheduling there is nothing
