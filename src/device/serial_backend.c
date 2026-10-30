@@ -113,3 +113,87 @@ serial_backend_from_chardev(char_port_t *port, int index)
 
     return be;
 }
+
+/* ---- adapter for another emulated device ------------------------------- */
+
+typedef struct {
+    serial_t        *serial;
+    serial_device_t *sd;
+} device_backend_priv_t;
+
+static void
+device_write_byte(void *priv, uint8_t val)
+{
+    device_backend_priv_t *bp = (device_backend_priv_t *) priv;
+
+    bp->sd->dev_write(bp->serial, bp->sd->priv, val);
+}
+
+static void
+device_set_lcr(void *priv, uint8_t lcr)
+{
+    device_backend_priv_t *bp = (device_backend_priv_t *) priv;
+
+    bp->sd->lcr_callback(bp->serial, bp->sd->priv, lcr);
+}
+
+static void
+device_rcr(void *priv)
+{
+    device_backend_priv_t *bp = (device_backend_priv_t *) priv;
+
+    bp->sd->rcr_callback(bp->serial, bp->sd->priv);
+}
+
+static void
+device_dtr(void *priv, int on)
+{
+    device_backend_priv_t *bp = (device_backend_priv_t *) priv;
+
+    bp->sd->dtr_callback(bp->serial, on, bp->sd->priv);
+}
+
+static void
+device_transmit_period(void *priv, double period)
+{
+    device_backend_priv_t *bp = (device_backend_priv_t *) priv;
+
+    bp->sd->transmit_period_callback(bp->serial, bp->sd->priv, period);
+}
+
+static device_backend_priv_t device_backend_privs[SERIAL_MAX];
+static serial_backend_t      device_backends[SERIAL_MAX];
+
+/*
+   Unlike a chardev, an in-machine device pushes what it receives straight
+   into the FIFO, so there is no read_byte and no status here - only the
+   callbacks it asked for in serial_attach_ex*(). Receiving from the device
+   keeps going through serial_write_fifo().
+ */
+const serial_backend_t *
+serial_backend_from_device(serial_t *serial, serial_device_t *sd, int index)
+{
+    serial_backend_t      *be;
+    device_backend_priv_t *bp;
+
+    if ((serial == NULL) || (sd == NULL) || (index < 0) || (index >= SERIAL_MAX))
+        return NULL;
+
+    be = &device_backends[index];
+    bp = &device_backend_privs[index];
+
+    memset(be, 0, sizeof(*be));
+    memset(bp, 0, sizeof(*bp));
+
+    bp->serial = serial;
+    bp->sd     = sd;
+
+    be->priv            = bp;
+    be->write_byte      = (sd->dev_write != NULL) ? device_write_byte : NULL;
+    be->set_lcr         = (sd->lcr_callback != NULL) ? device_set_lcr : NULL;
+    be->rcr             = (sd->rcr_callback != NULL) ? device_rcr : NULL;
+    be->dtr             = (sd->dtr_callback != NULL) ? device_dtr : NULL;
+    be->transmit_period = (sd->transmit_period_callback != NULL) ? device_transmit_period : NULL;
+
+    return be;
+}

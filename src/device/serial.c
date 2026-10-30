@@ -112,8 +112,8 @@ serial_transmit_period(serial_t *dev)
 
     /* Bit period based on DLAB. */
     dev->transmit_period = (16000000.0 * ddlab) / dev->clock_src;
-    if (dev->sd && dev->sd->transmit_period_callback)
-        dev->sd->transmit_period_callback(dev, dev->sd->priv, dev->transmit_period);
+    if ((dev->be != NULL) && (dev->be->transmit_period != NULL))
+        dev->be->transmit_period(dev->be->priv, dev->transmit_period);
 
     if ((dev->be != NULL) && (dev->be->set_format != NULL))
         dev->be->set_format(dev->be->priv, (int) (dev->clock_src / (16.0 * ddlab)),
@@ -310,8 +310,6 @@ serial_transmit(serial_t *dev, uint8_t val)
 {
     if (dev->mctrl & 0x10)
         write_fifo(dev, val);
-    else if (dev->sd && dev->sd->dev_write)
-        dev->sd->dev_write(dev, dev->sd->priv, val);
     else if ((dev->be != NULL) && (dev->be->write_byte != NULL))
         dev->be->write_byte(dev->be->priv, val);
 }
@@ -676,8 +674,8 @@ serial_write(uint16_t addr, uint8_t val, void *priv)
                 serial_transmit_period(dev);
                 serial_update_speed(dev);
 
-                if (dev->sd && dev->sd->lcr_callback)
-                    dev->sd->lcr_callback(dev, dev->sd->priv, dev->lcr);
+                if ((dev->be != NULL) && (dev->be->set_lcr != NULL))
+                    dev->be->set_lcr(dev->be->priv, dev->lcr);
             }
             if (!(old & 0x40) && (val & 0x40) && (dev->mctrl & 0x10))
                 serial_receive_loopback_break(dev);
@@ -687,15 +685,15 @@ serial_write(uint16_t addr, uint8_t val, void *priv)
         case 4:
             old = dev->mctrl;
             if ((val & 2) && !(dev->mctrl & 2)) {
-                if (dev->sd && dev->sd->rcr_callback) {
+                if ((dev->be != NULL) && (dev->be->rcr != NULL)) {
                     serial_log("RTS toggle callback\n");
-                    dev->sd->rcr_callback(dev, dev->sd->priv);
+                    dev->be->rcr(dev->be->priv);
                 }
             }
             if (!(val & 8) && (dev->mctrl & 8))
                 serial_do_irq(dev, 0);
-            if (dev->sd && dev->sd->dtr_callback && (val ^ dev->mctrl) & 1)
-                dev->sd->dtr_callback(dev, val & 1, dev->sd->priv);
+            if ((dev->be != NULL) && (dev->be->dtr != NULL) && ((val ^ dev->mctrl) & 1))
+                dev->be->dtr(dev->be->priv, val & 1);
             if (((dev->mctrl ^ val) & 0x03) && (dev->be != NULL) && (dev->be->control != NULL))
                 dev->be->control(dev->be->priv, (val & 0x03) | (dev->lcr & 0x40));
             dev->mctrl = val & 0x1f;
@@ -982,6 +980,9 @@ serial_attach_ex(int port,
     sd->lcr_callback             = lcr_callback;
     sd->priv                     = priv;
 
+    if (com_ports[port].serial != NULL)
+        com_ports[port].serial->be = serial_backend_from_device(com_ports[port].serial, sd, port);
+
     return com_ports[port].serial;
 }
 
@@ -1007,6 +1008,9 @@ serial_attach_ex_2(int port,
     sd->transmit_period_callback = NULL;
     sd->lcr_callback             = NULL;
     sd->priv                     = priv;
+
+    if (com_ports[port].serial != NULL)
+        com_ports[port].serial->be = serial_backend_from_device(com_ports[port].serial, sd, port);
 
     return com_ports[port].serial;
 }
@@ -1096,6 +1100,7 @@ serial_close(void *priv)
     if (dev->sd || com_ports[dev->inst].char_port.type) {
         if (dev->sd)
             memset(dev->sd, 0, sizeof(serial_device_t));
+        dev->be = NULL;
         fifo_close(dev->rcvr_fifo);
     }
 

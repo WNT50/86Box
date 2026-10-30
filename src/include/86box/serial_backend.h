@@ -42,10 +42,24 @@ typedef struct serial_backend_s {
     uint32_t (*status)(void *priv);                    /* CTS/DSR/RI/DCD bits */
     void     (*control)(void *priv, uint32_t flags);   /* DTR/RTS/loopback */
     void     (*set_format)(void *priv, int baud, int data_bits, int parity, int stop_bits);
+
+    /* Hooks an in-machine device asked for through serial_attach_ex*(). */
+    void     (*set_lcr)(void *priv, uint8_t lcr);
+    void     (*rcr)(void *priv);
+    void     (*dtr)(void *priv, int on);
+    void     (*transmit_period)(void *priv, double period);
+
     void      *priv;
 } serial_backend_t;
 
 /* Adapter for a host chardev; `index` is the COM port number (0-based). */
 extern const serial_backend_t *serial_backend_from_chardev(char_port_t *port, int index);
+
+/* Adapter for another emulated device (modem, serial mouse, tablet, ...). */
+struct serial_s;
+struct serial_device_s;
+extern const serial_backend_t *serial_backend_from_device(struct serial_s *serial,
+                                                          struct serial_device_s *sd,
+                                                          int index);
 
 #endif /*EMU_SERIAL_BACKEND_H*/
