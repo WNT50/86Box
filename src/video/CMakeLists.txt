@@ -82,6 +82,7 @@ add_library(vid OBJECT
 
     # Hercules
     vid_mda.c
+    vid_vaxmate.c
     vid_hercules.c
     vid_hercules_plus.c
     vid_hercules_incolor.c
