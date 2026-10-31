@@ -52,18 +52,18 @@ typedef struct pcx_video_t {
 
     uint8_t       regs[16]; /* 0xf980-0xf98f as seen by the host */
 
-    /* Host side video RAM.  The board can be told to scan a 640x350 1bpp bitmap
-       out of 0xf0000 instead of rendering characters itself (SCN267x command
-       0x23, which the BIOS sends right after the setup block).  Off unless the
-       machine asks for it with PCX_VRAM, because the same 32 KB is plain system
-       RAM on a PC-X without that window. */
+    /* Host side video RAM: the board's 32 KB at 0xf0000.  It scans it as a
+       640x350 bitmap when the host draws there instead of sending characters
+       to the 8031 (SCN267x command 0x23).  System RAM stops at 0x80000, so the
+       window is the board's alone -- see m_pcx.c. */
     uint8_t        vram[0x00008000];
     mem_mapping_t  vram_mapping;
-    int            vram_on;
-    int            vram_mapped;
     int            gfx_on;
     int            vram_dirty;
-    int            vram_active; /* something has been written to the bitmap */
+    int            vram_active; /* the host has drawn into the bitmap */
+    int            vram_mapped;
+    int            src;         /* where the last host write went: 0 none,
+                                   1 the character channel, 2 the bitmap */
     int           parm_left; /* bytes left of the 15-byte setup block */
     int           cmd_prev;  /* previous 0xf982 value, for the double write */
     int           mon;
@@ -109,7 +109,7 @@ pcx_video_poll(void *priv)
     pcx_video_t *dev = (pcx_video_t *) priv;
     int          y;
 
-    if (dev->vram_on && !dev->vram_mapped) {
+    if (!dev->vram_mapped) {
         mem_mapping_add(&dev->vram_mapping, 0x000f0000, 0x00008000,
                         pcx_vram_read, NULL, NULL,
                         pcx_vram_write, NULL, NULL,
@@ -117,11 +117,11 @@ pcx_video_poll(void *priv)
         dev->vram_mapped = 1;
     }
 
-    /* Graphics: once the host has written the bitmap, that is what the board
-       scans, whatever the character page says.  It only wins after a write
-       because the BIOS turns the graphics mode on unconditionally, even on the
-       machines that then send characters to the 8031 instead. */
-    if (dev->vram_on && dev->gfx_on && dev->vram_active) {
+    /* Graphics: the bitmap is shown while it is the last thing the host wrote.
+       The BIOS turns the graphics mode on unconditionally -- and fills the
+       window with 0xaa while it tests it -- so the command alone cannot
+       decide; whichever channel was used last is what the host is talking to. */
+    if (dev->gfx_on && dev->vram_active && (dev->src == 2)) {
         if (dev->vram_dirty)
             pcx_video_scan_bitmap(dev);
 
@@ -216,6 +216,7 @@ pcx_video_write(uint16_t addr, uint8_t val, void *priv)
             dev->parm_left--;
         } else {
             pcx_term_write(&dev->term, val);
+            dev->src = 1;
             /* The 8031 sees the same stream and answers queries that need one. */
             kbc_siemens_rx(dev->kbc, val);
         }
@@ -238,6 +239,7 @@ pcx_vram_write(uint32_t addr, uint8_t val, void *priv)
     dev->vram[addr & 0x7fff] = val;
     dev->vram_dirty          = 1;
     dev->vram_active         = 1;
+    dev->src                 = 2;
 }
 
 /* The machine creates the controller and hands it to the board, which owns the
@@ -289,12 +291,10 @@ pcx_video_init(const device_t *info)
     overscan_y = 0;
     video_inform(VIDEO_FLAG_TYPE_MDA, &timing_pcx);
 
-    if (getenv("PCX_VRAM") != NULL) {
-        /* Added on the first scan, once the machine's RAM mapping exists --
-           a mapping that is in the list before RAM gets overwritten by it. */
-        dev->vram_on = 1;
-        pclog("PC-X video: 32 KB graphics window at 0xf0000\n");
-    }
+    /* Nothing else decodes 0xf0000-0xf7fff, but the mapping still has to go
+       in after the machine has built its own: a mapping that is already in the
+       list when RAM is mapped gets overwritten by it and never sees an
+       access.  So it is added from the first scan. */
 
     timer_add(&dev->timer, pcx_video_poll, dev, 1);
     io_sethandler(0xf980, 0x0010,
