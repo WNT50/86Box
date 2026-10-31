@@ -76,9 +76,12 @@ extern void kbc_at_ext_out(uint8_t val);
 /* HP-HIL IRQ 20 is the third 8259's line 4 (vector 6Ch). */
 #define HIL_IRQ_LINE 4
 
-/* ID byte of the keyboard.  E0..DFh is the ITF keyboard (46020A/46021A);
-   the Vectra shipped with exactly that one. */
-#define HIL_KBD_ID 0xc0
+/* The keyboard of this machine hangs off the 8041 (0x60/0x64 and the
+   0x68-0x6A mailbox), so the only device on the HP-HIL link is the mouse.
+   Relative positioners are 60..6Fh; 68h is the HP Mouse 46060A. */
+#define HIL_MOUSE_ID    0x68
+/* Describe header: 8-bit relative X and Y, I/O descriptor byte follows. */
+#define HIL_MOUSE_DESCR 0x12
 
 typedef struct hp_hil_t {
     /* MLC state. */
@@ -239,9 +242,14 @@ hp_hil_kbd_frame(uint16_t frame)
             break;
 
         case HIL_IDD:
-            /* ID byte, then the Describe record header (Appendix C). */
+            /* ID byte, then the Describe record (Appendix C): header, the
+               16-bit resolution that follows a non-zero axis count, and the
+               I/O descriptor byte announcing the buttons. */
             hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, dev->kbd_id));
-            hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, 0x04));
+            hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, HIL_MOUSE_DESCR));
+            hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, 0xb4)); /* 180 counts/m, low */
+            hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, 0x00)); /* high */
+            hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, 0x03)); /* two buttons */
             break;
 
         case HIL_ACF + 0:
@@ -254,7 +262,7 @@ hp_hil_kbd_frame(uint16_t frame)
         case HIL_ACF + 7:
             /* The low three bits of the opcode are the address handed out. */
             dev->kbd_addr = data & 0x07;
-            hp_hil_trace("HIL: keyboard configured as address %d\n", dev->kbd_addr);
+            hp_hil_trace("HIL: mouse configured as address %d\n", dev->kbd_addr);
             break;
 
         case HIL_DHR:
@@ -391,7 +399,7 @@ hp_hil_read(uint16_t port, void *priv)
             break;
     }
 
-    hp_hil_trace("HIL: in(%03X) = %02X [fifo %d]\n", port, ret, dev->fifo_count);
+    hp_hil_trace("HIL: in(%03X) = %02X [fifo %d] pc=%04X\n", port, ret, dev->fifo_count, cpu_state.pc);
 
     return ret;
 }
@@ -402,7 +410,10 @@ extern void (*kbc_at_ext_write)(uint16_t port, uint8_t val);
 static void
 hp_hil_kbc_ext(uint16_t port, uint8_t val)
 {
-    if ((port == 0x0060) && (val == 0x45) && hp_hil_dev)
+    /* 0x6a is the 8041 strobe, not a data port: the ROM's keyboard self test
+       does "out 0x6a,al" and then polls 0x69 until it reads non-zero
+       (F000:1DCC-1DD8), which is what 0x06/0x00 here answer. */
+    if ((port == 0x0064) && (val == 0x45) && hp_hil_dev)
         hp_hil_dev->svc = 0x06;
 }
 
@@ -415,7 +426,7 @@ hp_hil_init(const device_t *info)
     kbc_at_ext_write = hp_hil_kbc_ext;
 
     dev->loop   = 1; /* the adapter powers up in loop-back */
-    dev->kbd_id = HIL_KBD_ID;
+    dev->kbd_id = HIL_MOUSE_ID;
     dev->svc    = 0x06;
 
     io_sethandler(0x0068, 3, hp_hil_read, NULL, NULL, hp_hil_write, NULL, NULL, dev);
@@ -445,7 +456,7 @@ hp_hil_reset(void *priv)
 
     memset(dev, 0x00, sizeof(*dev));
     dev->loop   = 1; /* the adapter starts in loop-back, like the MLC */
-    dev->kbd_id = HIL_KBD_ID;
+    dev->kbd_id = HIL_MOUSE_ID;
     dev->svc    = 0x06;
 }
 
