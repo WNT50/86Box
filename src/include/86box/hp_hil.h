@@ -24,4 +24,7 @@ extern void hp_hil_link_scan(void);
    System (the link left loop-back). */
 extern int  hp_hil_link_up(void);
 
+/* Poll the link from the 8041 side and queue whatever the devices report. */
+extern void hp_hil_poll_link(void);
+
 #endif /*EMU_HP_HIL_H*/

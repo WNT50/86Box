@@ -105,6 +105,7 @@ typedef struct hp_hil_t {
     uint8_t kbd_id;
     uint8_t kbd_passthru;
     uint8_t  scan_reported;
+    uint32_t ready_ctx;   /* context already told the link is up */
     int8_t   dx;
     int8_t   dy;
 
@@ -112,7 +113,8 @@ typedef struct hp_hil_t {
 
 static hp_hil_t *hp_hil_dev;
 
-static void hp_hil_link_ready(void *priv);
+static void     hp_hil_link_ready(void *priv);
+static uint16_t hp_hil_reply(uint8_t addr, uint8_t data);
 
 #ifdef ENABLE_HP_HIL_LOG
 int hp_hil_do_log = ENABLE_HP_HIL_LOG;
@@ -195,6 +197,26 @@ hp_hil_driver_ctx(void)
         return 0;
 
     return (uint32_t) dseg * 16;
+}
+
+/* The System asks the 8041 to poll the link (port 68h, 7Dh); the 8041 walks
+   it and hands the report records back through the adapter. */
+void
+hp_hil_poll_link(void)
+{
+    hp_hil_t *dev = hp_hil_dev;
+
+    if ((dev == NULL) || !dev->kbd_passthru)
+        return;
+
+    if (dev->dx || dev->dy) {
+        hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, HIL_POL_AXES_XY));
+        hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, (uint8_t) dev->dx));
+        hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, (uint8_t) dev->dy));
+        dev->dx = 0;
+        dev->dy = 0;
+        pic3_int(HIL_IRQ_LINE, 1);
+    }
 }
 
 int
@@ -385,6 +407,7 @@ hp_hil_kbd_frame(uint16_t frame)
             /* Link-wide: every device acts on it and none hands it back. */
             dev->kbd_addr      = 0;
             dev->kbd_passthru = 0;
+            dev->ready_ctx     = 0;
             /* The 8041 reports the link to the driver shortly after the
                reset, and the driver waits for it at F000:92AB. */
             return;
@@ -456,13 +479,18 @@ hp_hil_link_ready(void *priv)
     uint32_t  ctx = hp_hil_driver_ctx();
     uint16_t  flags;
 
-    if (ctx == 0)
+    if ((ctx == 0) || (ctx == dev->ready_ctx))
         return;
 
     flags = mem_readw_phys(ctx + 0x10);
     if (!(flags & 0x0001))
         return;                         /* driver is not waiting */
 
+    dev->ready_ctx = ctx;
+    if (getenv("HIL_MOUSE_NUDGE") != NULL) {
+        dev->dx = 1;                /* 实验：让链路上出现一次位移事件 */
+        dev->dy = 0;
+    }
     mem_writew_phys(ctx + 0x10, (uint16_t) (flags | 0x1004));
     pic3_int(HIL_IRQ_LINE, 1);
 }
