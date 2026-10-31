@@ -3734,10 +3734,14 @@ const machine_t machines[] = {
         },
         .bus_flags = MACHINE_PC,
         .flags     = MACHINE_VIDEO_FIXED | MACHINE_KEYBOARD | MACHINE_MFM,
+        /* The power-on self test walks the whole conventional block and stops
+           with a diagnostic error when 0x80000-0x9ffff is not RAM, so the
+           smallest configuration that boots is 640 KB.  The board was also
+           sold with 256 and 512 KB fitted; those are not modelled yet. */
         .ram       = {
-            .min  = 256,
+            .min  = 640,
             .max  = 1024,
-            .step = 256
+            .step = 128
         },
         .nvrmask                  = 63,
         .jumpered_ecp_dma         = 0,

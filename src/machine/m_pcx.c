@@ -61,17 +61,17 @@
 #define PCX_BIOS_ADDR     0x000fc000
 #define PCX_BIOS_SIZE     0x00004000
 
-/* Top of system RAM and of the graphics board.  The machine decodes 512 KB of
-   RAM and nothing more below the BIOS: MAME's pcd_map() has exactly
-   `map(0x00000, 0x7ffff)` plus the ROM at 0xfc000, and the graphics board puts
-   its 32 KB of video RAM at 0xf0000 on top of that (pcd_v.cpp:396).  Above
-   0x80000 everything is undecoded again, whatever is fitted -- extra memory is
-   not contiguous with the low 512 KB.  The POST fills 0xf0000 with 0xaa and
-   reads it back (v3 0xfd935) because that window is RAM too, just not system
-   RAM, so that test says nothing about the size of the low memory block. */
-#define PCX_RAM_CEIL      0x00080000
+/* System RAM runs from 0 up to the graphics board: the service manual's 1 MB
+   configuration note (Teil I, p. 4-11) says the refresh memory, the EPROM and
+   any expansion board also sit in the 1 MB address range and that the RAM is
+   blanked out there by an inhibit signal -- i.e. the memory fills everything
+   the video board and the ROM do not claim, so the ceiling is the window
+   itself.  The board owns the 32 KB at 0xf0000 and the 16 KB at 0xf8000 are
+   left undecoded.  (MAME's pcd_map() stops at 0x7ffff, but pcd is flagged
+   MACHINE_NOT_WORKING and only models the 512 KB machine.) */
 #define PCX_VRAM_BASE     0x000f0000
 #define PCX_VRAM_SIZE     0x00008000
+#define PCX_RAM_CEIL      PCX_VRAM_BASE
 #define PCX_GRAPH_TOP     0x000fc000
 
 /* I/O */
@@ -105,6 +105,7 @@
 #define PCX_STAT_NMI      0xfd
 
 typedef struct pcx_t {
+    mem_mapping_t ram_map;   /* RAM from 640 KB up, when that much is fitted */
     mem_mapping_t hole_map;  /* undecoded space below the video window */
     mem_mapping_t hole_map2; /* undecoded space between the video window and the BIOS */
     rom_t         bios;
@@ -476,6 +477,18 @@ machine_pcx_init(const machine_t *model)
            placed here (the holes, the video window) is ever consulted. */
         mem_set_mem_state_both(0x000a0000, PCX_GRAPH_TOP - 0x000a0000,
                                MEM_READ_INTERNAL | MEM_WRITE_INTERNAL);
+
+        /* Above 640 KB the RAM has to be mapped here as well: the generic
+           mapping stops at A0000h, and without this the BIOS sizes anything
+           fitted past 640 KB as absent (same as m_tandy2k.c). */
+        if (ram_limit > 0x000a0000) {
+            uint32_t size = ram_limit - 0x000a0000;
+
+            mem_mapping_add(&pcx.ram_map, 0x000a0000, size,
+                            mem_read_ram, mem_read_ramw, mem_read_raml,
+                            mem_write_ram, mem_write_ramw, mem_write_raml,
+                            NULL, MEM_MAPPING_INTERNAL, NULL);
+        }
 
         /* RAM above the fitted size, up to the video window. */
         if (ram_limit < PCX_VRAM_BASE) {
