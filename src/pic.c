@@ -371,8 +371,13 @@ pic_update_pending_at(void)
 
             if (slave->int_pending)
                 pic.irr |= (1 << slave->master_irq);
-            else
+            else {
+                if (getenv("EPOCH_HIL_TRACE") && (pic.irr & (1 << slave->master_irq)))
+                    pclog("CASCADE CLR: master irq=%u (m-irr=%02X) | slave state=%d icw2=%02X irr=%02X isr=%02X imr=%02X prio=%u pend=%d\n",
+                          slave->master_irq, pic.irr, slave->state, slave->icw2,
+                          slave->irr, slave->isr, slave->imr, slave->priority, slave->int_pending);
                 pic.irr &= ~(1 << slave->master_irq);
+            }
         }
 
         pic.int_pending = (find_best_interrupt(&pic) != -1);
@@ -674,6 +679,11 @@ static void
 pic_command(pic_t *dev)
 {
     uint8_t irq = 0xff;
+
+    if (getenv("EPOCH_HIL_TRACE"))
+        pclog("EOI: dev=%s ocw2=%02X isr=%02X irr=%02X imr=%02X priority=%u\n",
+              (dev == &pic) ? "MASTER" : ((dev == &pic2) ? "PIC2" : "PIC3"),
+              dev->ocw2, dev->isr, dev->irr, dev->imr, dev->priority);
 
     if (dev->ocw2 & 0x60) {   /* SL and/or EOI set */
         if (dev->ocw2 & 0x40) /* SL set, specific priority level */
