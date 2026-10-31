@@ -374,7 +374,7 @@ static const vaxmate_gfx_t vaxmate_modes[9] = {
     /* 5 640x200 4-color */ { 640, 200, 160, 2, 0x4000, 0xb8000, 2 },
     /* 6 640x200 2-color */ { 640, 200, 80, 2, 0x2000, 0xb8000, 1 },
     /* 7 640x400 4-color */ { 640, 400, 160, 4, 0x4000, 0xb0000, 2 },
-    /* 8 800x252 4-color */ { 800, 252, 200, 4, 0x4000, 0xb0000, 2 },
+    /* 8 800x250 4-color */ { 800, 250, 200, 4, 0x4000, 0xb0000, 2 },
 };
 
 static void
@@ -632,9 +632,10 @@ vaxmate_video_poll(void *priv)
     }
 
     if (vid->mode == VMODE_G800x252x4) {
-        /* 252-line mode: the monitor switches to its 250-line raster (pin 7),
-           so only 252 lines are displayed inside the 441-line field. */
-        active = 252;
+        /* VT240 raster: pin 7 of the video connector goes high and the monitor
+           switches to 250-scan operation (TRM 4-2 "400/250 select"), so 250
+           lines are displayed inside the 441-line field. */
+        active = 250;
         total  = VAXMATE_LINES_800;
     } else {
         active = vdisp_rows * lpr;
