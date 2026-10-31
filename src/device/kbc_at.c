@@ -27,6 +27,7 @@
 #include <86box/timer.h>
 #include <86box/io.h>
 #include <86box/pic.h>
+#include <86box/hp_hil.h>
 #include <86box/plat_fallthrough.h>
 #include <86box/plat_unused.h>
 #include <86box/mem.h>
@@ -40,6 +41,7 @@
 #include <86box/sio.h>
 #include <86box/keyboard.h>
 #include <86box/pic.h>
+#include <86box/hp_hil.h>
 #include <86box/kbc_test.h>
 
 #define STAT_PARITY        0x80
@@ -2753,8 +2755,11 @@ kbc_vectra_ext_write(uint16_t port, uint8_t val, void *priv)
             kbc_delay_to_ob(dev, val, 0, 0x00);
             switch (val) {
                 case 0xfb: /* System Hard Reset */
+                case 0xfc:
+                case 0xfd:
                 case 0xfe: /* Device Hard Reset: the link is scanned again */
                     dev->vectra_svc = VECTRA_SVC_DEVICE_READY;
+                    hp_hil_link_scan();
                     pic3_int(0, 1);
                     break;
                 case 0x60: /* Acknowledge / self test */
