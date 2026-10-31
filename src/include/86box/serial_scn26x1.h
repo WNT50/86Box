@@ -45,6 +45,10 @@ extern int        scn26x1_rx_free(scn26x1_t *dev);
 /* Called when the CPU writes a character to the transmit register: that is
    the byte the peripheral is meant to receive. */
 extern void scn26x1_set_tx_handler(scn26x1_t *dev, void (*cb)(void *priv, uint8_t val), void *priv);
+/* Called whenever the CPU takes the received character, so a device with a
+   queue behind the UART can hand over the next one without waiting for a
+   timer tick. */
+void scn26x1_set_rx_pull_handler(scn26x1_t *dev, void (*cb)(void *priv), void *priv);
 
 /* Serial line side: pull RxD and the two modem inputs. */
 extern void scn26x1_set_rx(scn26x1_t *dev, int state);
