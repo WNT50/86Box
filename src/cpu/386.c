@@ -312,7 +312,10 @@ exec386_2386(int32_t cycs)
                     static int bp_on = -1;
                     if (bp_on < 0)
                         bp_on = (getenv("EPOCH_HIL_BP") != NULL) ? 1 : 0;
-                    if (bp_on && (CS == 0x0f000) && ((cpu_state.pc == 0x082f3) || (cpu_state.pc == 0x083ca) || (cpu_state.pc == 0x087d0)))
+                    if (bp_on && (CS == 0x0f000) && ((cpu_state.pc == 0x082f3) || (cpu_state.pc == 0x083ca) || (cpu_state.pc == 0x087d0) ||
+                                                    (cpu_state.pc == 0x07b85) || (cpu_state.pc == 0x07d65) ||
+                                                    (cpu_state.pc == 0x07c10) || (cpu_state.pc == 0x07c34) ||
+                                                    (cpu_state.pc == 0x08956)))
                         pclog("HILBP: %04X:%04X ds=%04X ax=%04X sp=%04X\n", CS, cpu_state.pc, DS, AX, SP);
                 }
 
