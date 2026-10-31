@@ -112,6 +112,22 @@ WinWorld 的 *Diagraph 2000 3.5*（1986，5.25" 360K）是目前唯一找到的�
 - `3DE` bit3（显存禁止）确实是真机软件用法：**重编程 CRTC 前后掐掉显存访问**；
 - Diagraph 只走 CGA 兼容路径，**从不置 bit0（400 线）或 bit2（HP 字体）**，写过的值只有 `08h` 与 `00h`。
 
+### 3.4 400 线图形模式（四 bank）
+
+手册「Graphics Mode」原文：
+
+> *"In the 200 line graphic modes the memory is mapped with even and odd lines of data in separate banks. Even lines start at offset 0000H and odd lines at offset 2000H. … In this mode 25kHz monitors are supported by displaying each of the 200 lines twice."*
+>
+> *"In the 400 line graphics mode the memory is mapped into four banks. Lines 0,4,8,… are in the first bank at offset 0000H. Lines 1,5,9,… are in the second bank at offset 2000H. The third bank at offset 4000H contains lines 2,6,10,… while the fourth bank at offset 6000H contains lines 3,7,11, etc."*
+
+实现（`cga_gfx_bank()`）：
+
+| 情形 | 判据 | bank 选择 |
+|---|---|---|
+| 标准 200 线图形 | CRTC R9 < 3 | `scanline & 1` → 0x0000 / 0x2000 |
+| 25 kHz 监视器 + 200 线源（逐行显示两次） | R9 ≥ 3 且 `3DE` bit0 = 0 | `(scanline >> 1) & 1` |
+| **400 线图形** | R9 ≥ 3 且 `3DE` bit0 = 1 | `scanline & 3` → 0/0x2000/0x4000/0x6000 |
+
 ## 4. 验证记录（2026-10-31）
 
 | 项 | 结果 |
@@ -128,6 +144,7 @@ WinWorld 的 *Diagraph 2000 3.5*（1986，5.25" 360K）是目前唯一找到的�
 | `HP45981A_25KHZ=1` | `3DA` = `04h`（bit4 = 0，25 kHz） |
 | `25KHZ=1` + `EXT=01`（只有翻译、无 CRTC 钩子） | 22 s 到 `A>`；屏幕 **640 × 400**（BIOS 写的 15 kHz 80×25 值被翻译成 25 kHz 集） |
 | `25KHZ=1` + `EXT=05`（翻译 + HP 字体） | 22 s 到 `A>`；屏幕 **640 × 400**，行距实测 **16 px** |
+| 400 线图形四 bank | 640×400 1bpp，四个 bank 首行分别写 `FFh`/`00h`/`FFh`/`00h`；截图第 0/1/2/3 行亮点 = **640 / 0 / 640 / 0** —— bank 轮转完全正确 |
 
 ## 5. 测试钩子（仅调试用，环境变量）
 
@@ -141,6 +158,6 @@ WinWorld 的 *Diagraph 2000 3.5*（1986，5.25" 360K）是目前唯一找到的�
 ## 6. 尚未实现
 
 1. **CRTC 翻译 ROM**（400 线的最后一块）：15 kHz 程序值 → 25 kHz 实际值的映射表无 dump，需要实物读出或从 ROM BIOS 的 400 线模式表反推。
-2. **400 线图形模式**：手册 §7「400 line graphics」说该模式把显存映射成**四个平面**，未实现。
+2. **400 线图形模式的 2 bpp 变体**（320×400 四色）：1 bpp 的 640×400 四 bank 已实现并验证，四色模式的取数顺序未单独核对。
 3. **下划线属性（`3DE` bit1）**：前景色 `001` 的字符加下划线并强制 `111`。
 4. **原卡字符 ROM**：无公开 dump，现用 HP 9836A 字模顶替。

@@ -108,6 +108,7 @@ typedef struct cga_t {
     uint8_t *vram;
     uint32_t vram_mask; /* Size mask for the card's video RAM window. */
     uint64_t clk;       /* CPU ticks per character time (0 = the CGA default). */
+    int      gfx400;    /* 1 = the source raster is 400 lines (four banks). */
 
     /* Optional alternative character generator: 256 characters x 16 rows,
        the same layout as the HP 45981A character ROM. When NULL, the IBM CGA

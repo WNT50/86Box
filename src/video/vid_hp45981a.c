@@ -151,7 +151,8 @@ hp45981a_set_ext_ctrl(hp45981a_t *dev, uint8_t val)
     else
         dev->cga.font16 = NULL;
 
-    dev->cga.clk = (dev->ext_ctrl & HP45981A_EXT_400LINE) ? hp45981a_clk400() : CGACONST;
+    dev->cga.clk    = (dev->ext_ctrl & HP45981A_EXT_400LINE) ? hp45981a_clk400() : CGACONST;
+    dev->cga.gfx400 = (dev->ext_ctrl & HP45981A_EXT_400LINE) ? 1 : 0;
 
     if (old ^ dev->ext_ctrl) {
         dev->cga.fullchange = monitors[dev->cga.monitor_used].mon_changeframecount;

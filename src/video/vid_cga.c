@@ -64,6 +64,26 @@ cga_vram_mask(cga_t *cga)
     return cga->vram_mask ? cga->vram_mask : DEVICE_VRAM_MASK;
 }
 
+/* Graphics bank selection.  The 200 line modes keep even and odd lines in two
+   banks at 0000h and 2000h.  With a 25 kHz monitor a 200 line source is shown
+   with every line doubled, and a 400 line source (the HP 45981A 400 line
+   graphics mode) uses four banks: lines 0,4,8 in the first, 1,5,9 in the
+   second and so on. */
+static inline int
+cga_gfx_bank(cga_t *cga)
+{
+    int cell = cga->crtc[CGA_CRTC_MAX_SCANLINE_ADDR] & 0x1f;
+
+    if (cell >= 3) {
+        if (cga->gfx400)
+            return (cga->scanline & 3) * 0x2000;
+
+        return ((cga->scanline >> 1) & 1) * 0x2000;
+    }
+
+    return (cga->scanline & 1) * 0x2000;
+}
+
 /* Cards with a different master oscillator (the HP 45981A runs its 400 line
    modes from 22.44 MHz) override the character time; everything else keeps
    the 14.318 MHz / 8 value. */
@@ -488,8 +508,8 @@ cga_render(cga_t *cga, int line)
         }
         for (x = 0; x < cga->crtc[CGA_CRTC_HDISP]; x++) {
             if (cga->cgamode & CGA_MODE_FLAG_VIDEO_ENABLE)
-                dat = (cga->vram[((cga->memaddr << 1) & 0x1fff) + ((cga->scanline & 1) * 0x2000)] << 8) |
-                      cga->vram[((cga->memaddr << 1) & 0x1fff) + ((cga->scanline & 1) * 0x2000) + 1];
+                dat = (cga->vram[((cga->memaddr << 1) & 0x1fff) + cga_gfx_bank(cga)] << 8) |
+                      cga->vram[((cga->memaddr << 1) & 0x1fff) + cga_gfx_bank(cga) + 1];
             else
                 dat = 0;
             for (column = 0; column < 8; column++) {
@@ -513,8 +533,8 @@ cga_render(cga_t *cga, int line)
         cols[1] = (cga->cgacol & 15) + 16;
         for (x = 0; x < cga->crtc[CGA_CRTC_HDISP]; x++) {
             if (cga->cgamode & CGA_MODE_FLAG_VIDEO_ENABLE)
-                dat = (cga->vram[((cga->memaddr << 1) & 0x1fff) + ((cga->scanline & 1) * 0x2000)] << 8) |
-                      cga->vram[((cga->memaddr << 1) & 0x1fff) + ((cga->scanline & 1) * 0x2000) + 1];
+                dat = (cga->vram[((cga->memaddr << 1) & 0x1fff) + cga_gfx_bank(cga)] << 8) |
+                      cga->vram[((cga->memaddr << 1) & 0x1fff) + cga_gfx_bank(cga) + 1];
             else
                 dat = 0;
             for (column = 0; column < 16; column++) {
