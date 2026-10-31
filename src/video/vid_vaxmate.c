@@ -261,6 +261,11 @@ vaxmate_video_mode(vaxmate_video_t *vid)
 {
     int mode = vid->ctrl_a & CTLA_MODE_MASK;
 
+    /* 扩展模式 0xD0：control A = 10h（显示关）/18h（显示开），低 3 位为 0。
+       显存布局与 640x400 2 色一致（B8000 起 4 个 8 KB 平面，每行 80 字节）。 */
+    if ((vid->ctrl_a & 0x17) == 0x10)
+        return 4;
+
     if (mode == 7 && (vid->ctrl_b & CTLB_MONITOR252))
         return VMODE_G800x252x4;
 
@@ -777,7 +782,8 @@ vaxmate_spr_out(uint16_t addr, uint8_t val, void *priv)
     int was = vid->video_disabled;
 
     vid->spr            = val;
-    vid->video_disabled = (val & SPR_DISABLE_VIDEO) ? 0 : 1;
+    /* bit3 是“断开视频”位（POST 写 00，视频正常；写 08 才关闭）。 */
+    vid->video_disabled = (val & SPR_DISABLE_VIDEO) ? 1 : 0;
     if (getenv("VIDEO_FORCE_ON"))
         vid->video_disabled = 0;   /* 实验：忽略断开位 */
     if (getenv("VIDEO_LOG"))
