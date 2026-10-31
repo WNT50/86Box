@@ -349,6 +349,11 @@ exec386_2386(int32_t cycs)
                                   mem_readb_phys(0x9F117), mem_readb_phys(0x9F116),
                                   mem_readb_phys(0x9F119), mem_readb_phys(0x9F118), AX);
                         }
+                        if (cpu_state.pc == 0x037aa) {
+                            static int n3 = 0;
+                            if (n3++ < 12)
+                                pclog("   RDCMP: ax=%04X cx=%04X\n", AX, CX);
+                        }
                         if ((cpu_state.pc == 0x0887e) || (cpu_state.pc == 0x0939)) {
                             uint32_t b = cpu_state.seg_ds.base;
                             uint32_t e = cpu_state.seg_es.base;
