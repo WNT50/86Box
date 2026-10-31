@@ -52,6 +52,12 @@ extern void vaxmate_video_dump(int w, int h);
  * 2 = diagnostic LED, 3 = "NVR valid" (read only), 4 = DI, 5 = CLK,
  * 6 = /CS, 7 = DO.
  *
+ * Measured on the 3.10/3.11 ROM: the BIOS never shifts a frame at all - it
+ * only writes the write-enable bit once (F0681) and reads the valid bit
+ * (F04EB) and the LED bit (F409A).  The configuration the POST acts on comes
+ * from CMOS, not from here, so the frame decoder below is only a model of the
+ * protocol a SETUP utility would use.
+ *
  * The BIOS never shifts data back in - it only drives frames out - but the
  * frame format is fully decoded here so that a future SETUP utility (and any
  * real read path) sees a consistent device:
@@ -74,6 +80,7 @@ typedef struct {
     uint8_t  mem[32];
     uint8_t  ptr;
     uint8_t  sel, clk, wen;
+    uint8_t  csr;   /* 最后写入 CSR1 的值，供回读 */
     uint8_t  bitcnt;
     uint8_t  frame[36];
     uint8_t  valid;
@@ -122,8 +129,10 @@ vaxmate_csr_in(uint16_t addr, void *priv)
     if (addr != 0x0c00)
         return 0xff;
 
-    return (uint8_t) (0x80 | (vaxmate_nvm.valid ? 0x08 : 0x00) |
-                      (vaxmate_nvm.wen ? 0x02 : 0x00));
+
+    /* 其余位回读最后写入的值：ROM 在 F409A 就靠 bit2 回读来判断
+       "system disk / boot device" 分支。bit3 是只读的 NVR valid。 */
+    return (uint8_t) (vaxmate_nvm.csr | (vaxmate_nvm.valid ? 0x08 : 0x00));
 }
 
 static void
@@ -140,6 +149,7 @@ vaxmate_csr_out(uint16_t addr, uint8_t val, void *priv)
     we  = (val >> 1) & 1;
 
     vaxmate_nvm.wen = we;
+    vaxmate_nvm.csr = val;
 
     if (sel) {
         /* /CS released: the frame is over. */
@@ -676,6 +686,7 @@ machine_at_vaxmate_init(const machine_t *model)
     memset(&vaxmate_nvm.mem[10], 0xff, 22);
     vaxmate_nvm.valid = 1;
     vaxmate_nvm.wen   = 1; /* 上电时 bit1 为高：ROM 的 F0034 用它选启动路径 */
+    vaxmate_nvm.csr   = 0x02;
     io_sethandler(0x0c20, 0x0008,
                   vaxmate_ethrom_in, NULL, NULL,
                   NULL, NULL, NULL,
