@@ -87,6 +87,7 @@ video_cards[] = {
     { .device = &herculesplus_device,                           .flags = VIDEO_FLAG_TYPE_MDA       },
     { .device = &incolor_device,                                .flags = VIDEO_FLAG_TYPE_MDA       },
     { .device = &cga_device,                                    .flags = VIDEO_FLAG_TYPE_CGA       },
+    { .device = &hp45981a_device,                               .flags = VIDEO_FLAG_TYPE_CGA       },
     { .device = &ega_device,                                    .flags = VIDEO_FLAG_TYPE_NONE      },
     { .device = &mda_device,                                    .flags = VIDEO_FLAG_TYPE_MDA       },
     { .device = &pgc_device,                                    .flags = VIDEO_FLAG_TYPE_NONE      },
