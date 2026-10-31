@@ -310,12 +310,28 @@ exec386_2386(int32_t cycs)
                    (83CA).  Remove once POST gets past F000:92AB. */
                 {
                     static int bp_on = -1;
+                    static uint32_t last_lin = 0;
                     if (bp_on < 0)
                         bp_on = (getenv("EPOCH_HIL_BP") != NULL) ? 1 : 0;
+                    /* EPOCH_HIL_REG: log every entry into F000:7B00-7EFF from
+                       outside it, i.e. the call graph of the HIL driver. */
+                    if (bp_on && (CS == 0x0f000)) {
+                        uint32_t lin = 0x0f0000u + cpu_state.pc;
+                        int      in  = (cpu_state.pc >= 0x7b00) && (cpu_state.pc < 0x7f00);
+                        int      was = (last_lin >= 0x0f7b00u) && (last_lin < 0x0f7f00u);
+                        if (in && !was && (getenv("EPOCH_HIL_REG") != NULL))
+                            pclog("REGIN: %04X ax=%04X bx=%04X cx=%04X dx=%04X ds=%04X sp=%04X from %05X\n",
+                                  cpu_state.pc, AX, BX, CX, DX, DS, SP, last_lin);
+                        last_lin = lin;
+                    }
                     if (bp_on && (CS == 0x0f000) && ((cpu_state.pc == 0x082f3) || (cpu_state.pc == 0x083ca) || (cpu_state.pc == 0x087d0) ||
                                                     (cpu_state.pc == 0x07b85) || (cpu_state.pc == 0x07d65) ||
                                                     (cpu_state.pc == 0x07c10) || (cpu_state.pc == 0x07c34) ||
-                                                    (cpu_state.pc == 0x08956)))
+                                                    (cpu_state.pc == 0x08956) ||
+                                                    (cpu_state.pc == 0x078aa) || (cpu_state.pc == 0x07465) ||
+                                                    (cpu_state.pc == 0x07d0a) || (cpu_state.pc == 0x07b32) ||
+                                                    (cpu_state.pc == 0x0756f) || (cpu_state.pc == 0x07599) ||
+                                                    (cpu_state.pc == 0x075ad)))
                         pclog("HILBP: %04X:%04X ds=%04X ax=%04X sp=%04X\n", CS, cpu_state.pc, DS, AX, SP);
                 }
 
