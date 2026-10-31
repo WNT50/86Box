@@ -331,6 +331,7 @@ exec386_2386(int32_t cycs)
                                                     (cpu_state.pc == 0x078aa) || (cpu_state.pc == 0x07465) ||
                                                     (cpu_state.pc == 0x07d0a) || (cpu_state.pc == 0x07b32) ||
                                                     (cpu_state.pc == 0x07b60) || (cpu_state.pc == 0x0887e) ||
+                                                    (cpu_state.pc == 0x09239) || (cpu_state.pc == 0x0925a) ||
                                                     (cpu_state.pc == 0x0756f) || (cpu_state.pc == 0x07599) ||
                                                     (cpu_state.pc == 0x075ad) ||
                                                     (cpu_state.pc == 0x0552d) || (cpu_state.pc == 0x055a4) ||
@@ -342,13 +343,26 @@ exec386_2386(int32_t cycs)
                                                     (cpu_state.pc == 0x08371) || (cpu_state.pc == 0x0839a) ||
                                                     (cpu_state.pc == 0x078b1)))
                         pclog("HILBP: %04X:%04X ds=%04X ax=%04X sp=%04X\n", CS, cpu_state.pc, DS, AX, SP);
-                        if (cpu_state.pc == 0x0887e) {
+                        if (cpu_state.pc == 0x087d0) {
+                            pclog("   rec 9F00:0114 = %02X%02X %02X%02X %02X%02X  ax=%04X\n",
+                                  mem_readb_phys(0x9F115), mem_readb_phys(0x9F114),
+                                  mem_readb_phys(0x9F117), mem_readb_phys(0x9F116),
+                                  mem_readb_phys(0x9F119), mem_readb_phys(0x9F118), AX);
+                        }
+                        if ((cpu_state.pc == 0x0887e) || (cpu_state.pc == 0x0939)) {
                             uint32_t b = cpu_state.seg_ds.base;
-                            pclog("   [0C]=%02X%02X [10]=%02X%02X [13]=%02X [14]=%02X [1B]=%02X\n",
+                            uint32_t e = cpu_state.seg_es.base;
+                            char line[128];
+                            int    i;
+                            for (i = 0; i < 0x20; i++)
+                                line[i] = (char) (mem_readb_phys(b + i) < 0x20 ? '.' : mem_readb_phys(b + i));
+                            line[0x20] = 0;
+                            pclog("   ds=%04X(%05X) es=%04X(%05X) rec+4=%02X%02X blk=[%s] 0C=%02X%02X 10=%02X%02X\n",
+                                  DS, b, ES, e,
+                                  mem_readb_phys(e + 0x115), mem_readb_phys(e + 0x114),
+                                  line,
                                   mem_readb_phys(b + 0x0d), mem_readb_phys(b + 0x0c),
-                                  mem_readb_phys(b + 0x11), mem_readb_phys(b + 0x10),
-                                  mem_readb_phys(b + 0x13), mem_readb_phys(b + 0x14),
-                                  mem_readb_phys(b + 0x1b));
+                                  mem_readb_phys(b + 0x11), mem_readb_phys(b + 0x10));
                         }
                 }
 
