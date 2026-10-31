@@ -244,6 +244,34 @@ lance_dma_write(lance_t *dev, uint32_t addr, const uint8_t *buf, int len)
     dma_bm_write(addr, tmp, len, 2);
 }
 
+/* 环描述符访问的唯一入口：位置必须落在环内，整条描述符必须落在 1 MB
+   解码窗口里（RLEN/TLEN 越界保护）。越界按 MERR 处理并关收发器。 */
+static int
+lance_ring_entry(lance_t *dev, const char *tag, uint32_t base, uint8_t mask,
+                 uint8_t pos, uint32_t *addr)
+{
+    uint32_t a;
+
+    if (pos > mask) {
+        lance_dbg("[LANCE] %s: position %u past ring mask %02X, wrapped\n",
+                  tag, pos, mask);
+        pos = (uint8_t) (pos & mask);
+    }
+
+    a = base + ((uint32_t) pos << 3);
+    if ((a >= 0x00100000u) || ((a + 8u) > 0x00100000u)) {
+        lance_dbg("[LANCE] %s: entry %u at %06X outside the 1 MB window\n",
+                  tag, pos, a);
+        dev->csr[0] |= CSR0_MERR | CSR0_ERR;
+        dev->csr[0] &= (uint16_t) ~(CSR0_TXON | CSR0_RXON);
+        lance_update_irq(dev);
+        return 0;
+    }
+
+    *addr = a;
+    return 1;
+}
+
 static uint16_t
 lance_md_read(lance_t *dev, uint32_t addr)
 {
@@ -327,13 +355,22 @@ lance_init_block(lance_t *dev)
                          ((uint32_t) ib[18] << 16)) & RING_ADDR_MASK;
     dev->tx_ring_base = ((uint32_t) ib[20] | ((uint32_t) ib[21] << 8) |
                          ((uint32_t) ib[22] << 16)) & RING_ADDR_MASK;
-    dev->rx_ring_mask = (uint8_t) ~(1 << ((ib[19] >> 5) & 7));
-    dev->tx_ring_mask = (uint8_t) ~(1 << ((ib[23] >> 5) & 7));
+    /* 环掩码就是「项数 - 1」：RLEN/TLEN 3 位 → 1..128 项。 */
+    dev->rx_ring_mask = (uint8_t) ((1u << ((ib[19] >> 5) & 7)) - 1u);
+    dev->tx_ring_mask = (uint8_t) ((1u << ((ib[23] >> 5) & 7)) - 1u);
 
     dev->rx_ring_pos = 0;
     dev->tx_ring_pos = 0;
 
     memcpy(dev->mac, dev->padr, 6);
+
+    /* 环必须整体落在 1 MB 解码窗口里；越界的描述符访问会按 MERR 处理。 */
+    if ((dev->rx_ring_base + ((uint32_t) (dev->rx_ring_mask + 1) << 3)) > 0x00100000u)
+        lance_dbg("[LANCE] rx ring %05X + %u entries runs past the 1 MB window\n",
+                  dev->rx_ring_base, (unsigned) (dev->rx_ring_mask + 1));
+    if ((dev->tx_ring_base + ((uint32_t) (dev->tx_ring_mask + 1) << 3)) > 0x00100000u)
+        lance_dbg("[LANCE] tx ring %05X + %u entries runs past the 1 MB window\n",
+                  dev->tx_ring_base, (unsigned) (dev->tx_ring_mask + 1));
 
     lance_dbg("[LANCE] init: mode=%04X mac=%02X:%02X:%02X:%02X:%02X:%02X "
               "rx=%05X/%d tx=%05X/%d\n",
@@ -393,7 +430,11 @@ lance_inject(void *priv)
 static void
 lance_tx_complete(lance_t *dev, int result)
 {
-    uint32_t ring_address = (dev->tx_ring_base + (dev->tx_ring_pos << 3)) & RING_ADDR_MASK;
+    uint32_t ring_address;
+
+    if (!lance_ring_entry(dev, "tx", dev->tx_ring_base, dev->tx_ring_mask,
+                          dev->tx_ring_pos, &ring_address))
+        return;
 
     if (result < 0)
         dev->tx_md[1] |= TMD1_ERR;
@@ -416,7 +457,7 @@ lance_tx_complete(lance_t *dev, int result)
 static void
 lance_transmit(lance_t *dev)
 {
-    uint32_t ring_address = (dev->tx_ring_base + (dev->tx_ring_pos << 3)) & RING_ADDR_MASK;
+    uint32_t ring_address;
     uint8_t  buf[LANCE_BUF_MAX];
     int      length = 0;    /* 拷进 buf 的字节数，超过缓冲的部分只计数 */
     int      total  = 0;    /* TMD2 声明的整包长度，用来判 BABL */
@@ -424,6 +465,10 @@ lance_transmit(lance_t *dev)
     int      sent;
 
     memset(buf, 0x00, sizeof(buf));
+
+    if (!lance_ring_entry(dev, "tx", dev->tx_ring_base, dev->tx_ring_mask,
+                          dev->tx_ring_pos, &ring_address))
+        return;
 
     for (;;) {
         int tx_buf_length;
@@ -452,9 +497,17 @@ lance_transmit(lance_t *dev)
 
         if (!(dev->tx_md[1] & TMD1_ENP)) {
             uint8_t  next_pos  = (uint8_t) ((dev->tx_ring_pos + 1) & dev->tx_ring_mask);
-            uint32_t next_addr = (dev->tx_ring_base + (next_pos << 3)) & RING_ADDR_MASK;
-            uint16_t next_md1  = (next_addr != ring_address) ?
-                                 lance_md_read(dev, next_addr | 2) : dev->tx_md[1];
+            uint32_t next_addr;
+            uint16_t next_md1;
+
+            if (!lance_ring_entry(dev, "tx", dev->tx_ring_base,
+                                  dev->tx_ring_mask, next_pos, &next_addr)) {
+                failed = 1;
+                break;
+            }
+
+            next_md1 = (next_addr != ring_address) ?
+                       lance_md_read(dev, next_addr | 2) : dev->tx_md[1];
 
             if (next_md1 & TMD1_OWN) {
                 lance_md_write(dev, ring_address | 2, dev->tx_md[1]);
@@ -477,6 +530,13 @@ lance_transmit(lance_t *dev)
     }
 
     if (failed) {
+        if (dev->csr[0] & CSR0_MERR) {
+            lance_dbg("[LANCE] tx aborted: MERR on the ring\n");
+            dev->tx_md[1] |= TMD1_ERR;
+            lance_tx_complete(dev, -1);
+            return;
+        }
+
         lance_dbg("[LANCE] tx aborted: BUFF/UFLO\n");
         lance_tx_complete(dev, -1);
         return;
@@ -520,7 +580,10 @@ lance_tx_poll(void *priv)
 
     dev->csr[0] &= (uint16_t) ~CSR0_TDMD;
 
-    ring_address  = (dev->tx_ring_base + (dev->tx_ring_pos << 3)) & RING_ADDR_MASK;
+    if (!lance_ring_entry(dev, "tx", dev->tx_ring_base, dev->tx_ring_mask,
+                          dev->tx_ring_pos, &ring_address))
+        return;
+
     dev->tx_md[1] = lance_md_read(dev, ring_address | 2);
 
     if (!(dev->tx_md[1] & TMD1_OWN))
@@ -586,7 +649,10 @@ lance_receive(lance_t *dev, uint8_t *buf, int length)
     buf    = frame;
     length += 4;
 
-    ring_address  = (dev->rx_ring_base + (dev->rx_ring_pos << 3)) & RING_ADDR_MASK;
+    if (!lance_ring_entry(dev, "rx", dev->rx_ring_base, dev->rx_ring_mask,
+                          dev->rx_ring_pos, &ring_address))
+        return -1;
+
     dev->rx_md[1] = lance_md_read(dev, ring_address | 2);
 
     if (!(dev->rx_md[1] & RMD1_OWN))
@@ -617,9 +683,17 @@ lance_receive(lance_t *dev, uint8_t *buf, int length)
 
         if (offset < length) {
             uint8_t  next_pos  = (uint8_t) ((dev->rx_ring_pos + 1) & dev->rx_ring_mask);
-            uint32_t next_addr = (dev->rx_ring_base + (next_pos << 3)) & RING_ADDR_MASK;
-            uint16_t next_md1  = (next_addr != ring_address) ?
-                                 lance_md_read(dev, next_addr | 2) : dev->rx_md[1];
+            uint32_t next_addr;
+            uint16_t next_md1;
+
+            if (!lance_ring_entry(dev, "rx", dev->rx_ring_base,
+                                  dev->rx_ring_mask, next_pos, &next_addr)) {
+                dev->rx_md[1] |= RMD1_ERR | RMD1_BUFF | RMD1_OFLO;
+                break;
+            }
+
+            next_md1 = (next_addr != ring_address) ?
+                       lance_md_read(dev, next_addr | 2) : dev->rx_md[1];
 
             if (next_md1 & RMD1_OWN) {
                 lance_md_write(dev, ring_address | 2, dev->rx_md[1]);
@@ -648,7 +722,9 @@ lance_rx_complete(lance_t *dev, int result)
     if (result == -1)
         return;
 
-    ring_address = (dev->rx_ring_base + (dev->rx_ring_pos << 3)) & RING_ADDR_MASK;
+    if (!lance_ring_entry(dev, "rx", dev->rx_ring_base, dev->rx_ring_mask,
+                          dev->rx_ring_pos, &ring_address))
+        return;
 
     if (result == -2) {
         lance_dbg("[LANCE] rx miss (no owned descriptor), csr0=%04x\n",
