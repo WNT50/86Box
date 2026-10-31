@@ -22,7 +22,7 @@
  *
  * Based on @(#)am79c90.cpp Patrick Mackinlay (MAME)
  *
- *          Portions Copyright (C) 2018-2026 Patrick Mackinlay
+ *          Portions Copyright (C) 2018-2025 Patrick Mackinlay
  *          Portions Copyright (C) 2018 The MAME Project
  *
  *          The MAME device was originally added by mooglyguy in 2018 and has
