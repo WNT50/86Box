@@ -28,6 +28,7 @@ list(APPEND net_sources
     net_ne2000.c
     net_pcnet.c
     net_lance.c
+    net_lance_vaxmate.c
     net_wd8003.c
     net_pe3.c
     net_plip.c

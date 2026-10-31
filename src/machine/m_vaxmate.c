@@ -524,7 +524,7 @@ machine_at_vaxmate_init(const machine_t *model)
                   vaxmate_uart_write, NULL, NULL,
                   &vax_uart[1]);
     device_add(&vaxmate_video_device);
-    device_add(&lance_device);
+    device_add(&vaxmate_lance_device);
 
     /* AT 兼容的 RTC/CMOS。BIOS 在 F000:4AC5 用 mov al,0x92 / in al,0x71
        把 CMOS 0x12 读到 [0x549]，再由 F000:4E19-4E31 逐半字节计数：

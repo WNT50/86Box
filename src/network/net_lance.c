@@ -37,6 +37,7 @@
 #include <86box/network.h>
 #include <86box/net_lance.h>
 
+/* Defaults used when no board parameters are supplied. */
 #define LANCE_BASE          0x0c60
 #define LANCE_IRQ           10
 
@@ -103,6 +104,8 @@
 
 typedef struct lance_t {
     uint16_t   csr[4];
+    uint16_t   base;
+    int        irq_num;       /* 该板卡使用的中断线 */
     uint8_t    rap;
     int        irq_gate;      /* NICSR interrupt enable (power-on: off) */
     int        irq;
@@ -156,11 +159,11 @@ lance_update_irq(lance_t *dev)
     if (active && !dev->irq) {
         dev->irq = 1;
         lance_dbg("[LANCE] IRQ10 assert (csr0=%04X gate=%d)\n", dev->csr[0], dev->irq_gate);
-        picint(1 << LANCE_IRQ);
+        picint(1 << dev->irq_num);
     } else if (!active && dev->irq) {
         dev->irq = 0;
         lance_dbg("[LANCE] IRQ10 clear\n");
-        picintc(1 << LANCE_IRQ);
+        picintc(1 << dev->irq_num);
     }
 }
 
@@ -699,28 +702,6 @@ lance_rap_write(uint16_t addr, uint16_t val, void *priv)
     lance_dbg("[LANCE] RAP write %04X -> %d\n", val, dev->rap);
 }
 
-/* NICSR: DEC interface logic, bit set/clear on write, 8-bit. */
-static void
-lance_nicsr_write(uint16_t addr, uint8_t val, void *priv)
-{
-    lance_t *dev = (lance_t *) priv;
-
-    (void) addr;
-
-    lance_dbg("[LANCE] NICSR write %02X\n", val);
-
-    /* TRM 13-17: a 1 in the set bit enables, a 1 in the clear bit disables,
-       and setting both toggles the state. */
-    if ((val & NICSR_INT_SET) && (val & NICSR_INT_CLEAR))
-        dev->irq_gate = !dev->irq_gate;
-    else if (val & NICSR_INT_SET)
-        dev->irq_gate = 1;
-    else if (val & NICSR_INT_CLEAR)
-        dev->irq_gate = 0;
-
-    lance_update_irq(dev);
-}
-
 static void
 lance_reset(void *priv)
 {
@@ -747,14 +728,17 @@ lance_reset(void *priv)
 
     timer_disable(&dev->tx_timer);
 
-    picintc(1 << LANCE_IRQ);
+    picintc(1 << dev->irq_num);
 }
 
 
 static void *
 lance_init(const device_t *info)
 {
-    lance_t *dev = (lance_t *) calloc(1, sizeof(lance_t));
+    lance_t            *dev;
+    const lance_board_t *board;
+
+    dev = (lance_t *) calloc(1, sizeof(lance_t));
 
     (void) info;
 
@@ -764,13 +748,22 @@ lance_init(const device_t *info)
     if (lance_log < 0)
         lance_log = (getenv("LANCE_LOG") != NULL) ? 1 : 0;
 
-    /* DIGITAL OUI 08:00:2B, as stored in the machine NVM. */
-    dev->mac[0] = 0x08;
-    dev->mac[1] = 0x00;
-    dev->mac[2] = 0x2b;
-    dev->mac[3] = 0x12;
-    dev->mac[4] = 0x34;
-    dev->mac[5] = 0x56;
+    /* Board parameters: the machine decides where the chip lives. */
+    board = (const lance_board_t *) device_get_priv(info);
+    if (board != NULL) {
+        dev->base = board->base;
+        dev->irq_num = board->irq;
+        memcpy(dev->mac, board->mac, 6);
+    } else {
+        dev->base                          = LANCE_BASE;
+        dev->irq_num                       = LANCE_IRQ;
+        dev->mac[0] = 0x08;
+        dev->mac[1] = 0x00;
+        dev->mac[2] = 0x2b;
+        dev->mac[3] = 0x12;
+        dev->mac[4] = 0x34;
+        dev->mac[5] = 0x56;
+    }
 
     timer_add(&dev->tx_timer, lance_tx_poll, dev, 0);
     timer_add(&dev->inj_timer, lance_inject, dev, 0);
@@ -778,21 +771,18 @@ lance_init(const device_t *info)
 
     /* RDP is a single 16-bit port; it must not be registered over 0x0C62,
        or the RAP handler at that address is shadowed by the wider range. */
-    io_sethandler(LANCE_BASE, 0x0002,
+    io_sethandler(dev->base, 0x0002,
                   NULL, lance_rdp_read, NULL,
                   NULL, lance_rdp_write, NULL, dev);
-    io_sethandler(LANCE_BASE + 0x0004, 0x0002,
+    io_sethandler(dev->base + 0x0004, 0x0002,
                   NULL, lance_rdp_read, NULL,
                   NULL, lance_rdp_write, NULL, dev);
-    io_sethandler(LANCE_BASE + 0x0002, 0x0002,
+    io_sethandler(dev->base + 0x0002, 0x0002,
                   NULL, lance_rap_read, NULL,
                   NULL, lance_rap_write, NULL, dev);
-    io_sethandler(LANCE_BASE + 0x0006, 0x0002,
+    io_sethandler(dev->base + 0x0006, 0x0002,
                   NULL, lance_rap_read, NULL,
                   NULL, lance_rap_write, NULL, dev);
-    io_sethandler(LANCE_BASE + 0x0008, 0x0008,
-                  NULL, NULL, NULL,
-                  lance_nicsr_write, NULL, NULL, dev);
 
     dev->card = network_attach(dev, dev->mac, lance_rx, NULL);
 
@@ -808,9 +798,30 @@ lance_close(void *priv)
         free(dev);
 }
 
+/* DEC interface logic (board glue) gates the interrupt line. */
+void
+lance_set_irq_gate(void *priv, int on)
+{
+    lance_t *dev = (lance_t *) priv;
+
+    if (dev == NULL)
+        return;
+
+    dev->irq_gate = on ? 1 : 0;
+    lance_update_irq(dev);
+}
+
+int
+lance_get_irq_gate(void *priv)
+{
+    lance_t *dev = (lance_t *) priv;
+
+    return (dev != NULL) ? dev->irq_gate : 0;
+}
+
 const device_t lance_device = {
-    .name          = "AMD Am7990 LANCE (VAXmate)",
-    .internal_name = "lance_vaxmate",
+    .name          = "AMD Am7990 LANCE",
+    .internal_name = "lance_am7990",
     .flags         = DEVICE_ISA16,
     .local         = 0,
     .init          = lance_init,
