@@ -70,6 +70,7 @@ add_library(vid OBJECT
     vid_cga_toshiba_t1000.c
     vid_cga_toshiba_t3100e.c
     vid_cga_v6355.c
+    vid_hp45981a.c
 
     # IBM PC Convertible LCD display
     vid_ibm5140.c

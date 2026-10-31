@@ -106,6 +106,12 @@ typedef struct cga_t {
     int fullchange;
 
     uint8_t *vram;
+    uint32_t vram_mask; /* Size mask for the card's video RAM window. */
+
+    /* Optional alternative character generator: 256 characters x 16 rows,
+       the same layout as the HP 45981A character ROM. When NULL, the IBM CGA
+       font in fontdat[] is used. */
+    const uint8_t *font16;
 
     uint8_t charbuffer[256];
 

@@ -56,6 +56,14 @@
 #define DEVICE_VRAM      0x4000
 #define DEVICE_VRAM_MASK 0x3fff
 
+/* Cards that do not size their own video RAM (the Compaq plasma, the NCR
+   and Olivetti CGA derivatives, ...) keep the historical 16K window. */
+static inline uint32_t
+cga_vram_mask(cga_t *cga)
+{
+    return cga->vram_mask ? cga->vram_mask : DEVICE_VRAM_MASK;
+}
+
 typedef union {
     uint32_t color;
     struct {
@@ -83,7 +91,7 @@ void cga_recalctimings(cga_t *cga);
 static void
 cga_update_latch(cga_t *cga, uint16_t memaddr)
 {
-    uint32_t lp_latch = memaddr & DEVICE_VRAM_MASK;
+    uint32_t lp_latch = memaddr & cga_vram_mask(cga);
 
     cga->crtc[CGA_CRTC_LIGHT_PEN_ADDR_HIGH] = (lp_latch >> 8) & 0xFF;
     cga->crtc[CGA_CRTC_LIGHT_PEN_ADDR_LOW] = lp_latch & 0xFF;
@@ -237,11 +245,11 @@ cga_write(uint32_t addr, uint8_t val, void *priv)
 {
     cga_t *cga = (cga_t *) priv;
 
-    cga->vram[addr & DEVICE_VRAM_MASK] = val;
+    cga->vram[addr & cga_vram_mask(cga)] = val;
     if (cga->snow_enabled) {
         int offset                  = ((timer_get_remaining_u64(&cga->timer) / CGACONST) * 2) & 0xfc;
-        cga->charbuffer[offset]     = cga->vram[addr & DEVICE_VRAM_MASK];
-        cga->charbuffer[offset | 1] = cga->vram[addr & DEVICE_VRAM_MASK];
+        cga->charbuffer[offset]     = cga->vram[addr & cga_vram_mask(cga)];
+        cga->charbuffer[offset | 1] = cga->vram[addr & cga_vram_mask(cga)];
     }
     cga_waitstates(cga);
 }
@@ -252,7 +260,7 @@ cga_debug_ptr(uint32_t addr, UNUSED(int write), void *priv)
 {
     cga_t *cga = (cga_t *) priv;
 
-    return &cga->vram[addr & DEVICE_VRAM_MASK];
+    return &cga->vram[addr & cga_vram_mask(cga)];
 }
 
 uint8_t
@@ -263,10 +271,10 @@ cga_read(uint32_t addr, void *priv)
     cga_waitstates(cga);
     if (cga->snow_enabled) {
         int offset                  = ((timer_get_remaining_u64(&cga->timer) / CGACONST) * 2) & 0xfc;
-        cga->charbuffer[offset]     = cga->vram[addr & DEVICE_VRAM_MASK];
-        cga->charbuffer[offset | 1] = cga->vram[addr & DEVICE_VRAM_MASK];
+        cga->charbuffer[offset]     = cga->vram[addr & cga_vram_mask(cga)];
+        cga->charbuffer[offset | 1] = cga->vram[addr & cga_vram_mask(cga)];
     }
-    return cga->vram[addr & DEVICE_VRAM_MASK];
+    return cga->vram[addr & cga_vram_mask(cga)];
 }
 
 void
@@ -349,10 +357,22 @@ cga_sample_luma(bitmap_t* target_buffer, uint32_t x, uint32_t y)
     return total_luma / 25.0;
 }
 
+/* Expand a character glyph into one scanline row.  Cards with an alternative
+   character generator (e.g. the HP 45981A) supply a 256 x 16 byte font and use
+   rows 1..8 of that cell when running the 200 line text modes. */
+static inline uint8_t
+cga_glyph_row(cga_t *cga, uint8_t chr, int row)
+{
+    if (cga->font16 != NULL)
+        return cga->font16[(chr << 4) + (row & 7) + 1];
+
+    return fontdat[chr + cga->fontbase][row & 7];
+}
+
 static void
 cga_render(cga_t *cga, int line)
 {
-    uint16_t cursoraddr  = (cga->crtc[CGA_CRTC_CURSOR_ADDR_LOW] | (cga->crtc[CGA_CRTC_CURSOR_ADDR_HIGH] << 8)) & DEVICE_VRAM_MASK;
+    uint16_t cursoraddr  = (cga->crtc[CGA_CRTC_CURSOR_ADDR_LOW] | (cga->crtc[CGA_CRTC_CURSOR_ADDR_HIGH] << 8)) & cga_vram_mask(cga);
     int      drawcursor;
     int      x;
     int      column;
@@ -391,7 +411,7 @@ cga_render(cga_t *cga, int line)
 
             for (column = 0; column < 8; column++) {
                 buffer32->line[line][(x * 8) + column + 8]
-                    = cols[(fontdat[chr + cga->fontbase][cga->scanline & 7] & (1 << (column ^ 7))) ? 1 : 0] ^ (drawcursor ? 0b1111 : 0);
+                    = cols[(cga_glyph_row(cga, chr, cga->scanline) & (1 << (column ^ 7))) ? 1 : 0] ^ (drawcursor ? 0b1111 : 0);
                 
                 if (cga_lightpen_enabled && !cga->lp_latch_found && mouse_tablet_in_proximity > 0 && cga_is_in_lightpen(cga, (x * 8) + column + 8, line)) {
                     cga->lp_latch_found_y = line;
@@ -406,8 +426,8 @@ cga_render(cga_t *cga, int line)
     } else if (!(cga->cgamode & CGA_MODE_FLAG_GRAPHICS)) {
         for (x = 0; x < cga->crtc[CGA_CRTC_HDISP]; x++) {
             if (cga->cgamode & CGA_MODE_FLAG_VIDEO_ENABLE) {
-                chr  = cga->vram[(cga->memaddr << 1) & DEVICE_VRAM_MASK];
-                attr = cga->vram[((cga->memaddr << 1) + 1) & DEVICE_VRAM_MASK];
+                chr  = cga->vram[(cga->memaddr << 1) & cga_vram_mask(cga)];
+                attr = cga->vram[((cga->memaddr << 1) + 1) & cga_vram_mask(cga)];
             } else
                 chr = attr = 0;
             drawcursor = ((cga->memaddr == cursoraddr) && cga->cursorvisible && cga->cursoron);
@@ -422,7 +442,7 @@ cga_render(cga_t *cga, int line)
             for (column = 0; column < 8; column++) {
                 buffer32->line[line][(x * 16) + (column << 1) + 8]
                     = buffer32->line[line][(x * 16) + (column << 1) + 8 + 1]
-                    = (cols[(fontdat[chr + cga->fontbase][cga->scanline & 7] & (1 << (column ^ 7))) ? 1 : 0] ^ (drawcursor ? 0b1111 : 0));
+                    = (cols[(cga_glyph_row(cga, chr, cga->scanline) & (1 << (column ^ 7))) ? 1 : 0] ^ (drawcursor ? 0b1111 : 0));
 
                 
                 if (cga_lightpen_enabled && !cga->lp_latch_found && mouse_tablet_in_proximity > 0 && (cga_is_in_lightpen(cga, (x * 16) + (column << 1) + 8, line) || cga_is_in_lightpen(cga, (x * 16) + (column << 1) + 8 + 1, line))) {
@@ -859,7 +879,7 @@ cga_poll(void *priv)
             cga->vadj--;
             if (!cga->vadj) {
                 cga->cgadispon = 1;
-                cga->memaddr = cga->memaddr_backup = (cga->crtc[CGA_CRTC_START_ADDR_LOW] | (cga->crtc[CGA_CRTC_START_ADDR_HIGH] << 8)) & DEVICE_VRAM_MASK;
+                cga->memaddr = cga->memaddr_backup = (cga->crtc[CGA_CRTC_START_ADDR_LOW] | (cga->crtc[CGA_CRTC_START_ADDR_HIGH] << 8)) & cga_vram_mask(cga);
                 cga->scanline               = 0;
             }
         } else if (cga->scanline == cga->crtc[CGA_CRTC_MAX_SCANLINE_ADDR]) {
@@ -877,7 +897,7 @@ cga_poll(void *priv)
                 cga->vadj = cga->crtc[CGA_CRTC_VTOTAL_ADJUST];
                 if (!cga->vadj) {
                     cga->cgadispon = 1;
-                    cga->memaddr = cga->memaddr_backup = (cga->crtc[CGA_CRTC_START_ADDR_LOW] | (cga->crtc[CGA_CRTC_START_ADDR_HIGH] << 8)) & DEVICE_VRAM_MASK;
+                    cga->memaddr = cga->memaddr_backup = (cga->crtc[CGA_CRTC_START_ADDR_LOW] | (cga->crtc[CGA_CRTC_START_ADDR_HIGH] << 8)) & cga_vram_mask(cga);
                 }
                 
                 switch (cga->crtc[CGA_CRTC_CURSOR_START] & 0x60) {
@@ -983,7 +1003,7 @@ cga_poll(void *priv)
             cga->cursorvisible = 1;
         if (cga->cgadispon && (cga->cgamode & CGA_MODE_FLAG_HIGHRES)) {
             for (x = 0; x < (cga->crtc[CGA_CRTC_HDISP] << 1); x++)
-                cga->charbuffer[x] = cga->vram[((cga->memaddr << 1) + x) & DEVICE_VRAM_MASK];
+                cga->charbuffer[x] = cga->vram[((cga->memaddr << 1) + x) & cga_vram_mask(cga)];
         }
     }
 
@@ -998,6 +1018,8 @@ cga_init(cga_t *cga)
     mem_debug_add(cga_read, cga_write, cga_debug_ptr);
     timer_add(&cga->timer, cga_poll, cga, 1);
     cga->composite = 0;
+    cga->vram_mask = DEVICE_VRAM_MASK;
+    cga->font16    = NULL;
 }
 
 void *
