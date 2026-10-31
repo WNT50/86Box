@@ -120,6 +120,8 @@ typedef struct lance_t {
     uint16_t   tx_md[4];
     uint16_t   rx_md[4];
     pc_timer_t tx_timer;
+    pc_timer_t inj_timer;     /* LANCE_INJ 调试注入 */
+    int        injected;
     netcard_t *card;
 } lance_t;
 
@@ -298,12 +300,43 @@ lance_init_block(lance_t *dev)
               dev->rx_ring_base, 1 << ((ib[19] >> 5) & 7),
               dev->tx_ring_base, 1 << ((ib[23] >> 5) & 7));
 
+    if (!dev->injected && (getenv("LANCE_INJ") != NULL)) {
+        dev->injected = 1;
+        timer_set_delay_u64(&dev->inj_timer, 50000 * TIMER_USEC);
+    }
+
     /* INIT is cleared by the chip, IDON reports completion. */
     dev->csr[0] &= (uint16_t) ~CSR0_INIT;
     dev->csr[0] |= CSR0_IDON;
 }
 
 static void lance_tx_poll(void *priv);
+
+static int  lance_receive(lance_t *dev, uint8_t *buf, int length);
+static void lance_rx_complete(lance_t *dev, int result);
+
+/* 调试用：INIT 之后注入一帧，验证接收环 + RINT 通路。 */
+static void
+lance_inject(void *priv)
+{
+    lance_t     *dev = (lance_t *) priv;
+    static const uint8_t frame[64] = {
+        0x08, 0x00, 0x2b, 0x12, 0x34, 0x56,   /* 目的：本站 MAC（INIT 之后再填）*/
+        0x08, 0x00, 0x2b, 0xaa, 0xbb, 0xcc,   /* 源 */
+        0x08, 0x00,                            /* EtherType IP */
+        0x45, 0x00, 0x00, 0x2e
+    };
+    uint8_t buf[64];
+
+    if (dev->card == NULL)
+        return;
+
+    memcpy(buf, frame, sizeof(buf));
+    memcpy(buf, dev->padr, 6);
+
+    lance_dbg("[LANCE] inject %d bytes\n", (int) sizeof(buf));
+    lance_rx_complete(dev, lance_receive(dev, buf, sizeof(buf)));
+}
 
 static void
 lance_tx_complete(lance_t *dev, int result)
@@ -740,6 +773,7 @@ lance_init(const device_t *info)
     dev->mac[5] = 0x56;
 
     timer_add(&dev->tx_timer, lance_tx_poll, dev, 0);
+    timer_add(&dev->inj_timer, lance_inject, dev, 0);
     lance_reset(dev);
 
     /* RDP is a single 16-bit port; it must not be registered over 0x0C62,
