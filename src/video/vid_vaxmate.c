@@ -145,6 +145,7 @@ typedef struct vaxmate_video_t {
     int      text_base;
     int      displine;
     int      active_lines;
+    int      hphase;
     int      firstline;
     int      lastline;
     int      linepos;
@@ -641,9 +642,26 @@ vaxmate_video_poll(void *priv)
     }
     vid->active_lines = active;
 
-    /* 状态位每次调用翻转一次：BIOS 靠轮询 3DA/3BA 的 bit0 找显示期，
-       只要它会变化就不会死等。 */
-    vid->status_a ^= STATA_DISPENSE;
+    /* 03DA/03BA 的两位跟着扫描走。一行被拆成两段定时：显示段里 bit0=1，
+       行消隐段里 bit0=0，于是 bit0 以行频（26 kHz）翻转；bit3 是垂直同步，
+       落在帧末几行。BIOS 的滚动/光标例程靠这两位等回扫。 */
+    if (vid->hphase == 0) {
+        vid->status_a = 0;
+        if (vid->displine < active)
+            vid->status_a |= STATA_DISPENSE;
+        if ((total > 3) && (vid->displine >= (total - 3)))
+            vid->status_a |= STATA_VSYNC;
+
+        vid->hphase = 1;
+        timer_advance_u64(&vid->timer, vid->dispontime);
+        return;
+    }
+
+    /* 行消隐段：bit0 落下，这一行随即结束。 */
+    vid->status_a = 0;
+    if ((total > 3) && (vid->displine >= (total - 3)))
+        vid->status_a |= STATA_VSYNC;
+    vid->hphase = 0;
 
     if (vid->displine >= active) {
         /* 垂直消隐：40 行左右，凑满 440 行 / 60 Hz */
@@ -699,9 +717,9 @@ vaxmate_video_poll(void *priv)
         vid->vc       = 0;
     }
 
-    /* 一行固定为 848（或 1056）个点周期：行频由监视器锁定，与 guest 写进
-       CRTC 的 R0/R1 无关。 */
-    timer_advance_u64(&vid->timer, vid->line_ticks);
+    /* 行剩余的时间：848（或 1056）点里去掉显示段。行频由监视器锁定，
+       与 guest 写进 CRTC 的 R0/R1 无关。 */
+    timer_advance_u64(&vid->timer, vid->dispofftime);
 }
 
 static void
@@ -952,6 +970,7 @@ vaxmate_video_init(UNUSED(const device_t *info))
     vid->firstline     = 1000;
     vid->displine      = 0;
     vid->active_lines  = 400;
+    vid->hphase        = 0;
     vid->memaddr       = 0;
     vid->text_base     = 0x8000;
 
