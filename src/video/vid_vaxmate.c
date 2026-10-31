@@ -513,8 +513,10 @@ vaxmate_video_render_graphics(vaxmate_video_t *vid, int line, int displine)
             case 1:
                 v   = vid->vram[(off + (uint32_t) (x >> 3)) & (VAXMATE_VRAM - 1)];
                 idx = (v >> (7 - (x & 7))) & 1;
+                /* 前景色同样走 CPS/SIC 选中的调色板；color_select 的低 4 位
+                   是边框色，拿它当前景色会让默认的 0 变成黑底黑字。 */
                 buffer32->line[line][x] = vaxmate_vlt_color(
-                    idx ? vid->vlt[vid->color_select & 0x0f] : vid->vlt[0]);
+                    vid->vlt[vaxmate_pal4[((vid->color_select >> 4) & 3)][idx] & 0x0f]);
                 break;
 
             case 2:
