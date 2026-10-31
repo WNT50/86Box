@@ -52,6 +52,9 @@
 #define CSR0_RXON          0x0020
 #define CSR0_INEA          0x0040
 #define CSR0_INTR          0x0080
+/* TRM 1-21：INTR 由 BABL/MISS/MERR/RINT/TINT/IDON 或出来；CERR 不产生中断 */
+#define CSR0_INTR_MASK     (CSR0_BABL | CSR0_MISS | CSR0_MERR | \
+                            CSR0_RINT | CSR0_TINT | CSR0_IDON)
 #define CSR0_IDON          0x0100
 #define CSR0_TINT          0x0200
 #define CSR0_RINT          0x0400
@@ -148,26 +151,33 @@ lance_dbg(const char *fmt, ...)
 }
 
 static void
-lance_update_irq(lance_t *dev)
+lance_irq_line(lance_t *dev)
 {
-    int active = 0;
-
-    if (dev->irq_gate && (dev->csr[0] & CSR0_INEA)) {
-        /* INTR is raised for any of the error/completion flags. */
-        if (dev->csr[0] & (CSR0_TINT | CSR0_RINT | CSR0_MERR | CSR0_MISS |
-                           CSR0_CERR | CSR0_BABL | CSR0_ERR))
-            active = 1;
-    }
+    int active = (dev->irq_gate && (dev->csr[0] & CSR0_INEA) &&
+                  (dev->csr[0] & CSR0_INTR)) ? 1 : 0;
 
     if (active && !dev->irq) {
         dev->irq = 1;
-        lance_dbg("[LANCE] IRQ10 assert (csr0=%04X gate=%d)\n", dev->csr[0], dev->irq_gate);
+        lance_dbg("[LANCE] IRQ%d assert (csr0=%04X gate=%d)\n",
+                  dev->irq_num, dev->csr[0], dev->irq_gate);
         picint(1 << dev->irq_num);
     } else if (!active && dev->irq) {
         dev->irq = 0;
-        lance_dbg("[LANCE] IRQ10 clear\n");
+        lance_dbg("[LANCE] IRQ%d clear\n", dev->irq_num);
         picintc(1 << dev->irq_num);
     }
+}
+
+static void
+lance_update_irq(lance_t *dev)
+{
+    /* INTR 是锁存位：任一中断源置位就置 INTR，读 CSR0 清掉（TRM 1-21）。 */
+    if (dev->csr[0] & CSR0_INTR_MASK)
+        dev->csr[0] |= CSR0_INTR;
+    else
+        dev->csr[0] &= (uint16_t) ~CSR0_INTR;
+
+    lance_irq_line(dev);
 }
 
 /* The byte lanes of the 16-bit bus are swapped on the VAXmate (CSR3 BSWP). */
@@ -183,9 +193,32 @@ lance_bswap(uint8_t *buf, int len)
     }
 }
 
+/* TRM 1-21：LANCE 作总线主得不到 READY（地址上没有设备）→ MERR，
+   收发器一起关掉。VAXmate 只解码 1 MB，超出即视为无应答。 */
+static int
+lance_dma_check(lance_t *dev, uint32_t addr, int len)
+{
+    if ((len > 0) && ((addr >= 0x00100000u) ||
+                      ((uint32_t) len > (0x00100000u - addr)))) {
+        dev->csr[0] |= CSR0_MERR | CSR0_ERR;
+        dev->csr[0] &= (uint16_t) ~(CSR0_TXON | CSR0_RXON);
+        lance_dbg("[LANCE] MERR addr=%06X len=%d csr0=%04X\n",
+                  addr, len, dev->csr[0]);
+        lance_update_irq(dev);
+        return 0;
+    }
+
+    return 1;
+}
+
 static void
 lance_dma_read(lance_t *dev, uint32_t addr, uint8_t *buf, int len)
 {
+    if (!lance_dma_check(dev, addr, len)) {
+        memset(buf, 0x00, len);
+        return;
+    }
+
     dma_bm_read(addr, buf, len, 2);
 
     if (dev->csr[3] & CSR3_BSWP)
@@ -196,6 +229,9 @@ static void
 lance_dma_write(lance_t *dev, uint32_t addr, const uint8_t *buf, int len)
 {
     uint8_t tmp[LANCE_BUF_MAX];
+
+    if (!lance_dma_check(dev, addr, len))
+        return;
 
     if (len > (int) sizeof(tmp))
         len = sizeof(tmp);
@@ -382,27 +418,35 @@ lance_transmit(lance_t *dev)
 {
     uint32_t ring_address = (dev->tx_ring_base + (dev->tx_ring_pos << 3)) & RING_ADDR_MASK;
     uint8_t  buf[LANCE_BUF_MAX];
-    int      length = 0;
+    int      length = 0;    /* 拷进 buf 的字节数，超过缓冲的部分只计数 */
+    int      total  = 0;    /* TMD2 声明的整包长度，用来判 BABL */
+    int      failed = 0;    /* 描述符链断掉 → BUFF/UFLO */
+    int      sent;
 
     memset(buf, 0x00, sizeof(buf));
 
     for (;;) {
         int tx_buf_length;
-        int remaining;
+        int copy;
 
         dev->tx_md[0] = lance_md_read(dev, ring_address | 0);
         dev->tx_md[2] = lance_md_read(dev, ring_address | 4);
         dev->tx_md[3] = 0x0000;
 
         tx_buf_length = dev->tx_md[2] & 0x0fff;
-        remaining     = LANCE_BUF_MAX - length;
-        if (tx_buf_length > remaining)
-            tx_buf_length = remaining;
+        total        += tx_buf_length;
 
-        if (tx_buf_length > 0)
+        copy = tx_buf_length;
+        if (copy > (int) sizeof(buf) - length)
+            copy = (int) sizeof(buf) - length;
+        if (copy > 0) {
+            lance_dbg("[LANCE] tx frag md0=%04X md1=%04X addr=%06X len=%d\n",
+                      dev->tx_md[0], dev->tx_md[1],
+                      lance_md_addr(dev->tx_md[0], dev->tx_md[1]), copy);
             lance_dma_read(dev, lance_md_addr(dev->tx_md[0], dev->tx_md[1]),
-                           &buf[length], tx_buf_length);
-        length += tx_buf_length;
+                           &buf[length], copy);
+        }
+        length += copy;
 
         dev->tx_md[1] &= (uint16_t) ~TMD1_OWN;
 
@@ -420,25 +464,46 @@ lance_transmit(lance_t *dev)
                 continue;
             }
 
-            /* The chain ran out of descriptors. */
+            /* 链上没有下一个描述符：芯片拉不到整包 → BUFF + UFLO，关发送器
+               （TRM 4.9.2：BFU/UFLO 会让 TXON 清零）。 */
             dev->tx_md[1] |= TMD1_ERR;
             dev->tx_md[3] |= TMD3_BUFF | TMD3_UFLO;
-            dev->csr[0] &= (uint16_t) ~CSR0_TXON;
+            dev->csr[0]   &= (uint16_t) ~CSR0_TXON;
+            failed         = 1;
             break;
         }
 
         break;
     }
 
-    if (length > 1518)
-        dev->csr[0] |= CSR0_BABL | CSR0_ERR;
+    if (failed) {
+        lance_dbg("[LANCE] tx aborted: BUFF/UFLO\n");
+        lance_tx_complete(dev, -1);
+        return;
+    }
 
-    if (length >= 14) {
+    /* 总线主周期没有得到 READY：发送器已被 MERR 关掉，整帧不发出。 */
+    if (dev->csr[0] & CSR0_MERR) {
+        lance_dbg("[LANCE] tx aborted: MERR\n");
+        dev->tx_md[1] |= TMD1_ERR;
+        lance_tx_complete(dev, -1);
+        return;
+    }
+
+    /* TRM 1-20：装到第 1519 个字节就置 BABL，但整包照发，发送器不关。 */
+    if (total > 1518) {
+        dev->csr[0] |= CSR0_BABL | CSR0_ERR;
+        lance_dbg("[LANCE] BABL (%d bytes)\n", total);
+    }
+
+    sent = (length > 1518) ? 1518 : length;
+
+    if (sent >= 14) {
         if (!(dev->mode & MODE_LOOP) && (dev->card != NULL)) {
-            network_tx(dev->card, buf, length);
-            lance_dbg("[LANCE] tx %d bytes\n", length);
+            network_tx(dev->card, buf, sent);
+            lance_dbg("[LANCE] tx %d bytes\n", sent);
         }
-        lance_tx_complete(dev, length);
+        lance_tx_complete(dev, sent);
     } else {
         lance_tx_complete(dev, -1);
     }
@@ -621,12 +686,9 @@ lance_csr_read(lance_t *dev, int reg)
     switch (reg) {
         case 0:
             ret = dev->csr[0];
-            if ((ret & CSR0_INEA) && (ret & (CSR0_TINT | CSR0_RINT |
-                                            CSR0_MERR | CSR0_MISS |
-                                            CSR0_CERR | CSR0_BABL | CSR0_ERR)))
-                ret |= CSR0_INTR;
-            /* reading CSR0 clears INTR */
+            /* 读 CSR0 清 INTR：驱动读完就处理，下一次事件再把线拉起来。 */
             dev->csr[0] &= (uint16_t) ~CSR0_INTR;
+            lance_irq_line(dev);
             break;
 
         case 3:
@@ -664,8 +726,8 @@ lance_csr_write(lance_t *dev, int reg, uint16_t val)
             /* TRM 1.9.2: command bits are write-one only ("the LANCE updates
                CSR0 by ORing the previous and present value"), so writing a
                zero must not clear INEA or TDMD.  STOP is the only bit that
-               clears the register. */
-            dev->csr[0] |= (uint16_t) (val & (CSR0_INEA | CSR0_TDMD));
+               clears the register.  INEA is applied after STRT/INIT because
+               TRM 1-21 forbids setting it while STOP is still set. */
 
             lance_dbg("[LANCE] CSR0 write %04X (IADR=%05X)\n", val, dev->init_addr);
 
@@ -696,6 +758,9 @@ lance_csr_write(lance_t *dev, int reg, uint16_t val)
                                   ((uint32_t) dev->csr[2] << 16)) & INIT_ADDR_MASK;
                 lance_init_block(dev);
             }
+            if (!(dev->csr[0] & CSR0_STOP))
+                dev->csr[0] |= (uint16_t) (val & CSR0_INEA);
+
             if ((val & CSR0_TDMD) && (dev->csr[0] & CSR0_TXON))
                 timer_set_delay_u64(&dev->tx_timer, 20 * TIMER_USEC);
             break;
