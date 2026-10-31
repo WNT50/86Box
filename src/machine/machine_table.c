@@ -6180,6 +6180,54 @@ const machine_t machines[] = {
         .net_device               = NULL,
         .aliases                  = { "" }
     },
+    /* Has IBM PS/2 Type 1 KBC firmware. */
+    {
+        .name              = "[ISA] IBM PS/2 model 25 SX (8525)",
+        .internal_name     = "ibmps2_m25_386sx",
+        .type              = MACHINE_TYPE_386SX,
+        .chipset           = MACHINE_CHIPSET_PROPRIETARY,
+        .init              = machine_ps2_m25_386sx_init,
+        .p1_handler        = machine_ps2_isa_p1_handler,
+        .gpio_handler      = NULL,
+        .available_flag    = MACHINE_AVAILABLE,
+        .gpio_acpi_handler = NULL,
+        .cpu               = {
+            .package     = CPU_PKG_386SX,
+            .block       = CPU_BLOCK_NONE,
+            .min_bus     = 16000000,
+            .max_bus     = 20000000,
+            .min_voltage = 0,
+            .max_voltage = 0,
+            .min_multi   = 0,
+            .max_multi   = 0
+        },
+        .bus_flags = MACHINE_PS2,
+        .flags     = MACHINE_IDE | MACHINE_VIDEO,
+        .ram       = {
+            .min  = 1024,
+            .max  = 12288,
+            .step = 1024
+        },
+        .nvrmask                  = 127,
+        .jumpered_ecp_dma         = 0,
+        .default_jumpered_ecp_dma = -1,
+        .kbc_device               = &kbc_at_device,
+        .kbc_params               = 0x00000000,
+        .nvr_device               = &nvr_at_device,
+        .nvr_params               = NVR_PS,
+        .sio_device               = NULL,
+        .sio_params               = 0x00000000,
+        .kbc_p1                   = 0x00000cf0,
+        .gpio                     = 0xffffffff,
+        .gpio_acpi                = 0xffffffff,
+        .device                   = NULL,
+        .kbd_device               = NULL,
+        .fdc_device               = NULL,
+        .vid_device               = NULL,
+        .snd_device               = NULL,
+        .net_device               = NULL,
+        .aliases                  = { "" }
+    },
     /* Has NCR KBC firmware. */
     {
         .name              = "[ISA] NCR PC916SX",

@@ -1719,11 +1719,12 @@ extern const device_t  ps2_m25_hdc_device;
 #ifdef EMU_DEVICE_H
 extern const device_t  ps2_m25_device;
 extern const device_t  ps2_m30_device;
-extern const device_t  ps2_m30_286_device;
 extern const device_t  ibm7690_device;
+extern const device_t  ps2_m30_286_device;
 #endif
 extern int             machine_ps2_8086_init(const machine_t *);
 extern int             machine_ps2_m30_286_init(const machine_t *);
+extern int             machine_ps2_m25_386sx_init(const machine_t *);
 
 /* m_ps2_mca.c */
 #ifdef EMU_DEVICE_H
