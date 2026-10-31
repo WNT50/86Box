@@ -46,7 +46,7 @@
    space read slots 0x1B-0x45 of the table. */
 #define PCX_MMU_WIN_FROM 0x0020
 #define PCX_MMU_WIN_TO   0x004a
-#define PCX_MMU_WIN_OFF  3
+#define PCX_MMU_WIN_OFF  5
 
 typedef struct {
     uint16_t ctl;
@@ -90,12 +90,23 @@ pcx_mmu_index(uint16_t ctl, uint32_t addr)
        loader itself touches (0x20-0x4A), while the low pages are an identity
        map.  Both halves come from the same table, so the window offset is part
        of the addressing, not of the entries. */
-    if ((page >= PCX_MMU_WIN_FROM) && (page <= PCX_MMU_WIN_TO))
+    (void) ctl;
+
+    /* The loader leaves pages 0x1B-0x1F of its table empty and starts the
+       mapping at slot 0x20, which it fills with physical page 0x1B: every
+       entry therefore sits five slots below the page it describes.  Three
+       far calls into its port-stub library land exactly on a stub boundary
+       only with that shift --
+
+         0x10B2E -> 0xE32E  mov bx,sp; mov dx,[bx+4]; in al,dx; retf
+         0x10B41 -> 0xE341  mov bx,sp; ...
+         0x103FE -> 0xDBFE  mov dx,0xF821; out dx,al; ... retf
+
+       -- so the shift is part of the addressing, not of the entries. */
+    if (page >= PCX_MMU_WIN_OFF)
         page -= PCX_MMU_WIN_OFF;
 
-    if (pcx_mmu.type == PCX_MMU_SINIX12)
-        return (int) ((page & 0xff) | ((ctl & 0x18) << 5));
-    return (int) ((page & 0x7f) | ((ctl & 0x1c) << 5));
+    return (int) (page & (PCX_MMU_PAGES - 1));
 }
 
 /* Returns the physical address, or 0xffffffff when the access faults.  Called
