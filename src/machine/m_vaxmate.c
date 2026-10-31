@@ -557,7 +557,7 @@ machine_at_vaxmate_init(const machine_t *model)
     /* 扩展箱 RCD31-EA：WD2010 @ 01F0-01F7 / IRQ14，20 MB MFM（615/4/17）。
        控制器在扩展箱里，与主机板一起出现，故无条件上设备；盘片由
        [Hard disks] 段的 hdd_01_* 提供，没有镜像时驱动按“无盘”处理。 */
-    device_add(&st506_wd2010_device);
+    device_add(&st506_at_wd2010_device);
 
     io_sethandler(0x0c00, 0x0020,
                   vaxmate_csr_in, NULL, NULL,
