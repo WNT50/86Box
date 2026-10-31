@@ -365,6 +365,10 @@ kbc_at_irq(void *priv)
 {
     atkbc_t *dev = (atkbc_t *) priv;
 
+    if (getenv("KBC_DBG") != NULL)
+        pclog("KBCIRQ: do_irq=%d irq0=%04X irq1=%04X ch=%d status=%02X\n",
+              dev->do_irq, dev->irq[0], dev->irq[1], dev->channel, dev->status);
+
     if (dev->do_irq) {
         /* WARNING: On PS/2, all IRQ's are level-triggered, but the IBM PS/2 KBC firmware is explicitly
                     written to pulse its P2 IRQ bits, so they should be kept as as edge-triggered here. */
@@ -393,6 +397,8 @@ kbc_at_irq(void *priv)
 static void
 kbc_do_irq(atkbc_t *dev)
 {
+    if (getenv("KBC_DBG") != NULL)
+        pclog("KBCDOIRQ: is_asic=%d irq0=%04X\n", dev->is_asic, dev->irq[0]);
     if (dev->is_asic)
         kbc_at_irq(dev);
     else
@@ -431,12 +437,22 @@ kbc_send_to_ob(atkbc_t *dev, uint8_t val, uint8_t channel, uint8_t stat_hi)
         } else if (dev->mem[0x20] & 0x01)
             kbc_set_do_irq(dev, channel);
     } else if (dev->mem[0x20] & 0x01) {
-        /* AT KBC: IRQ 1 is level-triggered because it is tied to OBF. */
-        if (dev->irq[0] != 0xffff) {
+        if (kbc_ven == KBC_VEN_HP_VECTRA) {
+            /* The 8041 drives the third 8259, not the CPU's IRQ 1: its
+               output is wired to the master's IRQ 1, and the ROM's handler
+               for line 1 (vector 69h) acknowledges and calls int 9h. */
+            pic3_int(1, 1);
+        } else if (dev->irq[0] != 0xffff) {
+            /* AT KBC: IRQ 1 is level-triggered because it is tied to OBF. */
             picintlevel(1 << dev->irq[0], &dev->irq_state);
             fdc37mx0x_watchdog_reset_ext(1);
         }
     }
+
+    if (getenv("KBC_DBG") != NULL)
+        pclog("KBCSEND: val=%02X ch=%d p2=%02X irq0=%04X ven=%d state=%d\n",
+              temp, channel, dev->mem[0x20], dev->irq[0], dev->flags & KBC_VEN_MASK,
+              dev->irq_state);
 
     kbc_do_irq(dev);
 
@@ -2935,7 +2951,9 @@ kbc_at_port_1_read(uint16_t port, void *priv)
        TODO: IRQ is only tied to OBF on the AT KBC, on the PS/2 KBC, it is controlled by a P2 bit.
        This also means that in AT mode, the IRQ is level-triggered.
      */
-    if (!(dev->misc_flags & FLAG_PS2) && (dev->irq[0] != 0xffff))
+    if ((dev->flags & KBC_VEN_MASK) == KBC_VEN_HP_VECTRA)
+        pic3_int(1, 0);
+    else if (!(dev->misc_flags & FLAG_PS2) && (dev->irq[0] != 0xffff))
         picintclevel(1 << dev->irq[0], &dev->irq_state);
 
     kbc_at_log("ATkbc: [%04X:%08X] read (%04X) = %02X\n",  CS, cpu_state.pc, port, ret);
