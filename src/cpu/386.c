@@ -331,7 +331,9 @@ exec386_2386(int32_t cycs)
                                                     (cpu_state.pc == 0x078aa) || (cpu_state.pc == 0x07465) ||
                                                     (cpu_state.pc == 0x07d0a) || (cpu_state.pc == 0x07b32) ||
                                                     (cpu_state.pc == 0x0756f) || (cpu_state.pc == 0x07599) ||
-                                                    (cpu_state.pc == 0x075ad)))
+                                                    (cpu_state.pc == 0x075ad) ||
+                                                    (cpu_state.pc == 0x0552d) || (cpu_state.pc == 0x055a4) ||
+                                                    (cpu_state.pc == 0x0559e)))
                         pclog("HILBP: %04X:%04X ds=%04X ax=%04X sp=%04X\n", CS, cpu_state.pc, DS, AX, SP);
                 }
 
