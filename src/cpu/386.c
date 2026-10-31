@@ -304,6 +304,18 @@ exec386_2386(int32_t cycs)
                 if (in_smm)
                     x386_log("[%04X:%08X] %08X\n", CS, cpu_state.pc, fetchdat);
 #endif
+                /* EPOCH_HIL_BP: temporary probe for the HP Vectra POST -- logs
+                   when the ROM reaches the HIL dispatch entry (82F3), the
+                   service entry (87D0) or the only "device present" store
+                   (83CA).  Remove once POST gets past F000:92AB. */
+                {
+                    static int bp_on = -1;
+                    if (bp_on < 0)
+                        bp_on = (getenv("EPOCH_HIL_BP") != NULL) ? 1 : 0;
+                    if (bp_on && (CS == 0x0f000) && ((cpu_state.pc == 0x082f3) || (cpu_state.pc == 0x083ca) || (cpu_state.pc == 0x087d0)))
+                        pclog("HILBP: %04X:%04X ds=%04X ax=%04X sp=%04X\n", CS, cpu_state.pc, DS, AX, SP);
+                }
+
                 opcode = fetchdat & 0xFF;
                 fetchdat >>= 8;
                 trap = (trap & ~1) | (!!(cpu_state.flags & T_FLAG));
