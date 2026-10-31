@@ -42,6 +42,11 @@
 #define PCX_MMU_PAGES    1024                      /* 1 MB / 1 KB */
 #define PCX_MMU_PGSIZE   0x400
 #define PCX_MMU_WINDOW   0x80000                   /* MAME translates 0-0x7FFFF */
+/* Window the loader maps its own image through: pages 0x20-0x4A of the address
+   space read slots 0x1B-0x45 of the table. */
+#define PCX_MMU_WIN_FROM 0x0020
+#define PCX_MMU_WIN_TO   0x004a
+#define PCX_MMU_WIN_OFF  5
 
 typedef struct {
     uint16_t ctl;
@@ -78,6 +83,15 @@ static int
 pcx_mmu_index(uint16_t ctl, uint32_t addr)
 {
     uint32_t page = addr >> 10;
+
+    /* The table the loader builds is not indexed by the plain page number: it
+       maps its own image, which sits at, physical 0x36_00, through a window
+       that starts five pages lower, i.e. slot = page - 5 for everything the
+       loader itself touches (0x20-0x4A), while the low pages are an identity
+       map.  Both halves come from the same table, so the window offset is part
+       of the addressing, not of the entries. */
+    if ((page >= PCX_MMU_WIN_FROM) && (page <= PCX_MMU_WIN_TO))
+        page -= PCX_MMU_WIN_OFF;
 
     if (pcx_mmu.type == PCX_MMU_SINIX12)
         return (int) ((page & 0xff) | ((ctl & 0x18) << 5));
