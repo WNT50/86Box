@@ -1198,10 +1198,12 @@ pic3_int(uint8_t line, int set)
     if (line > 7)
         return;
 
+    /* The IRR is edge-latched: raising the line latches a request, and
+       dropping the line again must NOT withdraw it -- only an INTA does
+       that (pic_acknowledge).  Clearing it here loses requests whenever a
+       device lowers the line before the CPU has acknowledged. */
     if (set)
         pic3.irr |= (uint8_t) (1 << line);
-    else
-        pic3.irr &= (uint8_t) ~(1 << line);
 
     if (getenv("EPOCH_HIL_TRACE"))
         pclog("PIC3: line=%u set=%d irr=%02X imr=%02X isr=%02X | m-irr=%02X m-imr=%02X m-isr=%02X\n",
