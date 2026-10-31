@@ -101,6 +101,7 @@ typedef struct hp_hil_t {
     uint8_t kbd_addr;     /* 0 = not configured yet */
     uint8_t kbd_id;
     uint8_t kbd_passthru;
+    uint8_t scan_reported;
 
     pc_timer_t tick;
 } hp_hil_t;
@@ -185,10 +186,11 @@ hp_hil_link_scan(void)
        ACF/IDD itself, that is the 8041's job), so the scan finds no device.
        Report it the way the MLC does: a frame error in R2 and LERR in R3,
        with INT raised so the System comes and looks. */
-    /* Only report it once: the flag stays up until the System reads it, so a
-       second reset command must not raise INT again (that would loop). */
-    if (dev->r3 & HIL_R3_LERR)
+    /* Only report once per error: the status is cleared when the System reads
+       R2, and the next reset command arms it again. */
+    if (dev->scan_reported)
         return;
+    dev->scan_reported = 1;
 
     dev->r2 |= HIL_R2_FERR;
     dev->r3 |= HIL_R3_LERR;
@@ -422,6 +424,12 @@ hp_hil_read(uint16_t port, void *priv)
         case 0x006e: /* R2: parity, frame and overflow errors */
             ret     = dev->r2;
             dev->r2 = 0x00;
+            /* Reading the error status acknowledges it: the next reset
+               command may raise INT again. */
+            if (dev->scan_reported) {
+                dev->scan_reported = 0;
+                dev->r3 &= (uint8_t) ~HIL_R3_LERR;
+            }
             break;
 
         case 0x006f: /* R3: INT/NMI/LERR; reading it does not drop INT */
