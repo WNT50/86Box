@@ -34,3 +34,5 @@ extern int  lance_get_irq_gate(void *priv);
 extern const device_t vaxmate_lance_device;
 
 #endif /*NET_LANCE_H*/
+
+extern const device_t ne2100_device;

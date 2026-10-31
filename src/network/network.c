@@ -63,6 +63,7 @@
 #include <86box/ui.h>
 #include <86box/timer.h>
 #include <86box/network.h>
+#include <86box/net_lance.h>
 #include <86box/net_ne2000.h>
 #include <86box/net_pcnet.h>
 #include <86box/net_wd8003.h>
@@ -96,6 +97,7 @@ static const NETWORK_CARD net_cards[] = {
     { &ne2000_compat_8bit_device  },
     { &ne1000_device              },
     { &ne2000_device              },
+    { &ne2100_device              },
     { &rtl8019as_pnp_device       },
     { &wd8003e_device             },
     { &wd8003eb_device            },
