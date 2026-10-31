@@ -287,10 +287,19 @@ hp_hil_kbd_frame(uint16_t frame)
     command = (frame >> 11) & 1;
 
     /* Loop-Back Mode closes the end of the link: whatever arrives is handed
-       straight back, which is what the System's self test looks for. */
+       straight back, which is what the System's self test looks for.  A
+       Device Hard Reset is the exception - it is link-wide, every device acts
+       on it, and handing it back would make the System read its own reset as
+       a reply (and send another one, forever). */
     if (dev->loop) {
-        hp_hil_fifo_push(frame);
-        return;
+        if (!((addr == 0) && command && (data == HIL_DHR)))
+            hp_hil_fifo_push(frame);
+
+        /* A loop-back device hands the frame back, and link-wide commands
+           (address 0: reset, interface clear, address assignment) are still
+           meant for it - that is how it gets an address in the first place. */
+        if (!command || (addr != 0))
+            return;
     }
 
     if (!command)
