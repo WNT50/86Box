@@ -526,19 +526,38 @@ machine_at_vaxmate_init(const machine_t *model)
     device_add(&vaxmate_video_device);
     device_add(&lance_device);
 
-    /* AT 兼容的 RTC/CMOS。VAXmate 主机的配置存在 0x0C00 的串行 NVM 里，
-       但 BIOS 仍按 AT 惯例从 CMOS 0x12 取固定盘类型（高半字节 = 0 号盘，
-       低半字节 = 1 号盘），见 F000:F4AC5 的 mov al,0x92 / in al,0x71。
-       类型 2 在 ROM 内置参数表（F000:E401 + (type-1)*16）里正好是
-       615 柱面 / 4 磁头 / 17 扇区，也就是扩展箱里的 RD31。 */
+    /* AT 兼容的 RTC/CMOS。BIOS 在 F000:4AC5 用 mov al,0x92 / in al,0x71
+       把 CMOS 0x12 读到 [0x549]，再由 F000:4E19-4E31 逐半字节计数：
+       半字节 != 0 就算一块盘（注意不是 IBM 的 "= 0Fh 即无盘"）。
+       类型 2 对应 ROM 参数表（F000:E401 + (type-1)*16）里的
+       615 柱面 / 4 磁头 / 17 扇区，即扩展箱里的 RD31。
+
+       这条路只有在 F000:4AB2 的闸门通过时才会走：
+           [0x36F] bit0 == 0  且  [0x30D] bit6 == 0
+       而 [0x30D] bit6 是 F000:53CC 的 CMOS 校验结果（置位 = 配置无效），
+       无效时 F000:510A 会用 RAM 0x40:0x310 的默认镜像整块重写
+       CMOS 0x10-0x2D（其中 0x12 = FFh），结果必然是两块盘。
+       所以这里除了写 0x12，还必须把 0x2E/0x2F 校验补齐：
+           sum(CMOS 0x10..0x2D) == 0x2E + 0x2F  (8 位)
+       否则我们自己写的 0x12 每次 POST 都会被默认镜像覆盖。 */
     nvr_t *nvr = device_add(&nvr_at_device);
-    if (nvr != NULL)
+    if (nvr != NULL) {
+        /* 高半字节 = 0 号盘类型 2（615/4/17），低半字节 = 0 表示没有 1 号盘。 */
         nvr->regs[0x12] = 0x20;
+
+        /* 按 F000:53CC 的算法补校验，使 POST 认这份 CMOS 有效，
+           从而跳过 F000:510A 的默认镜像重写。 */
+        uint16_t sum = 0;
+        for (int i = 0x10; i <= 0x2d; i++)
+            sum += nvr->regs[i];
+        nvr->regs[0x2e] = 0x00;
+        nvr->regs[0x2f] = (uint8_t) (sum & 0xff);
+    }
 
     /* 扩展箱 RCD31-EA：WD2010 @ 01F0-01F7 / IRQ14，20 MB MFM（615/4/17）。
        控制器在扩展箱里，与主机板一起出现，故无条件上设备；盘片由
        [Hard disks] 段的 hdd_01_* 提供，没有镜像时驱动按“无盘”处理。 */
-    device_add(&st506_at_wd2010_device);
+    device_add(&st506_wd2010_device);
 
     io_sethandler(0x0c00, 0x0020,
                   vaxmate_csr_in, NULL, NULL,
