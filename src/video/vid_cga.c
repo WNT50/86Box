@@ -74,14 +74,16 @@ cga_gfx_bank(cga_t *cga)
 {
     int cell = cga->crtc[CGA_CRTC_MAX_SCANLINE_ADDR] & 0x1f;
 
+    int page = cga->gfx_page ? 0x4000 : 0x0000;
+
     if (cell >= 3) {
         if (cga->gfx400)
-            return (cga->scanline & 3) * 0x2000;
+            return page + ((cga->scanline & 3) * 0x2000);
 
-        return ((cga->scanline >> 1) & 1) * 0x2000;
+        return page + (((cga->scanline >> 1) & 1) * 0x2000);
     }
 
-    return (cga->scanline & 1) * 0x2000;
+    return page + ((cga->scanline & 1) * 0x2000);
 }
 
 /* Cards with a different master oscillator (the HP 45981A runs its 400 line
@@ -416,6 +418,9 @@ cga_render(cga_t *cga, int line)
     uint16_t dat;
     int      cols[4];
     int      col;
+    int      underlined;
+    const int underrow = cga->underline &&
+                         (cga->scanline == (cga->crtc[CGA_CRTC_MAX_SCANLINE_ADDR] & 0x1f));
 
     int32_t  highres_graphics_flag = (CGA_MODE_FLAG_HIGHRES_GRAPHICS | CGA_MODE_FLAG_GRAPHICS);
     bool     overlay_flag          = ((cga->cgamode & highres_graphics_flag) == highres_graphics_flag);
@@ -444,9 +449,16 @@ cga_render(cga_t *cga, int line)
             } else
                 cols[0] = (attr >> 4) + 16;
 
+            /* Underline enable: characters with a foreground colour of 1 are
+               drawn in colour 7 and get an underline on the last scanline. */
+            underlined = cga->underline && ((attr & 0x07) == 0x01);
+            if (underlined)
+                cols[1] = 16 + ((attr & 0x08) | 0x07);
+
             for (column = 0; column < 8; column++) {
                 buffer32->line[line][(x * 8) + column + 8]
-                    = cols[(cga_glyph_row(cga, chr, cga->scanline) & (1 << (column ^ 7))) ? 1 : 0] ^ (drawcursor ? 0b1111 : 0);
+                    = ((underrow && underlined) ? cols[1]
+                                                : cols[(cga_glyph_row(cga, chr, cga->scanline) & (1 << (column ^ 7))) ? 1 : 0]) ^ (drawcursor ? 0b1111 : 0);
                 
                 if (cga_lightpen_enabled && !cga->lp_latch_found && mouse_tablet_in_proximity > 0 && cga_is_in_lightpen(cga, (x * 8) + column + 8, line)) {
                     cga->lp_latch_found_y = line;
@@ -474,10 +486,15 @@ cga_render(cga_t *cga, int line)
             } else
                 cols[0] = (attr >> 4) + 16;
 
+            underlined = cga->underline && ((attr & 0x07) == 0x01);
+            if (underlined)
+                cols[1] = 16 + ((attr & 0x08) | 0x07);
+
             for (column = 0; column < 8; column++) {
                 buffer32->line[line][(x * 16) + (column << 1) + 8]
                     = buffer32->line[line][(x * 16) + (column << 1) + 8 + 1]
-                    = (cols[(cga_glyph_row(cga, chr, cga->scanline) & (1 << (column ^ 7))) ? 1 : 0] ^ (drawcursor ? 0b1111 : 0));
+                    = (((underrow && underlined) ? cols[1]
+                                                 : cols[(cga_glyph_row(cga, chr, cga->scanline) & (1 << (column ^ 7))) ? 1 : 0]) ^ (drawcursor ? 0b1111 : 0));
 
                 
                 if (cga_lightpen_enabled && !cga->lp_latch_found && mouse_tablet_in_proximity > 0 && (cga_is_in_lightpen(cga, (x * 16) + (column << 1) + 8, line) || cga_is_in_lightpen(cga, (x * 16) + (column << 1) + 8 + 1, line))) {
