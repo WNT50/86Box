@@ -53,6 +53,8 @@ enum {
 pic_t pic;
 pic_t pic2;
 pic_t pic3;
+/* Set once the machine has a third 8259, so pic_reset() can re-attach it. */
+static int pic3_attached;
 int cascade = 0;
 
 static int shadow = 0;
@@ -444,6 +446,12 @@ pic_reset(void)
 
     pic.is_master = 1;
     pic.interrupt = pic2.interrupt = 0x17;
+
+    /* The third 8259 is wired to the master outside this reset path, but the
+       memset above clears pic.slaves[]: put it back or a machine reset would
+       silently detach it and its IRQs (16-23) would never reach the CPU. */
+    if (pic3_attached)
+        pic_attach_slave(&pic3, 1);
 
     if (!cascade) {
         pic2.is_master = 1;
@@ -1137,6 +1145,37 @@ pic3_init(void)
        alone would leave master_irq at 0 and feed this PIC into IRQ 0. */
     io_sethandler(0x007c, 0x0002, pic_read, NULL, NULL, pic_write, NULL, NULL, &pic3);
     pic_attach_slave(&pic3, 1);
+    pic3_attached = 1;
+}
+
+/* Third 8259 (HP Vectra): its inputs are IRQ 16-23, so they are outside the
+   0-15 numbering picint() understands. Set the line here and let pic_notify()
+   propagate it through the cascade input recorded in master_irq. */
+void
+pic3_int(uint8_t line, int set)
+{
+    if (line > 7)
+        return;
+
+    if (set)
+        pic3.irr |= (uint8_t) (1 << line);
+    else
+        pic3.irr &= (uint8_t) ~(1 << line);
+
+    if (getenv("EPOCH_HIL_TRACE"))
+        pclog("PIC3: line=%u set=%d irr=%02X imr=%02X isr=%02X | m-irr=%02X m-imr=%02X m-isr=%02X\n",
+              line, set, pic3.irr, pic3.imr, pic3.isr, pic.irr, pic.imr, pic.isr);
+    if (getenv("EPOCH_HIL_TRACE"))
+        pclog("PIC3 dbg: state=%d icw2=%02X at=%d wired=%d registered=%d at_updater=%d\n",
+              pic3.state, pic3.icw2, pic3.at, pic3.master_irq,
+              pic.slaves[pic3.master_irq] == &pic3,
+              update_pending == pic_update_pending_at);
+
+    pic_notify();
+
+    if (getenv("EPOCH_HIL_TRACE"))
+        pclog("PIC3 after: irr=%02X isr=%02X pend=%d | m-irr=%02X m-isr=%02X m-pend=%d\n",
+              pic3.irr, pic3.isr, pic3.int_pending, pic.irr, pic.isr, pic.int_pending);
 }
 
 static void
@@ -1385,6 +1424,10 @@ pic_irq_ack(void)
 {
     uint8_t ret;
 
+    if (getenv("EPOCH_HIL_TRACE"))
+        pclog("ACK: intr=%02X m-irr=%02X m-isr=%02X p3-irr=%02X p3-isr=%02X\n",
+              pic.interrupt, pic.irr, pic.isr, pic3.irr, pic3.isr);
+
     /* Needed for Xi8088. */
     if ((pic.ack_bytes == 0) && pic.int_pending && pic_slave_on(&pic, pic.interrupt)) {
         if (!pic.slaves[pic.interrupt]->int_pending) {
@@ -1414,6 +1457,10 @@ int
 picinterrupt(void)
 {
     int ret = -1;
+
+    if (getenv("EPOCH_HIL_TRACE"))
+        pclog("INTA: intr=%02X m-irr=%02X m-isr=%02X p3-irr=%02X p3-isr=%02X p3-pend=%d\n",
+              pic.interrupt, pic.irr, pic.isr, pic3.irr, pic3.isr, pic3.int_pending);
 
     if (pic.int_pending) {
         if (pic_slave_on(&pic, pic.interrupt)) {
@@ -1460,5 +1507,7 @@ picinterrupt(void)
         }
     }
 
+    if (getenv("EPOCH_HIL_TRACE"))
+        pclog("INTA ret=%02X\n", ret);
     return ret;
 }
