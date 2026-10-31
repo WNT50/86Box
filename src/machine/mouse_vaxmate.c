@@ -124,6 +124,8 @@ vaxmate_mouse_selftest(vaxmate_mouse_t *dev)
     vaxmate_mouse_queue(dev, 0x00); /* no button stuck */
 }
 
+static void vaxmate_mouse_pull(void *priv);
+
 /* A byte written by the CPU to the USART transmit register. */
 static void
 vaxmate_mouse_command(void *priv, uint8_t val)
@@ -161,6 +163,23 @@ vaxmate_mouse_command(void *priv, uint8_t val)
 
         default:
             break;
+    }
+
+    /* 命令的回应要立刻进串口：POST 的轮询循环只有 64K 次迭代，
+       等不到下一个定时器节拍。 */
+    vaxmate_mouse_pull(dev);
+}
+
+/* 串口把收到的字符交给 CPU 后立刻补下一个：真机 4800 baud 是 208 us
+   一个字，POST 的自检循环等不起一个定时器节拍。 */
+static void
+vaxmate_mouse_pull(void *priv)
+{
+    vaxmate_mouse_t *dev = (vaxmate_mouse_t *) priv;
+
+    if ((dev->q_head != dev->q_tail) && scn26x1_rx_free(dev->uart)) {
+        scn26x1_rx_byte(dev->uart, dev->queue[dev->q_head]);
+        dev->q_head = (dev->q_head + 1) % MOUSE_QUEUE;
     }
 }
 
@@ -208,6 +227,7 @@ vaxmate_mouse_init(const device_t *info)
     }
 
     scn26x1_set_tx_handler(dev->uart, vaxmate_mouse_command, dev);
+    scn26x1_set_rx_pull_handler(dev->uart, vaxmate_mouse_pull, dev);
 
     dev->mode    = MOUSE_MODE_PROMPT;
     dev->buttons = 0;

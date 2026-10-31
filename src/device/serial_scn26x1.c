@@ -121,6 +121,8 @@ struct scn26x1_t {
     void      *irq_priv;
     void     (*tx_handler)(void *priv, uint8_t val);
     void      *tx_priv;
+    void     (*rx_pull)(void *priv);
+    void      *rx_pull_priv;
     pc_timer_t timer;
     void      *log;
 };
@@ -249,6 +251,8 @@ scn26x1_read(uint16_t port, void *priv)
             ret          = dev->rdr;
             dev->rx_full = 0;
             scn26x1_update_irq(dev);
+            if (dev->rx_pull != NULL)
+                dev->rx_pull(dev->rx_pull_priv);
             break;
 
         case SCN_SR:
@@ -513,3 +517,10 @@ const device_t scn26x1_device = {
     .force_redraw  = NULL,
     .config        = scn26x1_config
 };
+
+void
+scn26x1_set_rx_pull_handler(scn26x1_t *dev, void (*cb)(void *priv), void *priv)
+{
+    dev->rx_pull      = cb;
+    dev->rx_pull_priv = priv;
+}
