@@ -3739,7 +3739,7 @@ const machine_t machines[] = {
            smallest configuration that boots is 640 KB.  The board was also
            sold with 256 and 512 KB fitted; those are not modelled yet. */
         .ram       = {
-            .min  = 640,
+            .min  = 256, /* factory fit; the POST sizes whatever is there */
             .max  = 1024,
             .step = 128
         },

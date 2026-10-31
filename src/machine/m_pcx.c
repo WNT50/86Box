@@ -490,8 +490,14 @@ machine_pcx_init(const machine_t *model)
                             NULL, MEM_MAPPING_INTERNAL, NULL);
         }
 
-        /* RAM above the fitted size, up to the video window. */
+        /* RAM above the fitted size, up to the video window.  Its state has to
+           be opened here too: the POST sizes the memory by writing to each
+           64 KB block and waiting for the bus timeout, so a block that is not
+           marked internal swallows the write instead of raising the NMI, the
+           walk runs on to A0000h and every board reports 640 KB. */
         if (ram_limit < PCX_VRAM_BASE) {
+            mem_set_mem_state_both(ram_limit, PCX_VRAM_BASE - ram_limit,
+                                   MEM_READ_INTERNAL | MEM_WRITE_INTERNAL);
             mem_mapping_add(&pcx.hole_map, ram_limit, PCX_VRAM_BASE - ram_limit,
                             pcx_nmi_readb, pcx_nmi_readw, pcx_nmi_readl,
                             pcx_nmi_writeb, pcx_nmi_writew, pcx_nmi_writel,
