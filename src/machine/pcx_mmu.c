@@ -86,7 +86,7 @@ pcx_mmu_index(uint16_t ctl, uint32_t addr)
 
     /* The table the loader builds is not indexed by the plain page number: it
        maps its own image, which sits at, physical 0x36_00, through a window
-       that starts five pages lower, i.e. slot = page - 5 for everything the
+       that starts three pages lower, i.e. slot = page - 3 for everything the
        loader itself touches (0x20-0x4A), while the low pages are an identity
        map.  Both halves come from the same table, so the window offset is part
        of the addressing, not of the entries. */
