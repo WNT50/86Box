@@ -607,8 +607,11 @@ lance_csr_write(lance_t *dev, int reg, uint16_t val)
                 break;
             }
 
-            dev->csr[0] = (uint16_t) ((dev->csr[0] & ~(CSR0_INEA | CSR0_TDMD)) |
-                                      (val & (CSR0_INEA | CSR0_TDMD)));
+            /* TRM 1.9.2: command bits are write-one only ("the LANCE updates
+               CSR0 by ORing the previous and present value"), so writing a
+               zero must not clear INEA or TDMD.  STOP is the only bit that
+               clears the register. */
+            dev->csr[0] |= (uint16_t) (val & (CSR0_INEA | CSR0_TDMD));
 
             lance_dbg("[LANCE] CSR0 write %04X (IADR=%05X)\n", val, dev->init_addr);
 
@@ -632,6 +635,8 @@ lance_csr_write(lance_t *dev, int reg, uint16_t val)
                 timer_set_delay_u64(&dev->tx_timer, 20 * TIMER_USEC);
             }
             if (val & CSR0_INIT) {
+                /* Setting INIT (or STRT) also clears STOP, TRM 1.9.2. */
+                dev->csr[0] &= (uint16_t) ~CSR0_STOP;
                 dev->csr[0] |= CSR0_INIT;
                 dev->init_addr = ((uint32_t) dev->csr[1] |
                                   ((uint32_t) dev->csr[2] << 16)) & INIT_ADDR_MASK;
