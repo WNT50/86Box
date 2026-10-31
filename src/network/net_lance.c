@@ -93,6 +93,9 @@
 #define RMD1_ENP           0x0100
 #define RMD1_STP           0x0200
 #define RMD1_BUFF          0x0400
+#define RMD1_CRC           0x0800
+#define RMD1_OFLO          0x1000
+#define RMD1_FRAM          0x2000
 #define RMD1_ERR           0x4000
 #define RMD1_OWN           0x8000
 
@@ -329,16 +332,26 @@ lance_inject(void *priv)
         0x08, 0x00,                            /* EtherType IP */
         0x45, 0x00, 0x00, 0x2e
     };
-    uint8_t buf[64];
+    uint8_t buf[LANCE_BUF_MAX];
+    int     inject_length = 64;
 
     if (dev->card == NULL)
         return;
 
-    memcpy(buf, frame, sizeof(buf));
+    if (getenv("LANCE_INJ_LEN") != NULL) {
+        inject_length = atoi(getenv("LANCE_INJ_LEN"));
+        if (inject_length < 14)
+            inject_length = 14;
+        if (inject_length > 1518)
+            inject_length = 1518;
+    }
+
+    memset(buf, 0x00, sizeof(buf));
+    memcpy(buf, frame, sizeof(frame));
     memcpy(buf, dev->padr, 6);
 
-    lance_dbg("[LANCE] inject %d bytes\n", (int) sizeof(buf));
-    lance_rx_complete(dev, lance_receive(dev, buf, sizeof(buf)));
+    lance_dbg("[LANCE] inject %d bytes\n", inject_length);
+    lance_rx_complete(dev, lance_receive(dev, buf, inject_length));
 }
 
 static void
@@ -459,17 +472,54 @@ lance_tx_poll(void *priv)
     lance_transmit(dev);
 }
 
+/* CRC-32 的位反射多项式；与以太网 FCS 相同（init/取反都是 0xFFFFFFFF）。 */
+static uint32_t
+lance_crc32(const uint8_t *p, int length)
+{
+    uint32_t crc = 0xffffffff;
+    int      i, bit;
+
+    for (i = 0; i < length; i++) {
+        crc ^= p[i];
+        for (bit = 0; bit < 8; bit++)
+            crc = (crc >> 1) ^ (0xedb88320 & (uint32_t) -(int32_t) (crc & 1));
+    }
+
+    return ~crc;
+}
+
 static int
 lance_receive(lance_t *dev, uint8_t *buf, int length)
 {
+    uint8_t  frame[LANCE_BUF_MAX + 4];
     uint32_t ring_address;
+    uint32_t fcs;
     int      offset = 0;
 
     if (!(dev->csr[0] & CSR0_RXON) || (dev->mode & MODE_DRX))
         return -1;
 
+    /* 手册 1.8：含 FCS 不足 64 字节的 runt 帧整帧丢弃，不占用描述符。 */
+    if ((length + 4) < 64)
+        return -1;
+
+    /* 超长帧（jabber）同样丢弃。 */
+    if (length > 1518)
+        return -1;
+
     if (!lance_address_filter(dev, buf, length))
         return -1;
+
+    /* 真芯片把 FCS 一并写进接收缓冲区，MCNT 也含这 4 个字节。 */
+    memcpy(frame, buf, length);
+    fcs = lance_crc32(buf, length);
+    lance_dbg("[LANCE] rx %d bytes fcs=%08x\n", length, fcs);
+    frame[length + 0] = (uint8_t) (fcs >> 0);
+    frame[length + 1] = (uint8_t) (fcs >> 8);
+    frame[length + 2] = (uint8_t) (fcs >> 16);
+    frame[length + 3] = (uint8_t) (fcs >> 24);
+    buf    = frame;
+    length += 4;
 
     ring_address  = (dev->rx_ring_base + (dev->rx_ring_pos << 3)) & RING_ADDR_MASK;
     dev->rx_md[1] = lance_md_read(dev, ring_address | 2);
@@ -512,7 +562,8 @@ lance_receive(lance_t *dev, uint8_t *buf, int length)
                 ring_address     = next_addr;
                 dev->rx_md[1]    = next_md1;
             } else {
-                dev->rx_md[1] |= RMD1_ERR | RMD1_BUFF;
+                /* 没有可用的下一个缓冲区，剩余的包体丢失。 */
+                dev->rx_md[1] |= RMD1_ERR | RMD1_BUFF | RMD1_OFLO;
                 break;
             }
         }
@@ -535,11 +586,14 @@ lance_rx_complete(lance_t *dev, int result)
     ring_address = (dev->rx_ring_base + (dev->rx_ring_pos << 3)) & RING_ADDR_MASK;
 
     if (result == -2) {
+        lance_dbg("[LANCE] rx miss (no owned descriptor), csr0=%04x\n",
+                  (unsigned) (dev->csr[0] | CSR0_ERR | CSR0_MISS));
         dev->csr[0] |= CSR0_ERR | CSR0_MISS;
     } else {
         lance_md_write(dev, ring_address | 2, dev->rx_md[1]);
         lance_md_write(dev, ring_address | 6,
                        (dev->rx_md[1] & RMD1_ERR) ? 0x0000 : (result & RMD3_MCNT));
+        lance_dbg("[LANCE] rx done md1=%04x mcnt=%d\n", dev->rx_md[1], result);
         dev->rx_ring_pos = (uint8_t) ((dev->rx_ring_pos + 1) & dev->rx_ring_mask);
     }
 
