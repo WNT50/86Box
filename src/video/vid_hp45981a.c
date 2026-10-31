@@ -154,6 +154,11 @@ hp45981a_set_ext_ctrl(hp45981a_t *dev, uint8_t val)
     dev->cga.clk    = (dev->ext_ctrl & HP45981A_EXT_400LINE) ? hp45981a_clk400() : CGACONST;
     dev->cga.gfx400 = (dev->ext_ctrl & HP45981A_EXT_400LINE) ? 1 : 0;
 
+    /* Page select only applies to the 16K address space (bit 4 clear). */
+    dev->cga.gfx_page  = ((dev->ext_ctrl & HP45981A_EXT_PAGE) &&
+                          !(dev->ext_ctrl & HP45981A_EXT_32K)) ? 1 : 0;
+    dev->cga.underline = (dev->ext_ctrl & HP45981A_EXT_UNDERLINE) ? 1 : 0;
+
     if (old ^ dev->ext_ctrl) {
         dev->cga.fullchange = monitors[dev->cga.monitor_used].mon_changeframecount;
         cga_recalctimings(&dev->cga);
