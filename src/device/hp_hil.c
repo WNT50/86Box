@@ -169,6 +169,9 @@ hp_hil_read(uint16_t port, void *priv)
             break;
     }
 
+    if (getenv("EPOCH_HIL_TRACE"))
+        pclog("HILR: in(%03X)=%02X pc=%04X\n", port, ret, cpu_state.pc);
+
     hp_hil_log("[%04X:%08X] HIL in(%03X) = %02X\n", CS, cpu_state.pc, port, ret);
 
     return ret;

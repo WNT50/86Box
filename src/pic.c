@@ -403,6 +403,8 @@ pic_update_pending_dual(void)
 static __inline void
 pic_notify(void)
 {
+    static int last = -1;
+
     if (update_pending == NULL)
         return;
 
@@ -410,6 +412,17 @@ pic_notify(void)
         pic_update_pending_dual();
     else
         update_pending();
+
+    if (getenv("EPOCH_HIL_TRACE")) {
+        int st = (pic.int_pending ? 4 : 0) | (pic3.int_pending ? 2 : 0) | ((pic3.imr & 0x10) ? 1 : 0);
+        if (st != last) {
+            pclog("NOTIFY: %d -> %d | m irr=%02X imr=%02X isr=%02X intr=%02X | p3 irr=%02X imr=%02X isr=%02X pend=%d icw1=%02X icw4=%02X ocw2=%02X\n",
+                  last, st, pic.irr, pic.imr, pic.isr, pic.interrupt,
+                  pic3.irr, pic3.imr, pic3.isr, pic3.int_pending,
+                  pic3.icw1, pic3.icw4, pic3.ocw2);
+            last = st;
+        }
+    }
 }
 
 static void
@@ -798,6 +811,9 @@ pic_read(uint16_t addr, void *priv)
 void
 pic_write(uint16_t addr, uint8_t val, void *priv)
 {
+    if (getenv("EPOCH_HIL_TRACE") && (priv == &pic3))
+        pclog("PIC3W: %04X <- %02X (state=%d)\n", addr, val, pic3.state);
+
     pic_t *dev = (pic_t *) priv;
 
     pic_log("pic_write(%04X, %02X, %08X)\n", addr, val, priv);
@@ -999,8 +1015,23 @@ pic_clear_output_callback(void)
 uint8_t
 pic_any_pending(void)
 {
+    static unsigned long calls, hits;
+
     if (!cascade && i8018x_pcb_cascade)
         return 0;
+
+    if (getenv("EPOCH_HIL_TRACE")) {
+        calls++;
+        if (pic.int_pending) {
+            hits++;
+            if (hits < 6 || (hits % 200000) == 0)
+                pclog("PEND #%lu: master=%d p3-pend=%d intr=%02X ack_bytes=%d irr=%02X/%02X\n",
+                      hits, pic.int_pending, pic3.int_pending, pic.interrupt,
+                      pic.ack_bytes, pic.irr, pic3.irr);
+        }
+        if ((calls % 2000000) == 0)
+            pclog("PEND: %lu polls, %lu pending\n", calls, hits);
+    }
 
     return pic.int_pending || (!cascade && pic2.int_pending);
 }
