@@ -285,3 +285,36 @@ DA5 D5A AA5 A5A      自检（此时透传，靠"未知命令照原样回送"满
   帧级配置已经全部走通（设备拿到地址 1、被切到透传、第二轮 ACF 正常），
   所以缺口只剩"8041 报告链路就绪"这一条事件。
 - `9F8D:[0x0D]`、`[0x16]`、`[0x18]` 的语义（`FE`/`07`）尚未对应到设备状态。
+
+## 10. 中断接线与键盘路径（2026-10-31 实测）
+
+第三片 8259 的输出接主片 IRQ1，所以主片 ICW3 的 bit1 是级联位：
+`picint_lines()` 会把任何"主片 ICW3 里标记为从片"的输入当作级联请求丢掉。
+直接抬主片 IRQ1 的键盘数据因此永远送不到 CPU。
+
+| 向量 | 第三片 line | 来源 | 处理 |
+|---|---|---|---|
+| `68h` | 0 | 8041 SVC（命令/设备事件） | `F000:551F` → `int 6F AH=4 BP=0AEh` → `0x82B1` 按 AL 分派 |
+| `69h` | 1 | 8041 OBF（键盘数据） | `F000:5514` → `out 7Ch,61h`（特定 EOI）→ `int 9h` |
+| `6Ch` | 4 | HP-HIL 适配器 | `F000:552D` → HIL 服务 `0x87D0` |
+
+键盘数据必须走第三片 line 1：`kbc_send_to_ob()` 里对 `KBC_VEN_HP_VECTRA`
+用 `pic3_int(1,1)`，读 `0x60` 后 `pic3_int(1,0)`。改之前 POST 停在
+"Strike F1 to continue"，`0x60` 有扫描码、OBF 置位，但 `40:1A/1C` 永远是 `1E/1E`。
+
+## 11. NVR 与 SETUP
+
+`nvr/hpvectra_090185.nvr` 全 `FF` 时 POST 报
+`Invalid configuration information - Run SETUP program`，必须按 F1 才能继续。
+用盘上的 `SETUP.EXE`（PAM 里或在 `A>` 直接敲）跑一次"Set System Configuration"，
+把日期/时间/软驱类型/内存/显示保存后，NVR 出现有效记录：
+
+```
+10: 11          ; A: 360K  B: 360K
+15: 7C 02       ; 基本内存 636K
+14: 6F          ; 设备字
+2E: 0A F4       ; 校验
+```
+
+之后冷启动 22 秒直达 `A>`，无需按键。当前使用的 NVR 存在
+`~/documents/86box/vectra-r8561/nvr/`。
