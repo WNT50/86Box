@@ -173,6 +173,28 @@ hp_hil_fifo_push(uint16_t frame)
     hp_hil_irq();
 }
 
+void
+hp_hil_link_scan(void)
+{
+    hp_hil_t *dev = hp_hil_dev;
+
+    if (dev == NULL)
+        return;
+
+    /* Nothing on the link has been given an address (the System never issues
+       ACF/IDD itself, that is the 8041's job), so the scan finds no device.
+       Report it the way the MLC does: a frame error in R2 and LERR in R3,
+       with INT raised so the System comes and looks. */
+    /* Only report it once: the flag stays up until the System reads it, so a
+       second reset command must not raise INT again (that would loop). */
+    if (dev->r3 & HIL_R3_LERR)
+        return;
+
+    dev->r2 |= HIL_R2_FERR;
+    dev->r3 |= HIL_R3_LERR;
+    pic3_int(HIL_IRQ_LINE, 1);
+}
+
 static uint16_t
 hp_hil_fifo_peek(void)
 {

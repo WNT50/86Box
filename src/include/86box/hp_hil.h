@@ -11,6 +11,13 @@
 #ifndef EMU_HP_HIL_H
 #define EMU_HP_HIL_H
 
+#include <86box/device.h>
+
 extern const device_t hp_hil_device;
+
+/* The 8041 is the link master: when the System asks it to reset the link, it
+   scans for devices.  Nothing on this link has been addressed yet, so the
+   scan comes back empty and the adapter reports a link error. */
+extern void hp_hil_link_scan(void);
 
 #endif /*EMU_HP_HIL_H*/

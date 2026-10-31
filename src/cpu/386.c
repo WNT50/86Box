@@ -330,6 +330,7 @@ exec386_2386(int32_t cycs)
                                                     (cpu_state.pc == 0x08956) ||
                                                     (cpu_state.pc == 0x078aa) || (cpu_state.pc == 0x07465) ||
                                                     (cpu_state.pc == 0x07d0a) || (cpu_state.pc == 0x07b32) ||
+                                                    (cpu_state.pc == 0x07b60) || (cpu_state.pc == 0x0887e) ||
                                                     (cpu_state.pc == 0x0756f) || (cpu_state.pc == 0x07599) ||
                                                     (cpu_state.pc == 0x075ad) ||
                                                     (cpu_state.pc == 0x0552d) || (cpu_state.pc == 0x055a4) ||
@@ -341,6 +342,14 @@ exec386_2386(int32_t cycs)
                                                     (cpu_state.pc == 0x08371) || (cpu_state.pc == 0x0839a) ||
                                                     (cpu_state.pc == 0x078b1)))
                         pclog("HILBP: %04X:%04X ds=%04X ax=%04X sp=%04X\n", CS, cpu_state.pc, DS, AX, SP);
+                        if (cpu_state.pc == 0x0887e) {
+                            uint32_t b = cpu_state.seg_ds.base;
+                            pclog("   [0C]=%02X%02X [10]=%02X%02X [13]=%02X [14]=%02X [1B]=%02X\n",
+                                  mem_readb_phys(b + 0x0d), mem_readb_phys(b + 0x0c),
+                                  mem_readb_phys(b + 0x11), mem_readb_phys(b + 0x10),
+                                  mem_readb_phys(b + 0x13), mem_readb_phys(b + 0x14),
+                                  mem_readb_phys(b + 0x1b));
+                        }
                 }
 
                 opcode = fetchdat & 0xFF;
