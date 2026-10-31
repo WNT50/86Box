@@ -165,7 +165,8 @@ typedef struct atkbc_t {
 
     /* HP Vectra: the 8041 mailbox that sits behind 0x68-0x6A. */
     uint8_t vectra_ctrl; /* 0x68 */
-    uint8_t vectra_svc;  /* 0x69 */
+    uint8_t vectra_svc;       /* 0x69 */
+    int     vectra_answered;  /* the 8041 has already reported this link */
 } atkbc_t;
 
 /* Keyboard controller ports. */
@@ -2724,6 +2725,7 @@ kbc_at_process_cmd(void *priv)
            marks the device present in the manager's block. */
 #define VECTRA_SVC_COMMAND_DONE 0x06
 #define VECTRA_SVC_DEVICE_READY 0x07
+#define VECTRA_SVC_HAVE_DATA    0x80 /* 8041 has an answer for the host */
 static uint8_t
 kbc_vectra_ext_read(uint16_t port, void *priv)
 {
@@ -2758,9 +2760,27 @@ kbc_vectra_ext_write(uint16_t port, uint8_t val, void *priv)
                 case 0xfc:
                 case 0xfd:
                 case 0xfe: /* Device Hard Reset: the link is scanned again */
+                    dev->vectra_answered = 0;
                     dev->vectra_svc = VECTRA_SVC_DEVICE_READY;
                     hp_hil_link_scan();
                     pic3_int(0, 1);
+                    break;
+                case 0x7b: /* link scan, status follows */
+                case 0x7c:
+                case 0x7d: /* link status: does the 8041 have an answer? */
+                case 0x7e:
+                    /* Bit 7 is the 8041's "answer waiting" flag; the low
+                       nibble is the event the driver dispatches on.  The
+                       answer is only there once: a poll with nothing new
+                       answers 00h, or the driver would never stop asking. */
+                    if (!dev->vectra_answered && hp_hil_link_up()) {
+                        dev->vectra_answered = 1;
+                        dev->vectra_svc = VECTRA_SVC_HAVE_DATA |
+                                          VECTRA_SVC_DEVICE_READY;
+                        pic3_int(0, 1);
+                    } else {
+                        dev->vectra_svc = 0x00;
+                    }
                     break;
                 case 0x60: /* Acknowledge / self test */
                 case 0x45:
