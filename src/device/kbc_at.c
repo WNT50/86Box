@@ -2712,7 +2712,16 @@ kbc_at_process_cmd(void *priv)
 
 /* HP Vectra: the 8041 mailbox at 0x68-0x6A.  A command written to 0x68 leaves
    its status in 0x69 and, once it has one, pulls SVC (IRQ 16) so that the
-   system's int 6F AH=4 handler can dispatch on that status. */
+   system's int 6F AH=4 handler can dispatch on that status.
+
+   The codes are the ones the ROM itself expects:
+     0x06  command complete.  The keyboard self test writes 0x60 to 0x64 and
+           0x45 to 0x60, then polls 0x69 until it reads 0x06 (F000:1DFD).
+     0x07  a device is on the link.  The int 6F AH=4 dispatcher indexes the
+           0x8319 table with the low nibble and lands on F000:83CA, which
+           marks the device present in the manager's block. */
+#define VECTRA_SVC_COMMAND_DONE 0x06
+#define VECTRA_SVC_DEVICE_READY 0x07
 static uint8_t
 kbc_vectra_ext_read(uint16_t port, void *priv)
 {
@@ -2742,9 +2751,19 @@ kbc_vectra_ext_write(uint16_t port, uint8_t val, void *priv)
             dev->vectra_ctrl = val;
             /* The byte is also readable at 0x60, with OBF set. */
             kbc_delay_to_ob(dev, val, 0, 0x00);
-            if (val >= 0xf0) {
-                dev->vectra_svc = 0x07;
-                pic3_int(0, 1);
+            switch (val) {
+                case 0xfb: /* System Hard Reset */
+                case 0xfe: /* Device Hard Reset: the link is scanned again */
+                    dev->vectra_svc = VECTRA_SVC_DEVICE_READY;
+                    pic3_int(0, 1);
+                    break;
+                case 0x60: /* Acknowledge / self test */
+                case 0x45:
+                    dev->vectra_svc = VECTRA_SVC_COMMAND_DONE;
+                    pic3_int(0, 1);
+                    break;
+                default:
+                    break;
             }
             break;
 
@@ -2768,7 +2787,7 @@ kbc_at_port_1_write(uint16_t port, uint8_t val, void *priv)
     /* HP Vectra: the 8041 answers the 0x45 command with a completion status
        in 0x69, which the keyboard self test polls for (F000:1DFD). */
     if ((kbc_ven == KBC_VEN_HP_VECTRA) && (val == 0x45))
-        dev->vectra_svc = 0x06;
+        dev->vectra_svc = VECTRA_SVC_COMMAND_DONE;
 
     kbc_at_log("ATkbc: [%04X:%08X] write(%04X) = %02X\n", CS, cpu_state.pc, port, val);
 
@@ -2806,11 +2825,6 @@ kbc_at_port_2_write(uint16_t port, uint8_t val, void *priv)
     atkbc_t *dev = (atkbc_t *) priv;
     uint8_t kbc_ven = dev->flags & KBC_VEN_MASK;
     uint8_t fast_a20 = (kbc_ven != KBC_VEN_SIEMENS);
-
-    /* HP Vectra: the 8041 answers the 0x45 command with a completion status
-       in 0x69, which the keyboard self test polls for (F000:1DFD). */
-    if ((kbc_ven == KBC_VEN_HP_VECTRA) && (val == 0x45))
-        dev->vectra_svc = 0x06;
 
     kbc_at_log("ATkbc: [%04X:%08X] write(%04X) = %02X\n", CS, cpu_state.pc, port, val);
 
