@@ -64,22 +64,21 @@
 #define CSR0_BABL          0x4000
 #define CSR0_ERR           0x8000
 
-/* CSR3 bits (VAXmate: BSWP = 1) */
+/* CSR3 bits (VAXmate: BSWP = 1).  ACON/BCON describe the address and byte
+   control modes; this model always drives the 16-bit bus in the VAXmate
+   wiring, so they are decoded but have no effect. */
 #define CSR3_BSWP          0x0004
 #define CSR3_ACON          0x0002
 #define CSR3_BCON          0x0001
 
-/* NICSR bits (TRM page 13-17, write only, set/clear style) */
-#define NICSR_INT_SET      0x01
-#define NICSR_INT_CLEAR    0x04
-#define NICSR_LED_CLEAR    0x08
-#define NICSR_LED_SET      0x10
+/* NICSR lives in the VAXmate board module (net_lance_vaxmate.c): the chip
+   itself has no onboard interrupt gate. */
 
 /* MODE word of the initialization block */
 #define MODE_DRX           0x0001
 #define MODE_DTX           0x0002
 #define MODE_LOOP          0x0004
-#define MODE_DTCR          0x0008
+#define MODE_DTCR          0x0008   /* CRC 由主机生成；本模型一律由芯片补 FCS */
 #define MODE_PROM          0x8000
 
 /* Transmit message descriptor word 1 */
@@ -96,9 +95,9 @@
 #define RMD1_ENP           0x0100
 #define RMD1_STP           0x0200
 #define RMD1_BUFF          0x0400
-#define RMD1_CRC           0x0800
+#define RMD1_CRC           0x0800   /* 见 NOTES：FCS 由模型计算，永不置位 */
 #define RMD1_OFLO          0x1000
-#define RMD1_FRAM          0x2000
+#define RMD1_FRAM          0x2000   /* 同上，非整字节帧不会出现 */
 #define RMD1_ERR           0x4000
 #define RMD1_OWN           0x8000
 
@@ -732,9 +731,14 @@ lance_rx_complete(lance_t *dev, int result)
         dev->csr[0] |= CSR0_ERR | CSR0_MISS;
     } else {
         lance_md_write(dev, ring_address | 2, dev->rx_md[1]);
-        lance_md_write(dev, ring_address | 6,
-                       (dev->rx_md[1] & RMD1_ERR) ? 0x0000 : (result & RMD3_MCNT));
-        lance_dbg("[LANCE] rx done md1=%04x mcnt=%d\n", dev->rx_md[1], result);
+        {
+            uint16_t mcnt = (dev->rx_md[1] & RMD1_ERR) ? 0x0000 :
+                            (uint16_t) (result & RMD3_MCNT);
+
+            lance_md_write(dev, ring_address | 6, mcnt);
+            lance_dbg("[LANCE] rx done md1=%04x mcnt=%d\n",
+                      dev->rx_md[1], mcnt);
+        }
         dev->rx_ring_pos = (uint8_t) ((dev->rx_ring_pos + 1) & dev->rx_ring_mask);
     }
 
