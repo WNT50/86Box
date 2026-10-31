@@ -147,8 +147,9 @@ pcx_mmu_translate(uint32_t addr, int rw)
        register reads back the fault status in bits 7-6 so the handler can tell
        the two apart. */
     if (!(entry & (rw ? 0x0001 : 0x0002))) {
-        pcx_mmu.fault = addr;
-        pcx_mmu.fpend = 1;
+        pcx_mmu.fault  = addr;
+        pcx_mmu.fpend  = 1;
+        cpu_state.abrt = 1;     /* the access must not take effect at all */
         picint(0x0001);
         return 0xffffffffu;
     }

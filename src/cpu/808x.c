@@ -3463,6 +3463,20 @@ execx86(int cycs)
 
         execx86_instruction();
 
+        /* The machine's translate hook refused an access, so nothing of this
+           instruction may stand: put the IP back and let the pending request
+           run before it is tried again (PC-X MMU protection faults). */
+        if (cpu_state.abrt) {
+            cpu_state.abrt = 0;
+            repeating      = 0;
+            ovr_seg        = NULL;
+            in_rep         = 0;
+            rep_c_flag     = 0;
+            completed      = 1;
+            pfq_set_ip((uint16_t) cpu_state.oldpc);
+            cpu_state.pc = cpu_state.oldpc;
+        }
+
         if (completed) {
             repeating  = 0;
             ovr_seg    = NULL;
