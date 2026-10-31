@@ -19,6 +19,15 @@
  *
  *          Descriptor and initialization block layouts follow the Am7990
  *          datasheet; the ring walking code is modelled on MAME's am79c90.
+ *
+ * Based on @(#)am79c90.cpp Patrick Mackinlay (MAME)
+ *
+ *          Portions Copyright (C) 2018-2026 Patrick Mackinlay
+ *          Portions Copyright (C) 2018 The MAME Project
+ *
+ *          The MAME device was originally added by mooglyguy in 2018 and has
+ *          been developed since by Patrick Mackinlay; it is distributed under
+ *          the BSD-3-Clause license, whose notices are retained here.
  */
 #include <stdint.h>
 #include <stdlib.h>

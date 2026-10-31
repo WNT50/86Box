@@ -12,6 +12,15 @@
  *          supplied by whoever adds the device (see device_add_linked()).
  *          Machine specific glue, such as the VAXmate's NICSR interface
  *          logic, lives in the board module next to the chip.
+ *
+ * Based on @(#)am79c90.cpp Patrick Mackinlay (MAME)
+ *
+ *          Portions Copyright (C) 2018-2026 Patrick Mackinlay
+ *          Portions Copyright (C) 2018 The MAME Project
+ *
+ *          The MAME device was originally added by mooglyguy in 2018 and has
+ *          been developed since by Patrick Mackinlay; it is distributed under
+ *          the BSD-3-Clause license, whose notices are retained here.
  */
 #ifndef NET_LANCE_H
 #define NET_LANCE_H
