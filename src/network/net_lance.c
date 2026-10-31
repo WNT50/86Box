@@ -52,7 +52,8 @@
 #define CSR0_RXON          0x0020
 #define CSR0_INEA          0x0040
 #define CSR0_INTR          0x0080
-/* TRM 1-21：INTR 由 BABL/MISS/MERR/RINT/TINT/IDON 或出来；CERR 不产生中断 */
+/* TRM 1-21: INTR is the OR of BABL/MISS/MERR/RINT/TINT/IDON; CERR does
+   not raise an interrupt. */
 #define CSR0_INTR_MASK     (CSR0_BABL | CSR0_MISS | CSR0_MERR | \
                             CSR0_RINT | CSR0_TINT | CSR0_IDON)
 #define CSR0_IDON          0x0100
@@ -78,7 +79,7 @@
 #define MODE_DRX           0x0001
 #define MODE_DTX           0x0002
 #define MODE_LOOP          0x0004
-#define MODE_DTCR          0x0008   /* CRC 由主机生成；本模型一律由芯片补 FCS */
+#define MODE_DTCR          0x0008   /* CRC comes from the host; this model always appends the FCS itself. */
 #define MODE_PROM          0x8000
 
 /* Transmit message descriptor word 1 */
@@ -95,9 +96,9 @@
 #define RMD1_ENP           0x0100
 #define RMD1_STP           0x0200
 #define RMD1_BUFF          0x0400
-#define RMD1_CRC           0x0800   /* 见 NOTES：FCS 由模型计算，永不置位 */
+#define RMD1_CRC           0x0800   /* Decoded but never set: the model computes the FCS itself. */
 #define RMD1_OFLO          0x1000
-#define RMD1_FRAM          0x2000   /* 同上，非整字节帧不会出现 */
+#define RMD1_FRAM          0x2000   /* Same: frames always contain a whole number of bytes. */
 #define RMD1_ERR           0x4000
 #define RMD1_OWN           0x8000
 
@@ -110,7 +111,7 @@
 typedef struct lance_t {
     uint16_t   csr[4];
     uint16_t   base;
-    int        irq_num;       /* 该板卡使用的中断线 */
+    int        irq_num;       /* IRQ line used by the board */
     uint8_t    rap;
     int        irq_gate;      /* NICSR interrupt enable (power-on: off) */
     int        irq;
@@ -128,7 +129,7 @@ typedef struct lance_t {
     uint16_t   tx_md[4];
     uint16_t   rx_md[4];
     pc_timer_t tx_timer;
-    pc_timer_t inj_timer;     /* LANCE_INJ 调试注入 */
+    pc_timer_t inj_timer;     /* LANCE_INJ test injection */
     int        injected;
     netcard_t *card;
 } lance_t;
@@ -170,7 +171,8 @@ lance_irq_line(lance_t *dev)
 static void
 lance_update_irq(lance_t *dev)
 {
-    /* INTR 是锁存位：任一中断源置位就置 INTR，读 CSR0 清掉（TRM 1-21）。 */
+    /* INTR is a latch: set when any source is set, cleared by reading
+       CSR0 (TRM 1-21). */
     if (dev->csr[0] & CSR0_INTR_MASK)
         dev->csr[0] |= CSR0_INTR;
     else
@@ -192,8 +194,9 @@ lance_bswap(uint8_t *buf, int len)
     }
 }
 
-/* TRM 1-21：LANCE 作总线主得不到 READY（地址上没有设备）→ MERR，
-   收发器一起关掉。VAXmate 只解码 1 MB，超出即视为无应答。 */
+/* TRM 1-21: a bus master cycle that gets no READY (nothing decodes the
+   address) raises MERR and turns both transmitter and receiver off.  The
+   VAXmate only decodes 1 MB, so anything above that has no responder. */
 static int
 lance_dma_check(lance_t *dev, uint32_t addr, int len)
 {
@@ -243,8 +246,9 @@ lance_dma_write(lance_t *dev, uint32_t addr, const uint8_t *buf, int len)
     dma_bm_write(addr, tmp, len, 2);
 }
 
-/* 环描述符访问的唯一入口：位置必须落在环内，整条描述符必须落在 1 MB
-   解码窗口里（RLEN/TLEN 越界保护）。越界按 MERR 处理并关收发器。 */
+/* Single entry point for ring descriptors: the slot must be inside the
+   ring and the whole descriptor inside the 1 MB window (RLEN/TLEN bounds
+   protection).  An out-of-range access is handled as MERR. */
 static int
 lance_ring_entry(lance_t *dev, const char *tag, uint32_t base, uint8_t mask,
                  uint8_t pos, uint32_t *addr)
@@ -354,7 +358,7 @@ lance_init_block(lance_t *dev)
                          ((uint32_t) ib[18] << 16)) & RING_ADDR_MASK;
     dev->tx_ring_base = ((uint32_t) ib[20] | ((uint32_t) ib[21] << 8) |
                          ((uint32_t) ib[22] << 16)) & RING_ADDR_MASK;
-    /* 环掩码就是「项数 - 1」：RLEN/TLEN 3 位 → 1..128 项。 */
+    /* The mask is "entries - 1": RLEN/TLEN are 3 bits, i.e. 1..128 entries. */
     dev->rx_ring_mask = (uint8_t) ((1u << ((ib[19] >> 5) & 7)) - 1u);
     dev->tx_ring_mask = (uint8_t) ((1u << ((ib[23] >> 5) & 7)) - 1u);
 
@@ -363,7 +367,7 @@ lance_init_block(lance_t *dev)
 
     memcpy(dev->mac, dev->padr, 6);
 
-    /* 环必须整体落在 1 MB 解码窗口里；越界的描述符访问会按 MERR 处理。 */
+    /* The ring must fit in the 1 MB window; out-of-range accesses raise MERR. */
     if ((dev->rx_ring_base + ((uint32_t) (dev->rx_ring_mask + 1) << 3)) > 0x00100000u)
         lance_dbg("[LANCE] rx ring %05X + %u entries runs past the 1 MB window\n",
                   dev->rx_ring_base, (unsigned) (dev->rx_ring_mask + 1));
@@ -393,14 +397,14 @@ static void lance_tx_poll(void *priv);
 static int  lance_receive(lance_t *dev, uint8_t *buf, int length);
 static void lance_rx_complete(lance_t *dev, int result);
 
-/* 调试用：INIT 之后注入一帧，验证接收环 + RINT 通路。 */
+/* Test hook: inject one frame after INIT to exercise the receive ring. */
 static void
 lance_inject(void *priv)
 {
     lance_t     *dev = (lance_t *) priv;
     static const uint8_t frame[64] = {
-        0x08, 0x00, 0x2b, 0x12, 0x34, 0x56,   /* 目的：本站 MAC（INIT 之后再填）*/
-        0x08, 0x00, 0x2b, 0xaa, 0xbb, 0xcc,   /* 源 */
+        0x08, 0x00, 0x2b, 0x12, 0x34, 0x56,   /* destination: our own MAC */
+        0x08, 0x00, 0x2b, 0xaa, 0xbb, 0xcc,   /* source */
         0x08, 0x00,                            /* EtherType IP */
         0x45, 0x00, 0x00, 0x2e
     };
@@ -458,9 +462,9 @@ lance_transmit(lance_t *dev)
 {
     uint32_t ring_address;
     uint8_t  buf[LANCE_BUF_MAX];
-    int      length = 0;    /* 拷进 buf 的字节数，超过缓冲的部分只计数 */
-    int      total  = 0;    /* TMD2 声明的整包长度，用来判 BABL */
-    int      failed = 0;    /* 描述符链断掉 → BUFF/UFLO */
+    int      length = 0;    /* bytes copied into buf; anything past it is only counted */
+    int      total  = 0;    /* whole frame length from TMD2, used to detect BABL */
+    int      failed = 0;    /* descriptor chain broke -> BUFF/UFLO */
     int      sent;
 
     memset(buf, 0x00, sizeof(buf));
@@ -516,8 +520,9 @@ lance_transmit(lance_t *dev)
                 continue;
             }
 
-            /* 链上没有下一个描述符：芯片拉不到整包 → BUFF + UFLO，关发送器
-               （TRM 4.9.2：BFU/UFLO 会让 TXON 清零）。 */
+            /* No next descriptor in the chain: the chip cannot fetch the
+               whole frame -> BUFF + UFLO and the transmitter is turned off
+               (TRM 4.9.2: BFU/UFLO clear TXON). */
             dev->tx_md[1] |= TMD1_ERR;
             dev->tx_md[3] |= TMD3_BUFF | TMD3_UFLO;
             dev->csr[0]   &= (uint16_t) ~CSR0_TXON;
@@ -541,7 +546,8 @@ lance_transmit(lance_t *dev)
         return;
     }
 
-    /* 总线主周期没有得到 READY：发送器已被 MERR 关掉，整帧不发出。 */
+    /* The bus master cycle got no READY: MERR already turned the
+       transmitter off, so nothing is sent. */
     if (dev->csr[0] & CSR0_MERR) {
         lance_dbg("[LANCE] tx aborted: MERR\n");
         dev->tx_md[1] |= TMD1_ERR;
@@ -549,7 +555,8 @@ lance_transmit(lance_t *dev)
         return;
     }
 
-    /* TRM 1-20：装到第 1519 个字节就置 BABL，但整包照发，发送器不关。 */
+    /* TRM 1-20: BABL is set on the 1519th byte, but the frame is still sent
+       and the transmitter stays on. */
     if (total > 1518) {
         dev->csr[0] |= CSR0_BABL | CSR0_ERR;
         lance_dbg("[LANCE] BABL (%d bytes)\n", total);
@@ -599,7 +606,7 @@ lance_tx_poll(void *priv)
     lance_transmit(dev);
 }
 
-/* CRC-32 的位反射多项式；与以太网 FCS 相同（init/取反都是 0xFFFFFFFF）。 */
+/* Reflected CRC-32 polynomial, as used for the Ethernet FCS. */
 static uint32_t
 lance_crc32(const uint8_t *p, int length)
 {
@@ -626,18 +633,19 @@ lance_receive(lance_t *dev, uint8_t *buf, int length)
     if (!(dev->csr[0] & CSR0_RXON) || (dev->mode & MODE_DRX))
         return -1;
 
-    /* 手册 1.8：含 FCS 不足 64 字节的 runt 帧整帧丢弃，不占用描述符。 */
+    /* Manual 1.8: frames shorter than 64 bytes including the FCS are
+       dropped whole and do not consume a descriptor. */
     if ((length + 4) < 64)
         return -1;
 
-    /* 超长帧（jabber）同样丢弃。 */
+    /* Overlong (jabber) frames are dropped as well. */
     if (length > 1518)
         return -1;
 
     if (!lance_address_filter(dev, buf, length))
         return -1;
 
-    /* 真芯片把 FCS 一并写进接收缓冲区，MCNT 也含这 4 个字节。 */
+    /* The real chip writes the FCS into the buffer too and counts it in MCNT. */
     memcpy(frame, buf, length);
     fcs = lance_crc32(buf, length);
     lance_dbg("[LANCE] rx %d bytes fcs=%08x\n", length, fcs);
@@ -700,7 +708,7 @@ lance_receive(lance_t *dev, uint8_t *buf, int length)
                 ring_address     = next_addr;
                 dev->rx_md[1]    = next_md1;
             } else {
-                /* 没有可用的下一个缓冲区，剩余的包体丢失。 */
+                /* No free next buffer: the rest of the frame is lost. */
                 dev->rx_md[1] |= RMD1_ERR | RMD1_BUFF | RMD1_OFLO;
                 break;
             }
@@ -766,7 +774,7 @@ lance_csr_read(lance_t *dev, int reg)
     switch (reg) {
         case 0:
             ret = dev->csr[0];
-            /* 读 CSR0 清 INTR：驱动读完就处理，下一次事件再把线拉起来。 */
+            /* Reading CSR0 clears INTR; the line comes back on the next event. */
             dev->csr[0] &= (uint16_t) ~CSR0_INTR;
             lance_irq_line(dev);
             break;
@@ -811,13 +819,14 @@ lance_csr_write(lance_t *dev, int reg, uint16_t val)
 
             lance_dbg("[LANCE] CSR0 write %04X (IADR=%05X)\n", val, dev->init_addr);
 
-            /* 状态位写 1 清零（TRM：IDON/TINT/RINT/MERR/MISS/CERR/BABL/ERR） */
+            /* Status bits are cleared by writing 1 (TRM: IDON/TINT/RINT/
+               MERR/MISS/CERR/BABL/ERR). */
             dev->csr[0] &= (uint16_t) ~(val & (CSR0_IDON | CSR0_TINT | CSR0_RINT |
                                                CSR0_MERR | CSR0_MISS | CSR0_CERR |
                                                CSR0_BABL | CSR0_ERR));
 
             if (val & CSR0_STRT) {
-                /* STRT 必须读回 1（ROM 在 F6BA9 轮询 bit1 判定启动完成） */
+                /* STRT must read back as 1 (the ROM polls bit 1 at F6BA9). */
                 dev->csr[0] |= CSR0_STRT;
                 dev->csr[0] &= (uint16_t) ~(CSR0_STOP | CSR0_INIT);
                 if (dev->mode & MODE_DRX)

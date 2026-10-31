@@ -35,16 +35,16 @@ typedef struct ne2100_t {
     const device_t *lance;
     lance_board_t   board;
 
-    uint32_t        bios_addr;
-    rom_t           bios_rom;
+    uint32_t bios_addr;
+    rom_t    bios_rom;
 } ne2100_t;
 
 static void *
 ne2100_init(const device_t *info)
 {
-    ne2100_t *dev;
-    int       mac;
-    char     *rom;
+    ne2100_t   *dev;
+    int         mac;
+    const char *rom;
 
     (void) info;
 
@@ -58,7 +58,7 @@ ne2100_init(const device_t *info)
 
     /* Same Novell OUI as the other cards in the tree; the last three
        bytes identify this particular card. */
-    mac = device_get_config_mac("mac", -1);
+    mac               = device_get_config_mac("mac", -1);
     dev->board.mac[0] = 0x00;
     dev->board.mac[1] = 0x00;
     dev->board.mac[2] = 0xd8;
@@ -107,6 +107,7 @@ ne2100_close(void *priv)
     free(dev);
 }
 
+// clang-format off
 static const device_config_t ne2100_config[] = {
     {
         .name           = "base",
@@ -185,6 +186,7 @@ static const device_config_t ne2100_config[] = {
     },
     { .name = "", .description = "", .type = CONFIG_END }
 };
+// clang-format on
 
 const device_t ne2100_device = {
     .name          = "Novell NE2100",
