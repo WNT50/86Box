@@ -36,6 +36,7 @@
 #include "cpu.h"
 #include <86box/vid_vaxmate.h>
 #include <86box/net_lance.h>
+#include <86box/mouse_vaxmate.h>
 
 #include <86box/dma.h>
 
@@ -273,6 +274,92 @@ vax_probe(void *priv)
                     fputc('\n', tf);
                 }
                 fclose(tf);
+            }
+        }
+        if (getenv("VAX_IVT") != NULL) {
+            FILE *iv = fopen("/tmp/vx_ivt.txt", "w");
+            if (iv != NULL) {
+                for (unsigned k = 0; k < 256; k++) {
+                    uint32_t o = (uint32_t) k * 4;
+                    uint16_t off = mem_readw_phys(o);
+                    uint16_t seg = mem_readw_phys(o + 2);
+                    fprintf(iv, "int %02X -> %04X:%04X\n", k, seg, off);
+                }
+                fprintf(iv, "int10 handler bytes:");
+                for (int b = 0; b < 16; b++)
+                    fprintf(iv, " %02X", mem_readb_phys(((uint32_t) mem_readw_phys(0x42) << 4)
+                                                         + mem_readw_phys(0x40) + (uint32_t) b));
+                fprintf(iv, "\n");
+                fclose(iv);
+            }
+        }
+        if (getenv("VAX_VRAM") != NULL) {
+            FILE *vf = fopen("/tmp/vx_vram.bin", "wb");
+            if (vf != NULL) {
+                for (uint32_t a = 0; a < 0x10000; a++)
+                    fputc(mem_readb_phys(0xB0000 + a), vf);
+                fclose(vf);
+            }
+        }
+        if (getenv("VAX_MCB") != NULL) {
+            FILE *mf = fopen("/tmp/vx_mcb.txt", "w");
+            if (mf != NULL) {
+                for (int start = 0x20; start < 0x1000; start++) {
+                    int seg = start, blocks = 0, good = 1;
+                    while (blocks < 40) {
+                        uint32_t base = (uint32_t) seg << 4;
+                        uint8_t t = mem_readb_phys(base);
+                        if ((t != 'M') && (t != 'Z')) { if (blocks < 3) good = 0; break; }
+                        uint16_t own = mem_readw_phys(base + 1);
+                        uint16_t sz  = mem_readw_phys(base + 3);
+                        if ((sz == 0) || (sz > 0x9000) || (own > 0xA000)) { good = 0; break; }
+                        blocks++;
+                        if (t == 'Z') break;
+                        seg += sz + 1;
+                        if (seg >= 0xA000) break;
+                    }
+                    if (good && (blocks >= 3)) {
+                        fprintf(mf, "# chain start %04X, %d blocks\n", start, blocks);
+                        seg = start;
+                        for (int b = 0; b < blocks; b++) {
+                            uint32_t base = (uint32_t) seg << 4;
+                            uint8_t t = mem_readb_phys(base);
+                            uint16_t own = mem_readw_phys(base + 1);
+                            uint16_t sz  = mem_readw_phys(base + 3);
+                            char nm[9]; int k;
+                            for (k = 0; k < 8; k++) {
+                                uint8_t c = mem_readb_phys(base + 8 + (uint32_t) k);
+                                nm[k] = (c >= 32 && c < 127) ? (char) c : ' ';
+                            }
+                            nm[8] = 0;
+                            fprintf(mf, "%04X %c owner=%04X paras=%04X (%5u KB) name=[%s]\n",
+                                    seg, t, own, sz, (unsigned) (sz / 64), nm);
+                            if (t == 'Z') break;
+                            seg += sz + 1;
+                        }
+                        break;
+                    }
+                }
+                fclose(mf);
+            }
+        }
+        if (getenv("VAX_PCBDUMP") != NULL) {
+            FILE *pf = fopen("/tmp/vx_pc.txt", "w");
+            if (pf != NULL) {
+                uint32_t lin = ((uint32_t) CS << 4) + cpu_state.pc;
+                uint32_t sp16 = cpu_state.regs[4].w & 0xFFFF;
+                uint32_t slin = ((uint32_t) cpu_state.seg_ss.seg << 4) + sp16;
+                fprintf(pf, "pc=%04X:%04X ss:sp=%04X:%04X lin=%05X slin=%05X\n",
+                        (unsigned) CS, (unsigned) cpu_state.pc,
+                        (unsigned) cpu_state.seg_ss.seg, (unsigned) sp16, lin, slin);
+                fprintf(pf, "code:");
+                for (int b = 0; b < 48; b++)
+                    fprintf(pf, " %02X", mem_readb_phys(lin + (uint32_t) b));
+                fprintf(pf, "\nstack:");
+                for (int b = 0; b < 48; b++)
+                    fprintf(pf, " %02X", mem_readb_phys(slin + (uint32_t) b));
+                fprintf(pf, "\n");
+                fclose(pf);
             }
         }
         if ((getenv("VAX_OURS") != NULL) && (mem_readb_phys(0x7c01) == 0x3c)) {
@@ -526,6 +613,9 @@ machine_at_vaxmate_init(const machine_t *model)
                   vaxmate_uart_write, NULL, NULL,
                   &vax_uart[1]);
     device_add(&vaxmate_video_device);
+
+    /* 板载鼠标：DEC 三键鼠标挂在 0x0C40 的 SCN2661 上，中断走 IRQ12。 */
+    device_add(&vaxmate_mouse_device);
     /* 板载网卡按 86Box 惯例走 "Internal" 条目：机型表里 .net_device 指向
        本设备，只有用户在"网络"设置里选了 Internal 才实例化。 */
     if ((net_cards_conf[0].device_num == NET_INTERNAL) && machine_get_net_device(machine))
