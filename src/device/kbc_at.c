@@ -2767,7 +2767,9 @@ kbc_vectra_ext_write(uint16_t port, uint8_t val, void *priv)
                     break;
                 case 0x7b: /* link scan, status follows */
                 case 0x7c:
-                case 0x7d: /* link status: does the 8041 have an answer? */
+                case 0x7d: /* poll the link and hand back the records */
+                    hp_hil_poll_link();
+                    /* fall through */
                 case 0x7e:
                     /* Bit 7 is the 8041's "answer waiting" flag; the low
                        nibble is the event the driver dispatches on.  The
