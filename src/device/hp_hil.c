@@ -341,6 +341,11 @@ hp_hil_write(uint16_t port, uint8_t val, void *priv)
         case 0x0068:
             dev->hp_ctrl = val;
             kbc_at_ext_out(val); /* loop the byte back through 0x60 + OBF */
+            if (val >= 0xf0) {
+                /* 实验：命令完成后给 System 一个 0x69 事件并拉 SVC。 */
+                dev->svc = 0x07;
+                pic3_int(0, 1);
+            }
             break;
 
         case 0x006a:
