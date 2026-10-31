@@ -47,6 +47,7 @@
 #include <86box/keyboard.h>
 #include <86box/device.h>
 #include <86box/pic.h>
+#include <86box/timer.h>
 
 /* HP-HIL opcodes (Table 4-1). */
 #define HIL_IFC 0x00 /* Interface Clear */
@@ -100,6 +101,8 @@ typedef struct hp_hil_t {
     uint8_t kbd_addr;     /* 0 = not configured yet */
     uint8_t kbd_id;
     uint8_t kbd_passthru;
+
+    pc_timer_t tick;
 } hp_hil_t;
 
 static hp_hil_t *hp_hil_dev;
@@ -328,6 +331,20 @@ hp_hil_transmit(uint8_t data)
 }
 
 static void
+hp_hil_tick(void *priv)
+{
+    hp_hil_t *dev = (hp_hil_t *) priv;
+
+    uint32_t lin = cpu_state.seg_cs.base + cpu_state.pc;
+
+    timer_advance_u64(&dev->tick, 2000 * TIMER_USEC);
+
+    /* 实验：只在 System 停在 F000:92AB 的等待循环里时给一次 HPHIL 中断。 */
+    if ((lin >= 0xf92ab) && (lin <= 0xf92bb))
+        pic3_int(4, 1);
+}
+
+static void
 hp_hil_write(uint16_t port, uint8_t val, void *priv)
 {
     hp_hil_t *dev = (hp_hil_t *) priv;
@@ -409,6 +426,9 @@ hp_hil_init(const device_t *info)
     dev->kbd_id = HIL_MOUSE_ID;
 
     io_sethandler(0x006c, 4, hp_hil_read, NULL, NULL, hp_hil_write, NULL, NULL, dev);
+
+    if (getenv("EPOCH_HIL_TICK") != NULL)
+        timer_add(&dev->tick, hp_hil_tick, dev, 1);
 
     return dev;
 }
