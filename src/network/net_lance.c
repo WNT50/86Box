@@ -153,9 +153,11 @@ lance_update_irq(lance_t *dev)
 
     if (active && !dev->irq) {
         dev->irq = 1;
+        lance_dbg("[LANCE] IRQ10 assert (csr0=%04X gate=%d)\n", dev->csr[0], dev->irq_gate);
         picint(1 << LANCE_IRQ);
     } else if (!active && dev->irq) {
         dev->irq = 0;
+        lance_dbg("[LANCE] IRQ10 clear\n");
         picintc(1 << LANCE_IRQ);
     }
 }
@@ -318,6 +320,9 @@ lance_tx_complete(lance_t *dev, int result)
     dev->tx_ring_pos = (uint8_t) ((dev->tx_ring_pos + 1) & dev->tx_ring_mask);
 
     dev->csr[0] |= CSR0_TINT;
+
+    /* TX completion must reach the host: the driver waits on IRQ10. */
+    lance_update_irq(dev);
 
     /* Back-to-back transmit: poll again shortly. */
     timer_set_delay_u64(&dev->tx_timer, 20 * TIMER_USEC);
@@ -624,6 +629,7 @@ lance_rdp_read(uint16_t addr, void *priv)
 
     (void) addr;
 
+    lance_dbg("[LANCE] RDP read  csr%d\n", dev->rap & 3);
     return lance_csr_read(dev, dev->rap & 3);
 }
 
@@ -634,6 +640,7 @@ lance_rdp_write(uint16_t addr, uint16_t val, void *priv)
 
     (void) addr;
 
+    lance_dbg("[LANCE] RDP write csr%d = %04X\n", dev->rap & 3, val);
     lance_csr_write(dev, dev->rap & 3, val);
 }
 
@@ -644,6 +651,7 @@ lance_rap_read(uint16_t addr, void *priv)
 
     (void) addr;
 
+    lance_dbg("[LANCE] RAP read -> %d\n", dev->rap);
     return dev->rap;
 }
 
@@ -655,6 +663,7 @@ lance_rap_write(uint16_t addr, uint16_t val, void *priv)
     (void) addr;
 
     dev->rap = (uint8_t) (val & 0x03);
+    lance_dbg("[LANCE] RAP write %04X -> %d\n", val, dev->rap);
 }
 
 /* NICSR: DEC interface logic, bit set/clear on write, 8-bit. */
@@ -733,10 +742,12 @@ lance_init(const device_t *info)
     timer_add(&dev->tx_timer, lance_tx_poll, dev, 0);
     lance_reset(dev);
 
-    io_sethandler(LANCE_BASE, 0x0004,
+    /* RDP is a single 16-bit port; it must not be registered over 0x0C62,
+       or the RAP handler at that address is shadowed by the wider range. */
+    io_sethandler(LANCE_BASE, 0x0002,
                   NULL, lance_rdp_read, NULL,
                   NULL, lance_rdp_write, NULL, dev);
-    io_sethandler(LANCE_BASE + 0x0004, 0x0004,
+    io_sethandler(LANCE_BASE + 0x0004, 0x0002,
                   NULL, lance_rdp_read, NULL,
                   NULL, lance_rdp_write, NULL, dev);
     io_sethandler(LANCE_BASE + 0x0002, 0x0002,
