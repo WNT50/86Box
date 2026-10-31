@@ -292,6 +292,15 @@ hp_hil_kbd_frame(uint16_t frame)
        Device Hard Reset is the exception - it is link-wide, every device acts
        on it, and handing it back would make the System read its own reset as
        a reply (and send another one, forever). */
+    /* Anything outside the command set is a link test (the System sends A5h
+       and 5Ah frames and expects to see them again, and 80h the same way).
+       Those are answered no matter what mode the device is in or which
+       address they carry. */
+    if (command && (data != HIL_DHR) && (data > 0x46)) {
+        hp_hil_fifo_push(frame);
+        return;
+    }
+
     /* A loop-back device hands link-wide frames back; a frame addressed to
        somebody else is only passed on, and one addressed to this device is
        answered instead of echoed. */
@@ -338,15 +347,6 @@ hp_hil_kbd_frame(uint16_t frame)
             break;
 
         case HIL_IDD:
-            if (getenv("HIL_IDD_LEAD20") != NULL) {
-                hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, 0x20));
-                hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, HIL_MOUSE_DESCR));
-                hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, 0xb4));
-                hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, 0x00));
-                hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, 0x03));
-                hp_hil_fifo_push(frame);   /* the command comes back last */
-                return;
-            }
             /* ID byte, then the Describe record (Appendix C): header, the
                16-bit resolution that follows a non-zero axis count, and the
                I/O descriptor byte announcing the buttons. */
@@ -378,9 +378,10 @@ hp_hil_kbd_frame(uint16_t frame)
             return;
 
         case HIL_DHR:
+            /* Link-wide: every device acts on it and none hands it back. */
             dev->kbd_addr      = 0;
             dev->kbd_passthru = 0;
-            break;
+            return;
 
         default:
             if ((data >= HIL_POL) && (data <= (HIL_POL + 0x0f))) {
@@ -390,23 +391,18 @@ hp_hil_kbd_frame(uint16_t frame)
                 hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, HIL_POL_RECORD));
                 hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, 0x00));
                 hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, 0x00));
-                if (getenv("HIL_POL_ECHO") != NULL)
-                    hp_hil_fifo_push(frame);
             } else if ((data >= HIL_RPL) && (data <= (HIL_RPL + 0x0f))) {
                 /* RePoll: answer with an empty record. */
                 hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, HIL_POL_RECORD));
-            } else {
-                /* A command this device does not know is retransmitted, which
-                   is how the System sees that somebody is on the link
-                   (F000:37F5 sends 80h and compares the frame that comes
-                   back). */
-                hp_hil_fifo_push(frame);
             }
             break;
     }
 
-    if (dev->loop && (addr == 0) && (data != HIL_DHR))
-        hp_hil_fifo_push(frame);
+    /* The command frame goes back down the link after the reply: that is how
+       the System learns the device is there and what it answered
+       (F000:3820 drains until it sees the command come back, F000:37F5 uses
+       it as a link test). */
+    hp_hil_fifo_push(frame);
 }
 
 /* The System wrote W0: the frame is complete, put it on the link. */
