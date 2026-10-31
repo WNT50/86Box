@@ -72,6 +72,7 @@
 #include <86box/vid_cga.h>
 #include <86box/vid_cga_comp.h>
 #include <86box/plat_unused.h>
+#include <86box/pit.h>
 
 #define HP45981A_VRAM_SIZE 0x8000
 #define HP45981A_VRAM_MASK16 0x3fff
@@ -107,6 +108,31 @@ static int hp45981a_trace = -1;
 
 static video_timings_t timing_hp45981a = { .type = VIDEO_ISA, .write_b = 8, .write_w = 16, .write_l = 32, .read_b = 8, .read_w = 16, .read_l = 32 };
 
+/* 25 kHz / 60 Hz 400 line timing: the master oscillator is 22.44 MHz and the
+   character clock is eight dots, so a character time is 1/2.805 MHz. */
+static uint64_t
+hp45981a_clk400(void)
+{
+    return (uint64_t) ((cpuclock / (22440000.0 / 8.0)) * (double) (1ULL << 32));
+}
+
+/* Test aid: program the CRTC the way a 400 line aware application would, so
+   the 16 row rendering path can be exercised from the host.  The vertical
+   registers of a 200 line mode are not translated by this model (the card's
+   translation ROM has never been dumped). */
+static void
+hp45981a_program_400(UNUSED(hp45981a_t *dev))
+{
+    static const uint8_t regs[16] = { 0x6f, 0x4f, 0x51, 0x0f, 0x19, 0x00, 0x19, 0x19,
+                                      0x00, 0x0f, 0x0e, 0x0f, 0x00, 0x00, 0x00, 0x00 };
+    int i;
+
+    for (i = 0; i < 16; i++) {
+        cga_out(0x3d4, (uint8_t) i, &dev->cga);
+        cga_out(0x3d5, regs[i], &dev->cga);
+    }
+}
+
 static void
 hp45981a_set_ext_ctrl(hp45981a_t *dev, uint8_t val)
 {
@@ -121,8 +147,12 @@ hp45981a_set_ext_ctrl(hp45981a_t *dev, uint8_t val)
     else
         dev->cga.font16 = NULL;
 
-    if (old ^ dev->ext_ctrl)
+    dev->cga.clk = (dev->ext_ctrl & HP45981A_EXT_400LINE) ? hp45981a_clk400() : CGACONST;
+
+    if (old ^ dev->ext_ctrl) {
         dev->cga.fullchange = monitors[dev->cga.monitor_used].mon_changeframecount;
+        cga_recalctimings(&dev->cga);
+    }
 }
 
 static void
@@ -146,6 +176,10 @@ hp45981a_out(uint16_t addr, uint8_t val, void *priv)
             /* 3D0-3D7 (CRTC, mirrored four times), 3D8, 3D9 and 3DB/3DC are
                all handled by the CGA core. */
             cga_out(addr, val, &dev->cga);
+
+            if ((addr == 0x03d8) && (dev->ext_ctrl & HP45981A_EXT_400LINE) &&
+                (getenv("HP45981A_CRTC400") != NULL))
+                hp45981a_program_400(dev);
             return;
     }
 }

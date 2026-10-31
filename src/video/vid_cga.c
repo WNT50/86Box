@@ -64,6 +64,15 @@ cga_vram_mask(cga_t *cga)
     return cga->vram_mask ? cga->vram_mask : DEVICE_VRAM_MASK;
 }
 
+/* Cards with a different master oscillator (the HP 45981A runs its 400 line
+   modes from 22.44 MHz) override the character time; everything else keeps
+   the 14.318 MHz / 8 value. */
+static inline uint64_t
+cga_clk(cga_t *cga)
+{
+    return cga->clk ? cga->clk : CGACONST;
+}
+
 typedef union {
     uint32_t color;
     struct {
@@ -296,8 +305,8 @@ cga_recalctimings(cga_t *cga)
             _dispontime = disptime - 2;
     }
     _dispofftime     = disptime - _dispontime;
-    _dispontime      = _dispontime * CGACONST;
-    _dispofftime     = _dispofftime * CGACONST;
+    _dispontime      = _dispontime * cga_clk(cga);
+    _dispofftime     = _dispofftime * cga_clk(cga);
     cga->dispontime  = (uint64_t) (int64_t) (_dispontime);
     cga->dispofftime = (uint64_t) (int64_t) (_dispofftime);
 }
@@ -363,8 +372,14 @@ cga_sample_luma(bitmap_t* target_buffer, uint32_t x, uint32_t y)
 static inline uint8_t
 cga_glyph_row(cga_t *cga, uint8_t chr, int row)
 {
-    if (cga->font16 != NULL)
+    if (cga->font16 != NULL) {
+        /* 16 row character cells (400 line modes) use the whole cell; 8 row
+           cells use rows 1-8, which is where the HP glyph body sits. */
+        if ((cga->crtc[CGA_CRTC_MAX_SCANLINE_ADDR] & 0x1f) > 7)
+            return cga->font16[(chr << 4) + (row & 15)];
+
         return cga->font16[(chr << 4) + (row & 7) + 1];
+    }
 
     return fontdat[chr + cga->fontbase][row & 7];
 }
@@ -854,7 +869,7 @@ cga_poll(void *priv)
         if (cga->vc == cga->crtc[CGA_CRTC_VSYNC] && !cga->scanline)
             cga->cgastat |= 8;
         cga->displine++;
-        if (cga->displine >= 360)
+        if (cga->displine >= 512)
             cga->displine = 0;
     } else {
         timer_advance_u64(&cga->timer, cga->dispontime);
@@ -1019,6 +1034,7 @@ cga_init(cga_t *cga)
     timer_add(&cga->timer, cga_poll, cga, 1);
     cga->composite = 0;
     cga->vram_mask = DEVICE_VRAM_MASK;
+    cga->clk       = CGACONST;
     cga->font16    = NULL;
 }
 
