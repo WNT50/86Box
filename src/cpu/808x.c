@@ -3468,13 +3468,19 @@ execx86(int cycs)
            run before it is tried again (PC-X MMU protection faults). */
         if (cpu_state.abrt) {
             cpu_state.abrt = 0;
-            repeating      = 0;
-            ovr_seg        = NULL;
-            in_rep         = 0;
-            rep_c_flag     = 0;
-            completed      = 1;
-            pfq_set_ip((uint16_t) cpu_state.oldpc);
-            cpu_state.pc = cpu_state.oldpc;
+            /* Rewind exactly as the REP suspend above does: drop the prefetch
+               queue, then put the IP back on the prefix.  Leaving the queue
+               alone leaves the CPU fetching from wherever the queue stood. */
+            pfq_clear();
+            if (repeating)
+                set_ip((uint16_t) (cpu_state.pc - 2));
+            else
+                set_ip((uint16_t) cpu_state.oldpc);
+            repeating  = 0;
+            ovr_seg    = NULL;
+            in_rep     = 0;
+            rep_c_flag = 0;
+            completed  = 1;
         }
 
         if (completed) {
