@@ -47,7 +47,6 @@
 #include <86box/keyboard.h>
 #include <86box/device.h>
 #include <86box/pic.h>
-extern void kbc_at_ext_out(uint8_t val);
 
 /* HP-HIL opcodes (Table 4-1). */
 #define HIL_IFC 0x00 /* Interface Clear */
@@ -101,10 +100,6 @@ typedef struct hp_hil_t {
     uint8_t kbd_addr;     /* 0 = not configured yet */
     uint8_t kbd_id;
     uint8_t kbd_passthru;
-
-    /* 8041 mailbox, still used for the keyboard data path. */
-    uint8_t hp_ctrl; /* 0x68 */
-    uint8_t svc;     /* 0x69 */
 } hp_hil_t;
 
 static hp_hil_t *hp_hil_dev;
@@ -338,21 +333,6 @@ hp_hil_write(uint16_t port, uint8_t val, void *priv)
     hp_hil_t *dev = (hp_hil_t *) priv;
 
     switch (port) {
-        case 0x0068:
-            dev->hp_ctrl = val;
-            kbc_at_ext_out(val); /* loop the byte back through 0x60 + OBF */
-            if (val >= 0xf0) {
-                /* 实验：命令完成后给 System 一个 0x69 事件并拉 SVC。 */
-                dev->svc = 0x07;
-                pic3_int(0, 1);
-            }
-            break;
-
-        case 0x006a:
-            /* Acknowledge: the service status drops back to zero. */
-            dev->svc = 0x00;
-            break;
-
         case 0x006d: /* W1: command bit + address of the next frame */
             dev->w1 = val;
             break;
@@ -389,18 +369,6 @@ hp_hil_read(uint16_t port, void *priv)
     uint8_t   ret = 0xff;
 
     switch (port) {
-        case 0x0068:
-            ret = dev->hp_ctrl;
-            break;
-
-        case 0x0069:
-            ret = dev->svc;
-            break;
-
-        case 0x006a:
-            ret = 0x00;
-            break;
-
         case 0x006c: /* R0: data byte of the frame on top, and pop it */
             ret = (uint8_t) (hp_hil_fifo_pop() & 0xff);
             break;
@@ -430,32 +398,16 @@ hp_hil_read(uint16_t port, void *priv)
     return ret;
 }
 
-/* The 0x45 data write goes to the KBC, so the KBC tells us about it. */
-extern void (*kbc_at_ext_write)(uint16_t port, uint8_t val);
-
-static void
-hp_hil_kbc_ext(uint16_t port, uint8_t val)
-{
-    /* 0x6a is the 8041 strobe, not a data port: the ROM's keyboard self test
-       does "out 0x6a,al" and then polls 0x69 until it reads non-zero
-       (F000:1DCC-1DD8), which is what 0x06/0x00 here answer. */
-    if ((port == 0x0064) && (val == 0x45) && hp_hil_dev)
-        hp_hil_dev->svc = 0x06;
-}
-
 static void *
 hp_hil_init(const device_t *info)
 {
     hp_hil_t *dev = (hp_hil_t *) calloc(1, sizeof(hp_hil_t));
 
     hp_hil_dev       = dev;
-    kbc_at_ext_write = hp_hil_kbc_ext;
 
     dev->loop   = 1; /* the adapter powers up in loop-back */
     dev->kbd_id = HIL_MOUSE_ID;
-    dev->svc    = 0x06;
 
-    io_sethandler(0x0068, 3, hp_hil_read, NULL, NULL, hp_hil_write, NULL, NULL, dev);
     io_sethandler(0x006c, 4, hp_hil_read, NULL, NULL, hp_hil_write, NULL, NULL, dev);
 
     return dev;
@@ -466,10 +418,8 @@ hp_hil_close(void *priv)
 {
     hp_hil_t *dev = (hp_hil_t *) priv;
 
-    kbc_at_ext_write = NULL;
     hp_hil_dev       = NULL;
 
-    io_removehandler(0x0068, 3, hp_hil_read, NULL, NULL, hp_hil_write, NULL, NULL, dev);
     io_removehandler(0x006c, 4, hp_hil_read, NULL, NULL, hp_hil_write, NULL, NULL, dev);
 
     free(dev);
@@ -483,7 +433,6 @@ hp_hil_reset(void *priv)
     memset(dev, 0x00, sizeof(*dev));
     dev->loop   = 1; /* the adapter starts in loop-back, like the MLC */
     dev->kbd_id = HIL_MOUSE_ID;
-    dev->svc    = 0x06;
 }
 
 const device_t hp_hil_device = {

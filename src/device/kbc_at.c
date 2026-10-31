@@ -39,6 +39,7 @@
 #include <86box/pci.h>
 #include <86box/sio.h>
 #include <86box/keyboard.h>
+#include <86box/pic.h>
 #include <86box/kbc_test.h>
 
 #define STAT_PARITY        0x80
@@ -159,6 +160,10 @@ typedef struct atkbc_t {
 
     void (*p2_write_hook)(void *priv, uint8_t old_p2, uint8_t new_p2);
     void *p2_priv;
+
+    /* HP Vectra: the 8041 mailbox that sits behind 0x68-0x6A. */
+    uint8_t vectra_ctrl; /* 0x68 */
+    uint8_t vectra_svc;  /* 0x69 */
 } atkbc_t;
 
 /* Keyboard controller ports. */
@@ -2705,29 +2710,65 @@ kbc_at_process_cmd(void *priv)
     }
 }
 
-/* Vendor hook: boards with extra logic behind the controller (HP Vectra's
-   0x68-0x6A block) need to see the traffic. */
-void (*kbc_at_ext_write)(uint16_t port, uint8_t val) = NULL;
-
-static atkbc_t *kbc_at_cur = NULL;
-
-/* Put a byte in the output buffer without going through the keyboard queue. */
-void
-kbc_at_ext_out(uint8_t val)
+/* HP Vectra: the 8041 mailbox at 0x68-0x6A.  A command written to 0x68 leaves
+   its status in 0x69 and, once it has one, pulls SVC (IRQ 16) so that the
+   system's int 6F AH=4 handler can dispatch on that status. */
+static uint8_t
+kbc_vectra_ext_read(uint16_t port, void *priv)
 {
-    if (kbc_at_cur != NULL)
-        kbc_delay_to_ob(kbc_at_cur, val, 0, 0x00);
+    atkbc_t *dev = (atkbc_t *) priv;
+
+    switch (port) {
+        case 0x0068:
+            return dev->vectra_ctrl;
+        case 0x0069:
+            return dev->vectra_svc;
+        case 0x006a:
+            return 0x00;
+        default:
+            break;
+    }
+
+    return 0xff;
+}
+
+static void
+kbc_vectra_ext_write(uint16_t port, uint8_t val, void *priv)
+{
+    atkbc_t *dev = (atkbc_t *) priv;
+
+    switch (port) {
+        case 0x0068:
+            dev->vectra_ctrl = val;
+            /* The byte is also readable at 0x60, with OBF set. */
+            kbc_delay_to_ob(dev, val, 0, 0x00);
+            if (val >= 0xf0) {
+                dev->vectra_svc = 0x07;
+                pic3_int(0, 1);
+            }
+            break;
+
+        case 0x006a:
+            /* Strobe: the completion status is taken. */
+            dev->vectra_svc = 0x00;
+            break;
+
+        default:
+            break;
+    }
 }
 
 static void
 kbc_at_port_1_write(uint16_t port, uint8_t val, void *priv)
 {
-    if (kbc_at_ext_write)
-        kbc_at_ext_write(port, val);
-
     atkbc_t *dev = (atkbc_t *) priv;
     uint8_t kbc_ven = dev->flags & KBC_VEN_MASK;
     uint8_t fast_a20 = (kbc_ven != KBC_VEN_SIEMENS);
+
+    /* HP Vectra: the 8041 answers the 0x45 command with a completion status
+       in 0x69, which the keyboard self test polls for (F000:1DFD). */
+    if ((kbc_ven == KBC_VEN_HP_VECTRA) && (val == 0x45))
+        dev->vectra_svc = 0x06;
 
     kbc_at_log("ATkbc: [%04X:%08X] write(%04X) = %02X\n", CS, cpu_state.pc, port, val);
 
@@ -2765,6 +2806,11 @@ kbc_at_port_2_write(uint16_t port, uint8_t val, void *priv)
     atkbc_t *dev = (atkbc_t *) priv;
     uint8_t kbc_ven = dev->flags & KBC_VEN_MASK;
     uint8_t fast_a20 = (kbc_ven != KBC_VEN_SIEMENS);
+
+    /* HP Vectra: the 8041 answers the 0x45 command with a completion status
+       in 0x69, which the keyboard self test polls for (F000:1DFD). */
+    if ((kbc_ven == KBC_VEN_HP_VECTRA) && (val == 0x45))
+        dev->vectra_svc = 0x06;
 
     kbc_at_log("ATkbc: [%04X:%08X] write(%04X) = %02X\n", CS, cpu_state.pc, port, val);
 
@@ -3021,7 +3067,6 @@ kbc_at_init(const device_t *info)
     int max_ports;
 
     dev = (atkbc_t *) calloc(1, sizeof(atkbc_t));
-    kbc_at_cur = dev;
 
     dev->kblock_switch = 1;
 
@@ -3144,6 +3189,10 @@ kbc_at_init(const device_t *info)
         case KBC_VEN_HP_VECTRA:
             dev->write_cmd_data_ven = write_cmd_data_vectra;
             dev->write_cmd_ven = write_cmd_vectra;
+            /* The 8041's extended mailbox lives with the controller. */
+            io_sethandler(0x0068, 3,
+                          kbc_vectra_ext_read, NULL, NULL,
+                          kbc_vectra_ext_write, NULL, NULL, dev);
             break;
 
         case KBC_VEN_TOSHIBA:
