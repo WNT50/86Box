@@ -27,7 +27,8 @@
  *          pages are selected through the CRTC start address, so that
  *          eight 80x25 pages (2000 words each) fill the whole 32K.
  *
- *          Line 7 of the technical reference (table 7.6) gives the full
+ *          Reading 3DF returns the board ID register (41h).  Line 7 of the
+ *          technical reference (table 7.6) gives the full
  *          SPU/display access matrix; the 400 line timing is not modelled
  *          yet, this file only implements the port surface and the 32K
  *          memory map.
@@ -83,6 +84,8 @@
    an image is placed here. */
 #define HP45981A_FONT_PATH "roms/machines/hpvectra/45981a_chargen.bin"
 
+#define HP45981A_BOARD_ID 0x41
+
 enum {
     HP45981A_EXT_400LINE  = 0x01,
     HP45981A_EXT_UNDERLINE = 0x02,
@@ -99,7 +102,8 @@ typedef struct hp45981a_t {
 
     uint8_t vram[HP45981A_VRAM_SIZE];
 
-    uint8_t ext_ctrl; /* 3DE, write only */
+    uint8_t ext_ctrl;  /* 3DE, write only */
+    uint8_t monitor25k; /* W2 jumper: 0 = 15 kHz monitor, 1 = 25 kHz */
     uint8_t font_rom[0x1000];
     int     font_loaded;
 } hp45981a_t;
@@ -195,7 +199,13 @@ hp45981a_in(uint16_t addr, void *priv)
             return dev->ext_ctrl;
 
         case 0x03df:
-            return 0xff;
+            /* Board ID register (read only): 41h identifies a 45981A. */
+            return HP45981A_BOARD_ID;
+
+        case 0x03da:
+            /* Status: bit 4 reports the monitor type selected by the W2
+               jumper (0 = 25 kHz, 1 = 15 kHz), bit 5 the colour adapter. */
+            return cga_in(addr, &dev->cga) | (dev->monitor25k ? 0x00 : 0x10);
 
         default:
             return cga_in(addr, &dev->cga);
@@ -273,6 +283,8 @@ hp45981a_init(UNUSED(const device_t *info))
         if (ext != NULL)
             hp45981a_set_ext_ctrl(dev, (uint8_t) strtoul(ext, NULL, 16));
     }
+
+    dev->monitor25k = (getenv("HP45981A_25KHZ") != NULL);
 
     if (hp45981a_trace < 0)
         hp45981a_trace = (getenv("HP45981A_TRACE") != NULL);
