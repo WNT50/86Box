@@ -97,6 +97,7 @@ extern uint8_t pic_irq_ack_instance(pic_t *dev);
 extern void pic_init_tandy2k(void);
 extern void pic2_init(void);
 extern void pic3_init(void);
+extern void pic3_int(uint8_t line, int set);
 extern void pic_reset(void);
 
 extern uint8_t pic_read(uint16_t addr, void *priv);

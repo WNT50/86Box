@@ -37,6 +37,7 @@
 #include <86box/io.h>
 #include <86box/keyboard.h>
 #include <86box/device.h>
+#include <86box/pic.h>
 extern void kbc_at_ext_out(uint8_t val);
 
 #define HP_HIL_REGS 16
@@ -92,6 +93,8 @@ hp_hil_write(uint16_t port, uint8_t val, void *priv)
             break;
 
         case 0x006c:
+            if (getenv("EPOCH_HIL_TRACE"))
+                pclog("HIL: out 6C val=%02X idx=%02X pc=%04X\n", val, dev->index, cpu_state.pc);
             dev->data = val;
             dev->error = 0x00;
             if (dev->index & 0x08) {
@@ -111,6 +114,14 @@ hp_hil_write(uint16_t port, uint8_t val, void *priv)
                 }
             }
             dev->busy = 1;
+            if (dev->index & 0x08) {
+                /* HP-HIL is IRQ 20 (third 8259, line 4). It is a latched
+                   edge: the request stays in the IRR until the CPU takes it,
+                   which is what lets POST serve it from its sti loop. */
+                if (getenv("EPOCH_HIL_TRACE"))
+                    pclog("HIL: IRQ20 raise pc=%04X\n", cpu_state.pc);
+                pic3_int(4, 1);
+            }
             break;
 
         case 0x006e:
