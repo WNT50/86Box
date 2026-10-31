@@ -26,6 +26,8 @@ list(APPEND net_sources
     net_3c509b.c
     net_3c59x_eisa.c
     net_ne2000.c
+    net_lance.c
+    net_ne2100.c
     net_pcnet.c
     net_wd8003.c
     net_pe3.c
