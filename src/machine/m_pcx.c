@@ -61,11 +61,17 @@
 #define PCX_BIOS_ADDR     0x000fc000
 #define PCX_BIOS_SIZE     0x00004000
 
-/* Top of the address space the graphics board occupies.  With the standard
-   monochrome board the BIOS reports the RAM ceiling as 0xf0000; the colour
-   option moves it down to 0xc0000 and a third board to 0xd8000.  Values from
-   the BIOS POST, see the file header. */
-#define PCX_RAM_CEIL      0x000f8000
+/* Top of system RAM and of the graphics board.  The machine decodes 512 KB of
+   RAM and nothing more below the BIOS: MAME's pcd_map() has exactly
+   `map(0x00000, 0x7ffff)` plus the ROM at 0xfc000, and the graphics board puts
+   its 32 KB of video RAM at 0xf0000 on top of that (pcd_v.cpp:396).  Above
+   0x80000 everything is undecoded again, whatever is fitted -- extra memory is
+   not contiguous with the low 512 KB.  The POST fills 0xf0000 with 0xaa and
+   reads it back (v3 0xfd935) because that window is RAM too, just not system
+   RAM, so that test says nothing about the size of the low memory block. */
+#define PCX_RAM_CEIL      0x00080000
+#define PCX_VRAM_BASE     0x000f0000
+#define PCX_VRAM_SIZE     0x00008000
 #define PCX_GRAPH_TOP     0x000fc000
 
 /* I/O */
@@ -99,8 +105,8 @@
 #define PCX_STAT_NMI      0xfd
 
 typedef struct pcx_t {
-    mem_mapping_t ram_map;  /* RAM above 640 KB, up to the decode ceiling */
-    mem_mapping_t hole_map; /* undecoded space: bus timeout -> NMI */
+    mem_mapping_t hole_map;  /* undecoded space below the video window */
+    mem_mapping_t hole_map2; /* undecoded space between the video window and the BIOS */
     rom_t         bios;
 
     uint8_t stat;    /* 0xf840: error/latch byte, write-1-to-clear */
@@ -456,31 +462,33 @@ machine_pcx_init(const machine_t *model)
     pcx.vid_exec   = 0x00;
     pcx.err_seg = 0x00;
 
-    /* RAM is contiguous up to the graphics board, unlike the PC layout that
-       stops at A0000h: the machine keeps RAM all the way to 0xf8000 when it is
-       fitted with 1 MB, and the BIOS sizes what is actually there.  The POST
-       proves it by filling 0xf0000-0xf7fff with 0xaa and reading it back (v3
-       0xfd935), so the ceiling has to include that last 32 KB block. */
+    /* Low memory ends at 0x80000.  The 32 KB at 0xf0000 belong to the graphics
+       board, so they are left out of both the RAM and the hole windows and the
+       video device maps them itself (vid_pcx.c).  MEM_MAPPING_CPU_ONLY on the
+       holes keeps the on-chip DMA from raising NMIs through mem_readb_phys()
+       when it walks into one. */
     {
         uint32_t ram_top   = (uint32_t) mem_size << 10;
         uint32_t ram_limit = (ram_top < PCX_RAM_CEIL) ? ram_top : PCX_RAM_CEIL;
 
-        if (ram_limit > 0x000a0000) {
-            uint32_t size = ram_limit - 0x000a0000;
+        /* The 640K..1M window is decoded by this machine, not by the generic
+           RAM mapping: its state has to allow internal mappings or nothing
+           placed here (the holes, the video window) is ever consulted. */
+        mem_set_mem_state_both(0x000a0000, PCX_GRAPH_TOP - 0x000a0000,
+                               MEM_READ_INTERNAL | MEM_WRITE_INTERNAL);
 
-            mem_set_mem_state_both(0x000a0000, size, MEM_READ_INTERNAL | MEM_WRITE_INTERNAL);
-            mem_mapping_add(&pcx.ram_map, 0x000a0000, size,
-                            mem_read_ram, mem_read_ramw, mem_read_raml,
-                            mem_write_ram, mem_write_ramw, mem_write_raml,
-                            NULL, MEM_MAPPING_INTERNAL, NULL);
+        /* RAM above the fitted size, up to the video window. */
+        if (ram_limit < PCX_VRAM_BASE) {
+            mem_mapping_add(&pcx.hole_map, ram_limit, PCX_VRAM_BASE - ram_limit,
+                            pcx_nmi_readb, pcx_nmi_readw, pcx_nmi_readl,
+                            pcx_nmi_writeb, pcx_nmi_writew, pcx_nmi_writel,
+                            NULL, MEM_MAPPING_INTERNAL | MEM_MAPPING_CPU_ONLY, NULL);
         }
 
-        /* Everything the board does not decode: RAM above the fitted size, the
-           graphics window when no board answers there, and any expansion-board
-           hole.  MEM_MAPPING_CPU_ONLY keeps the on-chip DMA from raising NMIs
-           through mem_readb_phys() when it walks into the hole. */
-        if (ram_limit < PCX_GRAPH_TOP) {
-            mem_mapping_add(&pcx.hole_map, ram_limit, PCX_GRAPH_TOP - ram_limit,
+        /* Between the video window and the BIOS. */
+        if ((PCX_VRAM_BASE + PCX_VRAM_SIZE) < PCX_GRAPH_TOP) {
+            mem_mapping_add(&pcx.hole_map2, PCX_VRAM_BASE + PCX_VRAM_SIZE,
+                            PCX_GRAPH_TOP - (PCX_VRAM_BASE + PCX_VRAM_SIZE),
                             pcx_nmi_readb, pcx_nmi_readw, pcx_nmi_readl,
                             pcx_nmi_writeb, pcx_nmi_writew, pcx_nmi_writel,
                             NULL, MEM_MAPPING_INTERNAL | MEM_MAPPING_CPU_ONLY, NULL);
