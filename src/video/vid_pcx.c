@@ -51,6 +51,19 @@ typedef struct pcx_video_t {
     uint32_t fb[PCX_VIDEO_XSIZE * PCX_VIDEO_YSIZE];
 
     uint8_t       regs[16]; /* 0xf980-0xf98f as seen by the host */
+
+    /* Host side video RAM.  The board can be told to scan a 640x350 1bpp bitmap
+       out of 0xf0000 instead of rendering characters itself (SCN267x command
+       0x23, which the BIOS sends right after the setup block).  Off unless the
+       machine asks for it with PCX_VRAM, because the same 32 KB is plain system
+       RAM on a PC-X without that window. */
+    uint8_t        vram[0x00008000];
+    mem_mapping_t  vram_mapping;
+    int            vram_on;
+    int            vram_mapped;
+    int            gfx_on;
+    int            vram_dirty;
+    int            vram_active; /* something has been written to the bitmap */
     int           parm_left; /* bytes left of the 15-byte setup block */
     int           cmd_prev;  /* previous 0xf982 value, for the double write */
     int           mon;
@@ -64,11 +77,62 @@ static video_timings_t timing_pcx = { VIDEO_ISA, 8, 16, 32, 8, 16, 32 };
 static int pcx_vid_log;
 static int pcx_vid_log_n;
 
+static uint8_t pcx_vram_read(uint32_t addr, void *priv);
+static void    pcx_vram_write(uint32_t addr, uint8_t val, void *priv);
+
+/* 640 pixels of 8 bits per line, 350 lines, most significant bit leftmost. */
+static void
+pcx_video_scan_bitmap(pcx_video_t *dev)
+{
+    int           x, y, bit;
+    uint8_t       val;
+    const uint8_t *line;
+
+    for (y = 0; y < PCX_VIDEO_YSIZE; y++) {
+        line = &dev->vram[y * (PCX_VIDEO_XSIZE / 8)];
+
+        for (x = 0; x < PCX_VIDEO_XSIZE; x += 8) {
+            val = line[x >> 3];
+
+            for (bit = 0; bit < 8; bit++)
+                dev->fb[y * PCX_VIDEO_XSIZE + x + bit] =
+                    (val & (0x80 >> bit)) ? 0x00e8e8e8 : 0x00000000;
+        }
+    }
+
+    dev->vram_dirty = 0;
+}
+
 static void
 pcx_video_poll(void *priv)
 {
     pcx_video_t *dev = (pcx_video_t *) priv;
     int          y;
+
+    if (dev->vram_on && !dev->vram_mapped) {
+        mem_mapping_add(&dev->vram_mapping, 0x000f0000, 0x00008000,
+                        pcx_vram_read, NULL, NULL,
+                        pcx_vram_write, NULL, NULL,
+                        NULL, MEM_MAPPING_INTERNAL, dev);
+        dev->vram_mapped = 1;
+    }
+
+    /* Graphics: once the host has written the bitmap, that is what the board
+       scans, whatever the character page says.  It only wins after a write
+       because the BIOS turns the graphics mode on unconditionally, even on the
+       machines that then send characters to the 8031 instead. */
+    if (dev->vram_on && dev->gfx_on && dev->vram_active) {
+        if (dev->vram_dirty)
+            pcx_video_scan_bitmap(dev);
+
+        for (y = 0; y < PCX_VIDEO_YSIZE; y++)
+            memcpy(buffer32->line[y], &dev->fb[y * PCX_VIDEO_XSIZE],
+                   PCX_VIDEO_XSIZE * 4);
+        video_blit_memtoscreen(0, 0, PCX_VIDEO_XSIZE, PCX_VIDEO_YSIZE);
+
+        timer_advance_u64(&dev->timer, TIMER_USEC * (1000000ULL / PCX_VIDEO_FREQ));
+        return;
+    }
 
     if (!dev->term.dirty) {
         timer_advance_u64(&dev->timer, TIMER_USEC * (1000000ULL / PCX_VIDEO_FREQ));
@@ -136,6 +200,12 @@ pcx_video_write(uint16_t addr, uint8_t val, void *priv)
             pcx_term_init(&dev->term);
         }
         dev->cmd_prev = val;
+        /* SCN267x command group 0x20: bit1 selects the graphics path, bit0 is
+           on/off.  0x23 is what the BIOS sends (v3 0xfd6fc). */
+        if (((val & 0xe0) == 0x20) && (val & 0x02)) {
+            dev->gfx_on = (val & 0x01) ? 1 : 0;
+        }
+
     } else if (reg == 0x00) {
         if (dev->parm_left > 0) {
             /* Setup block, the SCN2672 initialisation registers: IR0 69
@@ -150,6 +220,24 @@ pcx_video_write(uint16_t addr, uint8_t val, void *priv)
             kbc_siemens_rx(dev->kbc, val);
         }
     }
+}
+
+static uint8_t
+pcx_vram_read(uint32_t addr, UNUSED(void *priv))
+{
+    pcx_video_t *dev = (pcx_video_t *) priv;
+
+    return dev->vram[addr & 0x7fff];
+}
+
+static void
+pcx_vram_write(uint32_t addr, uint8_t val, void *priv)
+{
+    pcx_video_t *dev = (pcx_video_t *) priv;
+
+    dev->vram[addr & 0x7fff] = val;
+    dev->vram_dirty          = 1;
+    dev->vram_active         = 1;
 }
 
 /* The machine creates the controller and hands it to the board, which owns the
@@ -200,6 +288,13 @@ pcx_video_init(const device_t *info)
     overscan_x = 0;
     overscan_y = 0;
     video_inform(VIDEO_FLAG_TYPE_MDA, &timing_pcx);
+
+    if (getenv("PCX_VRAM") != NULL) {
+        /* Added on the first scan, once the machine's RAM mapping exists --
+           a mapping that is in the list before RAM gets overwritten by it. */
+        dev->vram_on = 1;
+        pclog("PC-X video: 32 KB graphics window at 0xf0000\n");
+    }
 
     timer_add(&dev->timer, pcx_video_poll, dev, 1);
     io_sethandler(0xf980, 0x0010,
