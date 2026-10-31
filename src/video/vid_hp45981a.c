@@ -159,6 +159,58 @@ hp45981a_set_ext_ctrl(hp45981a_t *dev, uint8_t val)
     }
 }
 
+/* CRTC translation.  The card carries a translation ROM that rewrites CRTC
+   values written for a 15 kHz monitor into the 25 kHz equivalents, so that
+   software written for a 15 kHz display runs unchanged on a 25 kHz one.  The
+   ROM has never been dumped, and Table 7.7 of the technical reference shows
+   that the mapping is not a plain (register, value) lookup - register 5 maps
+   06h to 09h for 80x25 text but to 01h for the 200 line graphics modes - so
+   the ROM cannot be reconstructed from the manual.  What is reproduced here
+   are the documented mode sets: when the register file matches one of the
+   15 kHz sets below, the card substitutes the matching 25 kHz set. */
+typedef struct {
+    const char *name;
+    uint8_t     mode15[12]; /* R0 .. R11 as written for a 15 kHz monitor */
+    uint8_t     mode25[12]; /* the same mode as programmed for 25 kHz       */
+} hp45981a_mode_t;
+
+static const hp45981a_mode_t hp45981a_modes[] = {
+    /* 80x25 text, 60 Hz */
+    { "80x25 60", { 0x71, 0x50, 0x5a, 0x0a, 0x1f, 0x06, 0x19, 0x1c, 0x02, 0x07, 0x06, 0x07 },
+                  { 0x6d, 0x50, 0x57, 0x0a, 0x19, 0x09, 0x19, 0x19, 0x00, 0x0f, 0x0e, 0x0f } },
+    /* 40x25 text, 60 Hz */
+    { "40x25 60", { 0x38, 0x28, 0x2d, 0x0a, 0x1f, 0x06, 0x19, 0x1c, 0x02, 0x07, 0x06, 0x07 },
+                  { 0x36, 0x28, 0x2c, 0x0a, 0x19, 0x09, 0x19, 0x19, 0x00, 0x0f, 0x0e, 0x0f } },
+    /* 320x200 and 640x200 graphics, 60 Hz */
+    { "gfx 200 60", { 0x38, 0x28, 0x2d, 0x0a, 0x7f, 0x06, 0x64, 0x70, 0x02, 0x01, 0x06, 0x07 },
+                    { 0x36, 0x28, 0x2b, 0x0a, 0x69, 0x01, 0x64, 0x66, 0x00, 0x03, 0x0e, 0x0f } }
+};
+
+static void
+hp45981a_translate_crtc(hp45981a_t *dev)
+{
+    int i;
+    int r;
+
+    for (i = 0; i < (int) (sizeof(hp45981a_modes) / sizeof(hp45981a_modes[0])); i++) {
+        if (memcmp(dev->cga.crtc, hp45981a_modes[i].mode15, 12) != 0)
+            continue;
+
+        if (hp45981a_trace > 0)
+            pclog("[HP45981A] CRTC translated for a 25 kHz monitor: %s\n", hp45981a_modes[i].name);
+
+        for (r = 0; r < 12; r++)
+            dev->cga.crtc[r] = hp45981a_modes[i].mode25[r];
+
+        /* Cursor registers scale with the character cell. */
+        dev->cga.crtc[CGA_CRTC_CURSOR_START] = 0x0e;
+        dev->cga.crtc[CGA_CRTC_CURSOR_END]   = 0x0f;
+
+        cga_recalctimings(&dev->cga);
+        return;
+    }
+}
+
 static void
 hp45981a_out(uint16_t addr, uint8_t val, void *priv)
 {
@@ -180,6 +232,13 @@ hp45981a_out(uint16_t addr, uint8_t val, void *priv)
             /* 3D0-3D7 (CRTC, mirrored four times), 3D8, 3D9 and 3DB/3DC are
                all handled by the CGA core. */
             cga_out(addr, val, &dev->cga);
+
+            /* Data writes to the CRTC go through the translation logic when a
+               25 kHz monitor is connected (W2 jumper); values with bit 7 set
+               bypass it, as on the real card. */
+            if (dev->monitor25k && (val < 0x80) &&
+                ((addr == 0x03d1) || (addr == 0x03d3) || (addr == 0x03d5) || (addr == 0x03d7)))
+                hp45981a_translate_crtc(dev);
 
             if ((addr == 0x03d8) && (dev->ext_ctrl & HP45981A_EXT_400LINE) &&
                 (getenv("HP45981A_CRTC400") != NULL))
