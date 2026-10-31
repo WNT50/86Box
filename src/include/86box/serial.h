@@ -21,6 +21,7 @@
 #define EMU_SERIAL_H
 
 #include <86box/char.h>
+#include <86box/serial_backend.h>
 
 #define SERIAL_8250          0
 #define SERIAL_8250_PCJR_3F8 1
@@ -106,7 +107,9 @@ typedef struct serial_s {
 
     struct serial_device_s *sd;
 
-    char_port_t char_port;
+    /* Whatever is on the other side of the port; NULL when nothing is attached. */
+    const serial_backend_t *be;
+
 } serial_t;
 
 typedef struct serial_device_s {
@@ -123,10 +126,16 @@ typedef struct serial_port_s {
     uint8_t hotunplug;
     int     device;
 
+    /* The host-side backend lives with the port, not with the chip. */
+    char_port_t char_port;
+
     serial_t *serial;
 } serial_port_t;
 
 extern serial_port_t com_ports[SERIAL_MAX];
+
+/* Storage for an in-machine device's callbacks; owned by serial_host.c. */
+extern serial_device_t *serial_device_get(int port);
 
 extern serial_t *serial_attach_ex(int port,
                                   void (*rcr_callback)(struct serial_s *serial, void *priv),
