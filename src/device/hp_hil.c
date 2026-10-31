@@ -164,6 +164,7 @@ hp_hil_fifo_push(uint16_t frame)
 {
     hp_hil_t *dev = hp_hil_dev;
 
+    hp_hil_trace("HIL: push %03X\n", frame);
     if (dev->fifo_count >= HIL_FIFO_SIZE) {
         dev->r2 |= HIL_R2_FOF;
         hp_hil_irq();
@@ -291,19 +292,19 @@ hp_hil_kbd_frame(uint16_t frame)
        Device Hard Reset is the exception - it is link-wide, every device acts
        on it, and handing it back would make the System read its own reset as
        a reply (and send another one, forever). */
-    if (dev->loop) {
-        if (!((addr == 0) && command && (data == HIL_DHR)))
-            hp_hil_fifo_push(frame);
-
-        /* A loop-back device hands the frame back, and link-wide commands
-           (address 0: reset, interface clear, address assignment) are still
-           meant for it - that is how it gets an address in the first place. */
-        if (!command || (addr != 0))
-            return;
+    /* A loop-back device hands link-wide frames back; a frame addressed to
+       somebody else is only passed on, and one addressed to this device is
+       answered instead of echoed. */
+    if (dev->loop && command && (addr != 0) && (addr != dev->kbd_addr)) {
+        hp_hil_fifo_push(frame);
+        return;
     }
 
-    if (!command)
+    if (!command) {
+        if (dev->loop && (addr == 0))
+            hp_hil_fifo_push(frame);
         return;
+    }
     if ((addr != 0) && (addr != dev->kbd_addr))
         return;
 
@@ -337,6 +338,15 @@ hp_hil_kbd_frame(uint16_t frame)
             break;
 
         case HIL_IDD:
+            if (getenv("HIL_IDD_LEAD20") != NULL) {
+                hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, 0x20));
+                hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, HIL_MOUSE_DESCR));
+                hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, 0xb4));
+                hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, 0x00));
+                hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, 0x03));
+                hp_hil_fifo_push(frame);   /* the command comes back last */
+                return;
+            }
             /* ID byte, then the Describe record (Appendix C): header, the
                16-bit resolution that follows a non-zero axis count, and the
                I/O descriptor byte announcing the buttons. */
@@ -355,10 +365,17 @@ hp_hil_kbd_frame(uint16_t frame)
         case HIL_ACF + 5:
         case HIL_ACF + 6:
         case HIL_ACF + 7:
-            /* The low three bits of the opcode are the address handed out. */
+            /* The low three bits of the opcode are the address handed out.
+               The frame goes back with the next address in it, which is how
+               the System learns where the chain ends (F000:3782 reads the
+               byte, subtracts 8 and uses the result as the address for the
+               next command). */
             dev->kbd_addr = data & 0x07;
             hp_hil_trace("HIL: mouse configured as address %d\n", dev->kbd_addr);
-            break;
+            if (dev->loop && (addr == 0))
+                hp_hil_fifo_push((uint16_t) ((frame & 0xff00) |
+                                             (((dev->kbd_addr + 1) & 0x07) | HIL_ACF)));
+            return;
 
         case HIL_DHR:
             dev->kbd_addr      = 0;
@@ -373,12 +390,23 @@ hp_hil_kbd_frame(uint16_t frame)
                 hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, HIL_POL_RECORD));
                 hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, 0x00));
                 hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, 0x00));
+                if (getenv("HIL_POL_ECHO") != NULL)
+                    hp_hil_fifo_push(frame);
             } else if ((data >= HIL_RPL) && (data <= (HIL_RPL + 0x0f))) {
                 /* RePoll: answer with an empty record. */
                 hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, HIL_POL_RECORD));
+            } else {
+                /* A command this device does not know is retransmitted, which
+                   is how the System sees that somebody is on the link
+                   (F000:37F5 sends 80h and compares the frame that comes
+                   back). */
+                hp_hil_fifo_push(frame);
             }
             break;
     }
+
+    if (dev->loop && (addr == 0) && (data != HIL_DHR))
+        hp_hil_fifo_push(frame);
 }
 
 /* The System wrote W0: the frame is complete, put it on the link. */
