@@ -6,24 +6,33 @@
  *
  *          This file is part of the 86Box distribution.
  *
- *          HP-HIL host controller (U777) as used by the HP Vectra 45945A.
+ *          HP-HIL host adapter (U777) of the HP Vectra 45945A, modelled as
+ *          an HP-HIL Master Link Controller plus the devices on the link.
  *
- *          Unlike MAME's MLC model, the Vectra's U777 is a plain 8-bit
- *          "index + data + status" register pair. The system ROM drives it
- *          like this (addresses are F000 offsets):
+ *          The System sees a four register window at 0x6C-0x6F, which is the
+ *          MLC's W0/W1/R0/R1/R2/R3 set (HP-HIL Technical Reference Manual,
+ *          HP 45918A, Appendix I):
  *
- *            F3830  mov al,bh / or al,8 / out 0x6d   -- index, bit 3 = command
- *                   mov al,0x10 / out 0x6c           -- 0x10 = read request
+ *            0x6C  W0/R0   frame data byte        (write sends the frame)
+ *            0x6D  W1/R1   command bit + address  (bit 3 = command bit)
+ *            0x6E  R2      parity/frame/overflow errors
+ *            0x6F  R3      INT / NMI / link error (bit 0 = frame available)
+ *
+ *          Every read of R3 acknowledges the interrupt, every R0 read pops a
+ *          frame from the receive FIFO, and R1 peeks at the frame that is on
+ *          top of it. The System ROM drives it exactly like that:
+ *
+ *            F3830  mov al,bh / or al,8 / out 0x6d   -- W1: command, address
+ *                   mov al,0x10 / out 0x6c           -- W0: POL
  *                   call 0x38b7                      -- wait for 0x6f bit 0
- *                   in al,0x6e                       -- error, must be 0
- *                   in al,0x6d / in al,0x6c          -- read back
+ *                   in al,0x6e                       -- R2 must be 0
+ *                   in al,0x6d / in al,0x6c          -- R1 / R0
  *            F371B  mov al,8 / out 0x6d
- *                   mov al,0xfe / out 0x6c           -- write/broadcast
- *            F3820  in al,0x6d / in al,0x6c           -- poll until 0x6d bit 3
- *            F3800  read-back check: 0x6d, then 0x6c must read 0x80
+ *                   mov al,0xfe / out 0x6c           -- DHR, broadcast
  *
- *          So: index in 0x6d (bit 3 = command), data and results in 0x6c,
- *          error in 0x6e, "transfer complete" in 0x6f bit 0.
+ *          The keyboard answers ACF (address assignment), IDD (identify and
+ *          describe) and POL (poll) the way hlekbd.cpp in MAME does, which in
+ *          turn follows Appendix C and E of the same manual.
  */
 #include <stdarg.h>
 #include <stdint.h>
@@ -40,7 +49,60 @@
 #include <86box/pic.h>
 extern void kbc_at_ext_out(uint8_t val);
 
-#define HP_HIL_REGS 16
+/* HP-HIL opcodes (Table 4-1). */
+#define HIL_IFC 0x00 /* Interface Clear */
+#define HIL_EPT 0x01 /* Enter Pass-Thru Mode */
+#define HIL_ELB 0x02 /* Enter Loop-Back Mode */
+#define HIL_IDD 0x03 /* Identify and Describe */
+#define HIL_DSR 0x04 /* Device Soft Reset */
+#define HIL_PST 0x05 /* Perform Self Test */
+#define HIL_RRG 0x06 /* Read Register */
+#define HIL_WRG 0x07 /* Write Register */
+#define HIL_ACF 0x08 /* Auto Configure, 08..0f */
+#define HIL_POL 0x10 /* Poll, 10..1f */
+#define HIL_RPL 0x20 /* RePoll, 20..2f */
+#define HIL_DHR 0xfe /* Device Hard Reset */
+
+/* MLC register bits (Appendix I). */
+#define HIL_R2_PERR 0x01
+#define HIL_R2_FERR 0x02
+#define HIL_R2_FOF  0x04
+#define HIL_R3_INT  0x01
+#define HIL_R3_NMI  0x02
+#define HIL_R3_LERR 0x04
+
+#define HIL_FIFO_SIZE 16
+
+/* HP-HIL IRQ 20 is the third 8259's line 4 (vector 6Ch). */
+#define HIL_IRQ_LINE 4
+
+/* ID byte of the keyboard.  E0..DFh is the ITF keyboard (46020A/46021A);
+   the Vectra shipped with exactly that one. */
+#define HIL_KBD_ID 0xc0
+
+typedef struct hp_hil_t {
+    /* MLC state. */
+    uint16_t fifo[HIL_FIFO_SIZE];
+    int      fifo_head;
+    int      fifo_count;
+    uint8_t  w1;   /* command bit + address of the frame being built */
+    uint8_t  w2;
+    uint8_t  w3;
+    uint8_t  r2;
+    uint8_t  r3;
+    uint8_t  loop; /* Loop-Back Mode: frames come straight back */
+
+    /* Keyboard on the link. */
+    uint8_t kbd_addr;     /* 0 = not configured yet */
+    uint8_t kbd_id;
+    uint8_t kbd_passthru;
+
+    /* 8041 mailbox, still used for the keyboard data path. */
+    uint8_t hp_ctrl; /* 0x68 */
+    uint8_t svc;     /* 0x69 */
+} hp_hil_t;
+
+static hp_hil_t *hp_hil_dev;
 
 #ifdef ENABLE_HP_HIL_LOG
 int hp_hil_do_log = ENABLE_HP_HIL_LOG;
@@ -60,72 +122,221 @@ hp_hil_log(const char *fmt, ...)
 #    define hp_hil_log(fmt, ...)
 #endif
 
-typedef struct hp_hil_t {
-    uint8_t index;   /* 0x6d latch */
-    uint8_t data;    /* 0x6c latch (last write, or last read result) */
-    uint8_t error;   /* 0x6e */
-    uint8_t busy;    /* 0x6f bit 0 = 1 -> transfer complete */
-    uint8_t command; /* last command byte written while bit 3 was set */
-    uint8_t hp_ctrl; /* 0x68: 8041 extension data */
-    uint8_t svc;     /* 0x69: service request status (0x06 = done) */
-    uint8_t regs[HP_HIL_REGS];
-} hp_hil_t;
+static void
+hp_hil_trace(const char *fmt, ...)
+{
+    va_list ap;
+
+    if (getenv("EPOCH_HIL_TRACE") == NULL)
+        return;
+
+    va_start(ap, fmt);
+    pclog_ex(fmt, ap);
+    va_end(ap);
+}
+
+static void
+hp_hil_irq(void)
+{
+    hp_hil_dev->r3 |= HIL_R3_INT;
+    pic3_int(HIL_IRQ_LINE, 1);
+}
+
+/* A frame the System has to read: data byte plus its command/address byte. */
+static void
+hp_hil_fifo_push(uint16_t frame)
+{
+    hp_hil_t *dev = hp_hil_dev;
+
+    if (dev->fifo_count >= HIL_FIFO_SIZE) {
+        dev->r2 |= HIL_R2_FOF;
+        hp_hil_irq();
+        return;
+    }
+
+    dev->fifo[(dev->fifo_head + dev->fifo_count) % HIL_FIFO_SIZE] = frame;
+    dev->fifo_count++;
+
+    hp_hil_irq();
+}
+
+static uint16_t
+hp_hil_fifo_peek(void)
+{
+    hp_hil_t *dev = hp_hil_dev;
+
+    if (dev->fifo_count == 0)
+        return 0;
+
+    return dev->fifo[dev->fifo_head];
+}
+
+static uint16_t
+hp_hil_fifo_pop(void)
+{
+    hp_hil_t *dev = hp_hil_dev;
+    uint16_t  frame;
+
+    if (dev->fifo_count == 0)
+        return 0;
+
+    frame     = dev->fifo[dev->fifo_head];
+    dev->fifo_head = (dev->fifo_head + 1) % HIL_FIFO_SIZE;
+    dev->fifo_count--;
+
+    return frame;
+}
+
+/* The frame a device answers with: its own address, no command bit. */
+static uint16_t
+hp_hil_reply(uint8_t addr, uint8_t data)
+{
+    return (uint16_t) (((uint16_t) (addr & 7) << 8) | data);
+}
+
+/*
+ * One device on the link: an ITF keyboard.  hlekbd.cpp in MAME does the same
+ * thing, with the key matrix left out until the link is known to work.
+ */
+static void
+hp_hil_kbd_frame(uint16_t frame)
+{
+    hp_hil_t *dev = hp_hil_dev;
+    uint8_t   addr;
+    uint8_t   data;
+    int       command;
+
+    data    = (uint8_t) (frame & 0xff);
+    addr    = (uint8_t) ((frame >> 8) & 0x07);
+    command = (frame >> 11) & 1;
+
+    if (!command)
+        return;
+    if ((addr != 0) && (addr != dev->kbd_addr))
+        return;
+
+    hp_hil_trace("HIL: device <= %03X (addr %d, op %02X)\n", frame, addr, data);
+
+    switch (data) {
+        case HIL_IFC:
+            dev->kbd_addr = 0;
+            break;
+
+        case HIL_EPT:
+            dev->kbd_passthru = 1;
+            break;
+
+        case HIL_ELB:
+            dev->kbd_passthru = 0;
+            break;
+
+        case HIL_DSR:
+            dev->kbd_addr = 0;
+            break;
+
+        case HIL_PST:
+            hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, 0x00));
+            break;
+
+        case HIL_IDD:
+            /* ID byte, then the Describe record header (Appendix C). */
+            hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, dev->kbd_id));
+            hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, 0x04));
+            break;
+
+        case HIL_ACF + 0:
+        case HIL_ACF + 1:
+        case HIL_ACF + 2:
+        case HIL_ACF + 3:
+        case HIL_ACF + 4:
+        case HIL_ACF + 5:
+        case HIL_ACF + 6:
+        case HIL_ACF + 7:
+            /* The low three bits of the opcode are the address handed out. */
+            dev->kbd_addr = data & 0x07;
+            hp_hil_trace("HIL: keyboard configured as address %d\n", dev->kbd_addr);
+            break;
+
+        case HIL_DHR:
+            dev->kbd_addr      = 0;
+            dev->kbd_passthru = 0;
+            break;
+
+        default:
+            if ((data >= HIL_POL) && (data <= (HIL_POL + 0x0f))) {
+                /* A Poll record is only returned when there is something to
+                   report; this keyboard has no key matrix yet. */
+            } else if ((data >= HIL_RPL) && (data <= (HIL_RPL + 0x0f))) {
+                /* RePoll: same, nothing queued. */
+            }
+            break;
+    }
+}
+
+/* The System wrote W0: the frame is complete, put it on the link. */
+static void
+hp_hil_transmit(uint8_t data)
+{
+    hp_hil_t *dev = hp_hil_dev;
+    uint16_t  frame;
+    uint8_t   addr = dev->w1 & 0x07;
+    int       command = (dev->w1 >> 3) & 1;
+
+    frame = (uint16_t) (((uint16_t) (dev->w1 & 0x0f) << 8) | data);
+    if (command)
+        frame |= 0x0800;
+
+    hp_hil_trace("HIL: send %03X (addr %d, %s %02X)%s\n", frame, addr,
+                 command ? "op" : "data", data, dev->loop ? " [loop]" : "");
+
+    if (dev->loop) {
+        /* Loop-Back Mode: the frame comes straight back to the System. */
+        hp_hil_fifo_push(frame);
+        return;
+    }
+
+    hp_hil_kbd_frame(frame);
+}
 
 static void
 hp_hil_write(uint16_t port, uint8_t val, void *priv)
 {
     hp_hil_t *dev = (hp_hil_t *) priv;
 
-    hp_hil_log("[%04X:%08X] HIL out(%03X, %02X)\n", CS, cpu_state.pc, port, val);
-
     switch (port) {
         case 0x0068:
             dev->hp_ctrl = val;
-            kbc_at_ext_out(val);    /* loop the byte back through 0x60 + OBF */
+            kbc_at_ext_out(val); /* loop the byte back through 0x60 + OBF */
             break;
 
         case 0x006a:
             /* Acknowledge: the service status drops back to zero. */
             dev->svc = 0x00;
             break;
-        case 0x006d:
-            dev->index = val;
+
+        case 0x006d: /* W1: command bit + address of the next frame */
+            dev->w1 = val;
             break;
 
-        case 0x006c:
-            if (getenv("EPOCH_HIL_TRACE"))
-                pclog("HIL: out 6C val=%02X idx=%02X pc=%04X\n", val, dev->index, cpu_state.pc);
-            dev->data = val;
-            dev->error = 0x00;
-            if (dev->index & 0x08) {
-                /* Command mode: 0x07 = write register, 0x10 = read register. */
-                uint8_t reg = dev->index & 0x07;
-
-                dev->command = val;
-                switch (val) {
-                    case 0x07:
-                        dev->regs[reg] = dev->data;
-                        break;
-                    case 0x10:
-                        dev->data = dev->regs[reg];
-                        break;
-                    default:
-                        break;
-                }
+        case 0x006c: /* W0: frame data, writing it sends the frame */
+            dev->r2 = 0x00;
+            /* A new command starts a new transaction: drop stale replies. */
+            if ((val == HIL_IFC) && ((dev->w1 & 0x08) != 0) && ((dev->w1 & 0x07) == 0)) {
+                dev->fifo_count = 0;
+                dev->fifo_head  = 0;
             }
-            dev->busy = 1;
-            if (dev->index & 0x08) {
-                /* HP-HIL is IRQ 20 (third 8259, line 4). It is a latched
-                   edge: the request stays in the IRR until the CPU takes it,
-                   which is what lets POST serve it from its sti loop. */
-                if (getenv("EPOCH_HIL_TRACE"))
-                    pclog("HIL: IRQ20 raise pc=%04X\n", cpu_state.pc);
-                pic3_int(4, 1);
-            }
+            hp_hil_transmit(val);
             break;
 
         case 0x006e:
-            dev->error = val;
+            /* R2 is read-only on the MLC; the System ROM writes 0xFE here to
+               reset the adapter, so drop the queued frames and the error
+               flags instead of storing the opcode. */
+            dev->fifo_head  = 0;
+            dev->fifo_count = 0;
+            dev->r2         = 0x00;
+            dev->r3        &= (uint8_t) ~HIL_R3_INT;
+            pic3_int(HIL_IRQ_LINE, 0);
             break;
 
         default:
@@ -141,46 +352,52 @@ hp_hil_read(uint16_t port, void *priv)
 
     switch (port) {
         case 0x0068:
-            return dev->hp_ctrl;
+            ret = dev->hp_ctrl;
+            break;
 
         case 0x0069:
-            return dev->svc;
+            ret = dev->svc;
+            break;
 
         case 0x006a:
-            return 0x00;
-        case 0x006c:
-            ret      = dev->data;
-            dev->busy = 0;
+            ret = 0x00;
             break;
 
-        case 0x006d:
-            ret = dev->index;
+        case 0x006c: /* R0: data byte of the frame on top, and pop it */
+            ret = (uint8_t) (hp_hil_fifo_pop() & 0xff);
             break;
 
-        case 0x006e:
-            ret = dev->error;
+        case 0x006d: /* R1: command bit + address of the frame on top */
+            if (dev->fifo_count)
+                ret = (uint8_t) ((hp_hil_fifo_peek() >> 8) & 0x0f);
+            else
+                ret = 0x00;
             break;
 
-        case 0x006f:
-            ret = dev->busy ? 0x01 : 0x00;
+        case 0x006e: /* R2: parity, frame and overflow errors */
+            ret     = dev->r2;
+            dev->r2 = 0x00;
+            break;
+
+        case 0x006f: /* R3: acknowledge the interrupt */
+            ret = dev->r3;
+            if (dev->r3 & HIL_R3_INT) {
+                dev->r3 &= (uint8_t) ~HIL_R3_INT;
+                pic3_int(HIL_IRQ_LINE, 0);
+            }
             break;
 
         default:
             break;
     }
 
-    if (getenv("EPOCH_HIL_TRACE"))
-        pclog("HILR: in(%03X)=%02X pc=%04X\n", port, ret, cpu_state.pc);
-
-    hp_hil_log("[%04X:%08X] HIL in(%03X) = %02X\n", CS, cpu_state.pc, port, ret);
+    hp_hil_trace("HIL: in(%03X) = %02X [fifo %d]\n", port, ret, dev->fifo_count);
 
     return ret;
 }
 
 /* The 0x45 data write goes to the KBC, so the KBC tells us about it. */
 extern void (*kbc_at_ext_write)(uint16_t port, uint8_t val);
-
-static hp_hil_t *hp_hil_dev;
 
 static void
 hp_hil_kbc_ext(uint16_t port, uint8_t val)
@@ -194,8 +411,12 @@ hp_hil_init(const device_t *info)
 {
     hp_hil_t *dev = (hp_hil_t *) calloc(1, sizeof(hp_hil_t));
 
-    hp_hil_dev      = dev;
+    hp_hil_dev       = dev;
     kbc_at_ext_write = hp_hil_kbc_ext;
+
+    dev->loop   = 1; /* the adapter powers up in loop-back */
+    dev->kbd_id = HIL_KBD_ID;
+    dev->svc    = 0x06;
 
     io_sethandler(0x0068, 3, hp_hil_read, NULL, NULL, hp_hil_write, NULL, NULL, dev);
     io_sethandler(0x006c, 4, hp_hil_read, NULL, NULL, hp_hil_write, NULL, NULL, dev);
@@ -209,7 +430,7 @@ hp_hil_close(void *priv)
     hp_hil_t *dev = (hp_hil_t *) priv;
 
     kbc_at_ext_write = NULL;
-    hp_hil_dev      = NULL;
+    hp_hil_dev       = NULL;
 
     io_removehandler(0x0068, 3, hp_hil_read, NULL, NULL, hp_hil_write, NULL, NULL, dev);
     io_removehandler(0x006c, 4, hp_hil_read, NULL, NULL, hp_hil_write, NULL, NULL, dev);
@@ -222,18 +443,14 @@ hp_hil_reset(void *priv)
 {
     hp_hil_t *dev = (hp_hil_t *) priv;
 
-    memset(dev->regs, 0x00, sizeof(dev->regs));
-    dev->index   = 0x00;
-    dev->data    = 0x00;
-    dev->error   = 0x00;
-    dev->busy    = 1;
-    dev->command = 0x00;
-    dev->hp_ctrl = 0x00;
-    dev->svc     = 0x06;
+    memset(dev, 0x00, sizeof(*dev));
+    dev->loop   = 1; /* the adapter starts in loop-back, like the MLC */
+    dev->kbd_id = HIL_KBD_ID;
+    dev->svc    = 0x06;
 }
 
 const device_t hp_hil_device = {
-    .name          = "HP-HIL Host Controller (U777)",
+    .name          = "HP-HIL Host Adapter (U777)",
     .internal_name = "hp_hil",
     .flags         = 0,
     .local         = 0,
