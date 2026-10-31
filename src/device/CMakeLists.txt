@@ -68,6 +68,7 @@ add_library(dev OBJECT
     postcard.c
     radisys_config.c
     serial_8251.c
+    serial_scn26x1.c
     serial.c
     softpower.c
     smbus_ali7101.c
