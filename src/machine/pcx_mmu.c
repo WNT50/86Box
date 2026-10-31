@@ -121,11 +121,20 @@ pcx_mmu_translate(uint32_t addr, int rw)
     idx   = pcx_mmu_index(pcx_mmu.ctl, addr);
     entry = pcx_mmu.pg[idx];
 
+    /* An untouched entry (all zero) means the page is not under the MMU at all
+       and passes through unchanged.  The loader writes 84 of the 1024 slots and
+       then executes code from pages it never wrote an entry for -- its own body
+       at 0x151E0 and 0x1DD80 among them -- so a zero slot cannot mean "deny",
+       or it would fault on its own instructions.  Only an entry that was
+       actually programmed takes part in the mapping. */
+    if (entry == 0x0000)
+        return addr;
+
     /* entry bit 1 permits reads, bit 0 permits writes; bits 15-7 are the 1 KB
-       page number.  A denied or absent entry is not an x86 exception either:
-       the board raises the same PIC request it uses for a system call, and the
-       entry register reads back the fault status in bits 7-6 so the handler can
-       tell the two apart. */
+       page number.  A denied entry is not an x86 exception either: the board
+       raises the same PIC request it uses for a system call, and the entry
+       register reads back the fault status in bits 7-6 so the handler can tell
+       the two apart. */
     if (!(entry & (rw ? 0x0001 : 0x0002))) {
         pcx_mmu.fault = addr;
         pcx_mmu.fpend = 1;
