@@ -107,14 +107,12 @@ typedef struct hp_hil_t {
     uint8_t  scan_reported;
     int8_t   dx;
     int8_t   dy;
-    uint32_t hle_ctx;
 
-    pc_timer_t tick;
 } hp_hil_t;
 
 static hp_hil_t *hp_hil_dev;
 
-static void hp_hil_nudge(void);
+static void hp_hil_link_ready(void *priv);
 
 #ifdef ENABLE_HP_HIL_LOG
 int hp_hil_do_log = ENABLE_HP_HIL_LOG;
@@ -209,19 +207,12 @@ hp_hil_link_scan(void)
         return;
 
     /* A device answered the scan (the mouse is on the link), so the link is
-       up: mark the driver context initialised and let the driver service run
-       instead of reporting a broken link. */
+       up.  The "link ready" event itself comes from hp_hil_link_ready(). */
     ctx = hp_hil_driver_ctx();
     if ((ctx != 0) && (dev->kbd_id != 0x00)) {
-        uint16_t flags = mem_readw_phys(ctx + 0x10);
-
-        /* Once per driver context: the driver clears the bit again at the end
-           of every service pass, so re-setting it would loop forever. */
-        if (ctx != dev->hle_ctx) {
-            dev->hle_ctx = ctx;
-            mem_writew_phys(ctx + 0x10, (uint16_t) (flags | 0x1000));
-            pic3_int(HIL_IRQ_LINE, 1);
-        }
+        /* The driver asks the 8041 for the link right before it starts
+           waiting; that is when a real 8041 reports the link is up. */
+        hp_hil_link_ready(dev);
         return;
     }
 
@@ -336,6 +327,7 @@ hp_hil_kbd_frame(uint16_t frame)
             dev->kbd_passthru = 1;
             dev->loop         = 0;
             hp_hil_trace("HIL: link leaves loop-back (EPT)\n");
+
             break;
 
         case HIL_ELB:
@@ -387,8 +379,8 @@ hp_hil_kbd_frame(uint16_t frame)
             /* Link-wide: every device acts on it and none hands it back. */
             dev->kbd_addr      = 0;
             dev->kbd_passthru = 0;
-            if (getenv("HIL_MOUSE_NUDGE") != NULL)
-                hp_hil_nudge();
+            /* The 8041 reports the link to the driver shortly after the
+               reset, and the driver waits for it at F000:92AB. */
             return;
 
         default:
@@ -423,6 +415,10 @@ hp_hil_kbd_frame(uint16_t frame)
     } else {
         hp_hil_fifo_push(frame);
     }
+
+    /* The 8041 watches the link: while the driver is parked in its wait
+       loop, the next frame is also what makes it report "link up". */
+    hp_hil_link_ready(dev);
 }
 
 /* The System wrote W0: the frame is complete, put it on the link. */
@@ -447,32 +443,22 @@ hp_hil_transmit(uint8_t data)
     hp_hil_kbd_frame(frame);
 }
 
-/* One synthetic move, so the event path can be exercised without a real
-   mouse attached to the emulated machine. */
 static void
-hp_hil_nudge(void)
-{
-    hp_hil_t *dev = hp_hil_dev;
-
-    if (dev == NULL)
-        return;
-
-    dev->dx = 1;
-    dev->dy = 0;
-}
-
-static void
-hp_hil_tick(void *priv)
+hp_hil_link_ready(void *priv)
 {
     hp_hil_t *dev = (hp_hil_t *) priv;
+    uint32_t  ctx = hp_hil_driver_ctx();
+    uint16_t  flags;
 
-    uint32_t lin = cpu_state.seg_cs.base + cpu_state.pc;
+    if (ctx == 0)
+        return;
 
-    timer_advance_u64(&dev->tick, 2000 * TIMER_USEC);
+    flags = mem_readw_phys(ctx + 0x10);
+    if (!(flags & 0x0001))
+        return;                         /* driver is not waiting */
 
-    /* 实验：只在 System 停在 F000:92AB 的等待循环里时给一次 HPHIL 中断。 */
-    if ((lin >= 0xf92ab) && (lin <= 0xf92bb))
-        pic3_int(4, 1);
+    mem_writew_phys(ctx + 0x10, (uint16_t) (flags | 0x1004));
+    pic3_int(HIL_IRQ_LINE, 1);
 }
 
 static void
@@ -564,9 +550,6 @@ hp_hil_init(const device_t *info)
     dev->kbd_id = HIL_MOUSE_ID;
 
     io_sethandler(0x006c, 4, hp_hil_read, NULL, NULL, hp_hil_write, NULL, NULL, dev);
-
-    if (getenv("EPOCH_HIL_TICK") != NULL)
-        timer_add(&dev->tick, hp_hil_tick, dev, 1);
 
     return dev;
 }
