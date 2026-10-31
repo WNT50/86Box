@@ -286,6 +286,13 @@ hp_hil_kbd_frame(uint16_t frame)
     addr    = (uint8_t) ((frame >> 8) & 0x07);
     command = (frame >> 11) & 1;
 
+    /* Loop-Back Mode closes the end of the link: whatever arrives is handed
+       straight back, which is what the System's self test looks for. */
+    if (dev->loop) {
+        hp_hil_fifo_push(frame);
+        return;
+    }
+
     if (!command)
         return;
     if ((addr != 0) && (addr != dev->kbd_addr))
@@ -381,12 +388,9 @@ hp_hil_transmit(uint8_t data)
     hp_hil_trace("HIL: send %03X (addr %d, %s %02X)%s\n", frame, addr,
                  command ? "op" : "data", data, dev->loop ? " [loop]" : "");
 
-    if (dev->loop) {
-        /* Loop-Back Mode: the frame comes straight back to the System. */
-        hp_hil_fifo_push(frame);
-        return;
-    }
-
+    /* The adapter is only the wire: a device in loop-back hands the frame
+       back itself (HP-HIL TRM 1-10), and a device in pass-thru answers the
+       commands addressed to it. */
     hp_hil_kbd_frame(frame);
 }
 
