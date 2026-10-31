@@ -144,6 +144,7 @@ typedef struct vaxmate_video_t {
     int      memaddr_backup;
     int      text_base;
     int      displine;
+    int      active_lines;
     int      firstline;
     int      lastline;
     int      linepos;
@@ -566,8 +567,8 @@ vaxmate_video_render_graphics(vaxmate_video_t *vid, int line, int displine)
     int      l;
     int      x;
 
-    if (m->lines < 400)
-        l = displine * m->lines / 400;
+    if ((vid->active_lines > 0) && (m->lines != vid->active_lines))
+        l = displine * m->lines / vid->active_lines;
     else
         l = displine;
 
@@ -629,9 +630,16 @@ vaxmate_video_poll(void *priv)
         vdisp_rows = 400;
     }
 
-    active = vdisp_rows * lpr;
-    total  = (vid->mode == VMODE_G800x252x4) ? VAXMATE_LINES_800
-                                             : VAXMATE_LINES_640;
+    if (vid->mode == VMODE_G800x252x4) {
+        /* 252-line mode: the monitor switches to its 250-line raster (pin 7),
+           so only 252 lines are displayed inside the 441-line field. */
+        active = 252;
+        total  = VAXMATE_LINES_800;
+    } else {
+        active = vdisp_rows * lpr;
+        total  = VAXMATE_LINES_640;
+    }
+    vid->active_lines = active;
 
     /* 状态位每次调用翻转一次：BIOS 靠轮询 3DA/3BA 的 bit0 找显示期，
        只要它会变化就不会死等。 */
@@ -943,6 +951,7 @@ vaxmate_video_init(UNUSED(const device_t *info))
     vid->cursoron      = 1;
     vid->firstline     = 1000;
     vid->displine      = 0;
+    vid->active_lines  = 400;
     vid->memaddr       = 0;
     vid->text_base     = 0x8000;
 
