@@ -38,6 +38,21 @@ ISR `F000:552D`（IRQ20）：
 55A4  out 0x7C,0x64                     ; 第三片特定 EOI，L2=4
 ```
 
+### 三条中断入口（IVT 实测）
+
+| 向量 | 入口 | 参数 | 去向 |
+|---|---|---|---|
+| `68h` IRQ16 SVC | `F000:551F` | `cx=0xAE dh=0x01 dl=0x60 bh=4 bl=0` | 共用体内 `int 6F AH=4`（BP=`0xAE`）→ `0x8190` → `0x82F3` 状态分派 |
+| `69h` IRQ17 OBF | `F000:5514` | — | `out 0x7C,0x61`（pic3 EOI L2=1）→ `int 9`（键盘 BIOS） |
+| `6Ch` IRQ20 HPHIL | `F000:552D` | `cx=0x114 dh=0x10 dl=0x64 bh=0 bl=0` | `int 6F AH=0`（BP=`0x114`）→ `0x87D0` 设备服务 |
+
+共用体在 `0x5537`：`push ds; xor ax,ax; mov ds,ax; mov bp,0x1BC; mov ds,[ds:bp+2];
+mov bp,0x12; mov ds,[ds:bp+4]` —— 经 `[0:0x1BC]`（IVT `6Fh` 段）→ `9F00` 的记录表取 DS，
+随后按 `dh`/`dl` 做「屏蔽 → 主片 EOI → `int 6F` → 解除屏蔽 → 第三片特定 EOI」。
+
+实测：给 `0x68` 写入命令字节后拉 OBF（line 1），`INTA ret=69` 出现 2 次，
+说明 IRQ17 通路可用；但 HIL 状态机不动，仍缺 SVC 侧的事件语义。
+
 ## 3. 设备服务 `F000:87D0`（`int 6F AH=0 BP=0x114`）
 
 `9F00:0114` 记录 → `F000:87D0`，DS=`9F8D`。`AH` 经表 `0x87E7` 分派，`AH=0` → `0x8860`：
