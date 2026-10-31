@@ -141,8 +141,18 @@ hp_hil_trace(const char *fmt, ...)
 static void
 hp_hil_irq(void)
 {
-    hp_hil_dev->r3 |= HIL_R3_INT;
-    pic3_int(HIL_IRQ_LINE, 1);
+    hp_hil_t *dev = hp_hil_dev;
+
+    /* The MLC's INT output follows the FIFO, it is not a one-shot latch:
+       it stays up until the System has taken every queued frame, and drops
+       again as soon as the last one is read. */
+    if (dev->fifo_count) {
+        dev->r3 |= HIL_R3_INT;
+        pic3_int(HIL_IRQ_LINE, 1);
+    } else {
+        dev->r3 &= (uint8_t) ~HIL_R3_INT;
+        pic3_int(HIL_IRQ_LINE, 0);
+    }
 }
 
 /* A frame the System has to read: data byte plus its command/address byte. */
@@ -186,6 +196,8 @@ hp_hil_fifo_pop(void)
     frame     = dev->fifo[dev->fifo_head];
     dev->fifo_head = (dev->fifo_head + 1) % HIL_FIFO_SIZE;
     dev->fifo_count--;
+
+    hp_hil_irq();
 
     return frame;
 }
@@ -343,8 +355,7 @@ hp_hil_write(uint16_t port, uint8_t val, void *priv)
             dev->fifo_head  = 0;
             dev->fifo_count = 0;
             dev->r2         = 0x00;
-            dev->r3        &= (uint8_t) ~HIL_R3_INT;
-            pic3_int(HIL_IRQ_LINE, 0);
+            hp_hil_irq();
             break;
 
         default:
@@ -387,12 +398,8 @@ hp_hil_read(uint16_t port, void *priv)
             dev->r2 = 0x00;
             break;
 
-        case 0x006f: /* R3: acknowledge the interrupt */
+        case 0x006f: /* R3: INT/NMI/LERR; reading it does not drop INT */
             ret = dev->r3;
-            if (dev->r3 & HIL_R3_INT) {
-                dev->r3 &= (uint8_t) ~HIL_R3_INT;
-                pic3_int(HIL_IRQ_LINE, 0);
-            }
             break;
 
         default:
