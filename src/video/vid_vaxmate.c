@@ -119,7 +119,8 @@ enum {
 typedef struct vaxmate_video_t {
     mem_mapping_t mapping;
 
-    uint8_t  crtc[32];
+    uint8_t  crtc[32];     /* values the 6845 sees (after translation) */
+    uint8_t  crtc_raw[32]; /* values the guest wrote to 03D5           */
     uint8_t  crtcreg;
     uint8_t  ctrl_a;
     uint8_t  ctrl_b;
@@ -194,34 +195,26 @@ static int vaxmate_mode_width(int mode);
 /*
  * Translation ROM (TRM page 7-26, Figure 7-1).
  *
- * The industry-standard CRTC window (03D4/03D5) feeds a translation ROM whose
- * output drives the 6845. It converts CGA parameters into the values the
- * DIGITAL display needs: the VAXmate scans 400 lines (each 200-line field is
- * shown twice) and uses a 8x16 character cell instead of 8x8, so every
- * vertical register has to be scaled and the maximum scan line address becomes
- * 15. Horizontal registers stay in character units and pass through unchanged.
+ * The industry-standard CRTC window (03D4/03D5) feeds a 4K x 8 parameter
+ * translation ROM: an 03D4 write latches the low four bits of the register
+ * number, and an 03D5 write addresses the ROM with {register 0-15, data 7-0}.
+ * Only the ROM output (LAD7-0) reaches the 6845, so software that programs
+ * CGA timings still ends up with DIGITAL monitor timings.
+ *
+ * The ROM contents are not recoverable: it sits inside the gate array and the
+ * CPU cannot read it. This is therefore a behavioural model rather than a
+ * table dump. It keeps the guest's values in crtc_raw[] and rewrites the
+ * vertical registers so that the 6845 describes the frame we actually render:
+ * a fixed 400-line monitor (a 200-line field is shown twice) and an 8x16
+ * character cell in text modes. R6 is only seven bits wide, so the number of
+ * scan lines per character row is the smallest power of two that keeps the
+ * row count inside 127. The guest's blanking and sync offsets are kept, in
+ * scan lines, so the field proportions do not change.
  *
  * DEC's own ROM BIOS programs the DIGITAL window (03D0/03D1) directly and never
  * touches this path, so the translation only affects software written for an
  * industry-standard CGA.
  */
-static uint8_t
-vaxmate_translation_rom(int reg, uint8_t val)
-{
-    switch (reg) {
-        case CRTC_VTOTAL:          /* vertical total          */
-        case CRTC_VDISP:           /* vertical displayed      */
-        case CRTC_VSYNC:           /* vertical sync position  */
-            return (uint8_t) (val * 2 + 1);
-
-        case CRTC_MAXSCAN:         /* max scan line address   */
-            return 0x0f;           /* 16 scan lines per row   */
-
-        default:
-            return val;
-    }
-}
-
 static void
 vaxmate_video_recalctimings(vaxmate_video_t *vid)
 {
@@ -366,6 +359,62 @@ static const vaxmate_gfx_t vaxmate_modes[9] = {
     /* 7 640x400 4-color */ { 640, 400, 160, 4, 0x4000, 0xb0000, 2 },
     /* 8 800x252 4-color */ { 800, 252, 200, 4, 0x4000, 0xb0000, 2 },
 };
+
+static void
+vaxmate_crtc_translate(vaxmate_video_t *vid)
+{
+    const vaxmate_gfx_t *m = &vaxmate_modes[vid->mode];
+    int text = (vid->mode <= VMODE_TEXT80);
+    int lines;
+    int lpr  = 1;
+    int rows;
+    int raw4, raw6, raw7, raw9;
+    int guest_lpr, guest_lines, guest_total;
+    int blank_lines, sync_lines;
+    int i, v;
+
+    lines = text ? 400 : m->lines;
+
+    while ((lines / lpr) > 128)
+        lpr <<= 1;
+    if (text)
+        lpr = 16;
+
+    rows = lines / lpr;
+
+    for (i = 0; i < 32; i++)
+        vid->crtc[i] = vid->crtc_raw[i];
+
+    raw4 = vid->crtc_raw[CRTC_VTOTAL] & 0x7f;
+    raw6 = vid->crtc_raw[CRTC_VDISP] & 0x7f;
+    raw7 = vid->crtc_raw[CRTC_VSYNC] & 0x7f;
+    raw9 = vid->crtc_raw[CRTC_MAXSCAN] & 0x1f;
+
+    /* Blanking and sync offsets as the guest meant them, counted in scan
+       lines so they survive the change of scan lines per row. */
+    guest_lpr   = raw9 + 1;
+    guest_lines = (raw6 + 1) * guest_lpr;
+    guest_total = (raw4 + 1) * guest_lpr;
+
+    blank_lines = guest_total - guest_lines;
+    if (blank_lines < 0)
+        blank_lines = 0;
+
+    sync_lines = ((raw7 + 1) - (raw6 + 1)) * guest_lpr;
+    if (sync_lines < 0)
+        sync_lines = 0;
+
+    vid->crtc[CRTC_MAXSCAN] = (uint8_t) (lpr - 1);
+    vid->crtc[CRTC_VDISP]   = (uint8_t) (rows - 1);
+
+    v = rows + (blank_lines / lpr);
+    vid->crtc[CRTC_VTOTAL] = (uint8_t) ((v > 0x7f) ? 0x7f : v);
+
+    v = rows + (sync_lines / lpr);
+    vid->crtc[CRTC_VSYNC] = (uint8_t) ((v > 0x7f) ? 0x7f : v);
+}
+
+
 
 static int
 vaxmate_mode_width(int mode)
@@ -693,7 +742,8 @@ vaxmate_video_out(uint16_t addr, uint8_t val, void *priv)
 
         case 0x3d5: /* industry-standard CRTC data, through translation ROM */
             if (vid->crtcreg < 32) {
-                vid->crtc[vid->crtcreg] = vaxmate_translation_rom(vid->crtcreg, val);
+                vid->crtc_raw[vid->crtcreg] = val;
+                vaxmate_crtc_translate(vid);
                 vid->write_data         = val;
                 vid->status_b          |= STATB_FROM_3D4;
                 vaxmate_video_recalctimings(vid);
@@ -706,6 +756,8 @@ vaxmate_video_out(uint16_t addr, uint8_t val, void *priv)
             vid->text_base = cur_mda ? 0 : 0x8000;
             vid->ctrl_a = val;
             vid->mode   = vaxmate_video_mode(vid);
+            vaxmate_crtc_translate(vid);
+            vaxmate_video_recalctimings(vid);
             return;
 
         case 0x3d9:
@@ -716,6 +768,8 @@ vaxmate_video_out(uint16_t addr, uint8_t val, void *priv)
             vid->ctrl_b     = val;
             vid->monitor_mode = (val & CTLB_MONITOR252) ? 1 : 0;
             vid->mode       = vaxmate_video_mode(vid);
+            vaxmate_crtc_translate(vid);
+            vaxmate_video_recalctimings(vid);
             return;
 
         default:
@@ -876,7 +930,8 @@ vaxmate_video_init(UNUSED(const device_t *info))
        hardware timing before the BIOS touches the CRTC: 25 rows x 16 scan
        lines plus R5=8 vertical adjust = the 400-line field. */
     for (c = 0; c < 12; c++)
-        vid->crtc[c] = vaxmate_crtc_blocks[1][c];
+        vid->crtc_raw[c] = vaxmate_crtc_blocks[1][c];
+    vaxmate_crtc_translate(vid);
 
     vid->cursorvisible = 0;
     vid->cursoron      = 1;
