@@ -11,7 +11,7 @@
  *          On the real board an 8031 takes the byte stream the host writes to
  *          0xf980, works out the cursor and the attributes, and feeds the
  *          SCN2672 through the character and attribute RAM.  This module models
- *          the terminal behaviour only -- the byte stream, the 120x25 page and
+ *          the terminal behaviour only -- the byte stream, the 80x25 page and
  *          the character generator -- so that the POST messages the BIOS sends
  *          ("*** CRT-CONTR. DEFECT ***", "*** MEMORY-ERROR FOUND *" and the
  *          rest of the v3 table at 0x0470-0x05c0) show up on screen.
@@ -25,7 +25,7 @@
 
 #include <stdint.h>
 
-#define PCX_TERM_COLS 120
+#define PCX_TERM_COLS 80
 #define PCX_TERM_ROWS 25
 #define PCX_TERM_CELL_W 8
 #define PCX_TERM_CELL_H 14

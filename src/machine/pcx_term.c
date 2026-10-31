@@ -61,7 +61,9 @@ pcx_term_init(pcx_term_t *term)
     if (term == NULL)
         return;
 
-    memset(term, 0x00, sizeof(*term));
+    /* Only the screen state is reset here: the font is loaded once at reset
+       and must survive a later mode set (the board clears the page when the
+       BIOS hands it the setup block). */
     pcx_term_clear(term);
     term->col      = 0;
     term->row      = 0;
