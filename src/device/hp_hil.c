@@ -82,6 +82,8 @@
    Relative positioners are 60..6Fh; 68h is the HP Mouse 46060A. */
 #define HIL_MOUSE_ID    0x68
 /* Leading byte of a poll record: keycode set 1, relative coordinates. */
+/* Poll header bits 1-0: 00 none, 01 X, 10 X and Y, 11 X, Y and Z. */
+#define HIL_POL_AXES_XY 0x02
 #define HIL_POL_RECORD  0x40
 /* Describe header: 8-bit relative X and Y, I/O descriptor byte follows. */
 #define HIL_MOUSE_DESCR 0x12
@@ -103,12 +105,16 @@ typedef struct hp_hil_t {
     uint8_t kbd_id;
     uint8_t kbd_passthru;
     uint8_t  scan_reported;
+    int8_t   dx;
+    int8_t   dy;
     uint32_t hle_ctx;
 
     pc_timer_t tick;
 } hp_hil_t;
 
 static hp_hil_t *hp_hil_dev;
+
+static void hp_hil_nudge(void);
 
 #ifdef ENABLE_HP_HIL_LOG
 int hp_hil_do_log = ENABLE_HP_HIL_LOG;
@@ -381,19 +387,26 @@ hp_hil_kbd_frame(uint16_t frame)
             /* Link-wide: every device acts on it and none hands it back. */
             dev->kbd_addr      = 0;
             dev->kbd_passthru = 0;
+            if (getenv("HIL_MOUSE_NUDGE") != NULL)
+                hp_hil_nudge();
             return;
 
         default:
             if ((data >= HIL_POL) && (data <= (HIL_POL + 0x0f))) {
-                /* Poll record: report type first (0x40 = keycode set 1 with
-                   relative coordinates), then X and Y motion.  Nothing has
-                   moved yet, so both deltas are zero. */
-                hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, HIL_POL_RECORD));
-                hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, 0x00));
-                hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, 0x00));
+                /* Poll record (TRM appendix E): the header says which axes
+                   follow in bits 1-0, and a device with nothing to report
+                   answers with no record at all - only the poll command
+                   comes back. */
+                if (dev->dx || dev->dy) {
+                    hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr,
+                                                  HIL_POL_AXES_XY));
+                    hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, (uint8_t) dev->dx));
+                    hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, (uint8_t) dev->dy));
+                    dev->dx = 0;
+                    dev->dy = 0;
+                }
             } else if ((data >= HIL_RPL) && (data <= (HIL_RPL + 0x0f))) {
-                /* RePoll: answer with an empty record. */
-                hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, HIL_POL_RECORD));
+                /* RePoll: an empty record is just the incremented command. */
             }
             break;
     }
@@ -402,7 +415,14 @@ hp_hil_kbd_frame(uint16_t frame)
        the System learns the device is there and what it answered
        (F000:3820 drains until it sees the command come back, F000:37F5 uses
        it as a link test). */
-    hp_hil_fifo_push(frame);
+    if ((data >= HIL_POL) && (data <= (HIL_POL + 0x0f))) {
+        /* The record ends with the poll command incremented, so the next
+           device on the link sees its own address. */
+        hp_hil_fifo_push((uint16_t) ((frame & ~0x0700) |
+                                     (((addr + 1) & 0x07) << 8)));
+    } else {
+        hp_hil_fifo_push(frame);
+    }
 }
 
 /* The System wrote W0: the frame is complete, put it on the link. */
@@ -425,6 +445,20 @@ hp_hil_transmit(uint8_t data)
        back itself (HP-HIL TRM 1-10), and a device in pass-thru answers the
        commands addressed to it. */
     hp_hil_kbd_frame(frame);
+}
+
+/* One synthetic move, so the event path can be exercised without a real
+   mouse attached to the emulated machine. */
+static void
+hp_hil_nudge(void)
+{
+    hp_hil_t *dev = hp_hil_dev;
+
+    if (dev == NULL)
+        return;
+
+    dev->dx = 1;
+    dev->dy = 0;
 }
 
 static void
