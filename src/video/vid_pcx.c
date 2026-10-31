@@ -12,14 +12,17 @@
  *          0xf980 and the 8031 turns them into characters in the board's
  *          character RAM, which the 2672 then scans out.  This model keeps the
  *          host side (0xf980-0xf98f) and the terminal page (pcx_term.c) and
- *          scans the page out at 960x350, which is what the board's timing
- *          gives: 24 MHz / 8 pixels per character = 120 columns of 8 pixels and
- *          25 rows of 14 lines.
+ *          scans the page out at 640x350, which is what the Servicehandbuch
+ *          gives for the Bildschirmeinheit: 80 characters of 8x14 dots per
+ *          line, 25 lines, and a 640x350 graphics mode on the same tube.
  *
- *          The SCN2672's own register file is not modelled yet: the BIOS writes
- *          a parameter block through 0xf980 on the way to the 8031 (v3 0xfc9a3)
- *          and those bytes are swallowed by the terminal, which is harmless as
- *          long as the geometry above is the one the BIOS programs.
+ *          The SCN2672's own register file is not modelled: the BIOS writes its
+ *          eleven initialisation registers through 0xf980 on the way to the
+ *          8031, and this file only counts them off so they never reach the
+ *          screen.  Two of them agree with the geometry above -- IR0 0x69 gives
+ *          14 scanlines per character row, IR4 0x18 gives 25 rows -- while IR5
+ *          0x27 would say 40 characters per row, which is the one part of the
+ *          block that does not fit 80 columns; the page keeps 80 for now.
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -37,7 +40,7 @@
 #include <86box/pcx_vid.h>
 #include <86box/kbc_siemens.h>
 
-#define PCX_VIDEO_XSIZE 960
+#define PCX_VIDEO_XSIZE 640
 #define PCX_VIDEO_YSIZE 350
 #define PCX_VIDEO_FREQ  50 /* Hz, the board's vertical rate */
 
@@ -48,6 +51,8 @@ typedef struct pcx_video_t {
     uint32_t fb[PCX_VIDEO_XSIZE * PCX_VIDEO_YSIZE];
 
     uint8_t       regs[16]; /* 0xf980-0xf98f as seen by the host */
+    int           parm_left; /* bytes left of the 15-byte setup block */
+    int           cmd_prev;  /* previous 0xf982 value, for the double write */
     int           mon;
     kbc_siemens_t *kbc;     /* protocol level keyboard/terminal channel */
 } pcx_video_t;
@@ -110,14 +115,40 @@ pcx_video_write(uint16_t addr, uint8_t val, void *priv)
 
     dev->regs[reg] = val;
 
+
     if ((reg == 0x00) && (pcx_vid_log > 0) && (pcx_vid_log_n < 8192))
         pclog("[PCXV] %05i %02X %c\n", pcx_vid_log_n++, val,
               ((val >= 0x20) && (val < 0x7f)) ? val : '.');
 
-    if (reg == 0x00) {
-        pcx_term_write(&dev->term, val);
-        /* The 8031 sees the same stream and answers queries that need one. */
-        kbc_siemens_rx(dev->kbc, val);
+    if (reg == 0x02) {
+        /* 0xf982 is the board's command register.  The BIOS writes 0 here
+           (twice) before the 15-byte setup block, and 0x28/0x23 once the block
+           is in.  Command 0 puts the 8031 back into setup mode: the next 15
+           bytes on 0xf980 are the display parameters, not characters, and the
+           page starts blank (v3 0xfc99b). */
+        if (val != 0x00)
+            dev->parm_left = 0; /* 0x28/0x23 end the setup phase */
+        if ((val == 0x00) && (dev->cmd_prev == 0x00)) {
+            /* Two zeros in a row open the setup block; the register clear loop
+               also ends on 0xf982, but that write follows 0xf983, so it does not
+               arm the counter (v3 0xfc99b vs 0xfc9c7). */
+            dev->parm_left = 15;
+            pcx_term_init(&dev->term);
+        }
+        dev->cmd_prev = val;
+    } else if (reg == 0x00) {
+        if (dev->parm_left > 0) {
+            /* Setup block, the SCN2672 initialisation registers: IR0 69
+               (14 scanlines, transparent buffer), IR4 18 (25 rows), IR5 27,
+               IR9 f0, the rest zero.
+               Nothing of it reaches the screen; the 8031 turns it into SCN2672
+               timing.  Kept as a byte count for now, see the file header. */
+            dev->parm_left--;
+        } else {
+            pcx_term_write(&dev->term, val);
+            /* The 8031 sees the same stream and answers queries that need one. */
+            kbc_siemens_rx(dev->kbc, val);
+        }
     }
 }
 
@@ -163,6 +194,8 @@ pcx_video_init(const device_t *info)
         pclog("PC-X video: character generator not found, text will be blank\n");
 
     memset(dev->regs, 0x00, sizeof(dev->regs));
+    dev->parm_left = 0;
+    dev->cmd_prev  = 0xff;
 
     overscan_x = 0;
     overscan_y = 0;
