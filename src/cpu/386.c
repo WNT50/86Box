@@ -324,7 +324,7 @@ exec386_2386(int32_t cycs)
                                   cpu_state.pc, AX, BX, CX, DX, DS, SP, last_lin);
                         last_lin = lin;
                     }
-                    if (bp_on && (CS == 0x0f000) && ((cpu_state.pc == 0x082f3) || (cpu_state.pc == 0x083ca) || (cpu_state.pc == 0x087d0) ||
+                    if (bp_on && (CS == 0x0f000) && ((cpu_state.pc == 0x0e987) || (cpu_state.pc == 0x082f3) || (cpu_state.pc == 0x083ca) || (cpu_state.pc == 0x087d0) ||
                                                     (cpu_state.pc == 0x07b85) || (cpu_state.pc == 0x07d65) ||
                                                     (cpu_state.pc == 0x07c10) || (cpu_state.pc == 0x07c34) ||
                                                     (cpu_state.pc == 0x08956) ||
@@ -339,7 +339,7 @@ exec386_2386(int32_t cycs)
                                                     (cpu_state.pc == 0x07245) || (cpu_state.pc == 0x0725a) ||
                                                     (cpu_state.pc == 0x086c0) || (cpu_state.pc == 0x0845d) ||
                                                     (cpu_state.pc == 0x08444) || (cpu_state.pc == 0x08860) ||
-                                                    (cpu_state.pc == 0x082f3) || (cpu_state.pc == 0x083ca) ||
+                                                    (cpu_state.pc == 0x0e987) || (cpu_state.pc == 0x082f3) || (cpu_state.pc == 0x083ca) ||
                                                     (cpu_state.pc == 0x08371) || (cpu_state.pc == 0x0839a) ||
                                                     (cpu_state.pc == 0x078b1)))
                         pclog("HILBP: %04X:%04X ds=%04X ax=%04X sp=%04X\n", CS, cpu_state.pc, DS, AX, SP);
