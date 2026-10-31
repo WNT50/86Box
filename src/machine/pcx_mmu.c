@@ -46,7 +46,7 @@
    space read slots 0x1B-0x45 of the table. */
 #define PCX_MMU_WIN_FROM 0x0020
 #define PCX_MMU_WIN_TO   0x004a
-#define PCX_MMU_WIN_OFF  5
+#define PCX_MMU_WIN_OFF  3
 
 typedef struct {
     uint16_t ctl;
