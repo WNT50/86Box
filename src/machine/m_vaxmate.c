@@ -30,6 +30,8 @@
 #include <86box/hdc.h>
 #include <86box/nvr.h>
 #include <86box/machine.h>
+#include <86box/thread.h>
+#include <86box/network.h>
 #include <86box/rom.h>
 #include "cpu.h"
 #include <86box/vid_vaxmate.h>
@@ -524,7 +526,10 @@ machine_at_vaxmate_init(const machine_t *model)
                   vaxmate_uart_write, NULL, NULL,
                   &vax_uart[1]);
     device_add(&vaxmate_video_device);
-    device_add(&vaxmate_lance_device);
+    /* 板载网卡按 86Box 惯例走 "Internal" 条目：机型表里 .net_device 指向
+       本设备，只有用户在"网络"设置里选了 Internal 才实例化。 */
+    if ((net_cards_conf[0].device_num == NET_INTERNAL) && machine_get_net_device(machine))
+        device_add(machine_get_net_device(machine));
 
     /* AT 兼容的 RTC/CMOS。BIOS 在 F000:4AC5 用 mov al,0x92 / in al,0x71
        把 CMOS 0x12 读到 [0x549]，再由 F000:4E19-4E31 逐半字节计数：

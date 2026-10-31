@@ -46,6 +46,7 @@
 #include <86box/plat_unused.h>
 #include <86box/thread.h>
 #include <86box/network.h>
+#include <86box/net_lance.h>
 #include <86box/machine.h>
 
 const machine_filter_t machine_types[] = {
@@ -3756,7 +3757,7 @@ const machine_t machines[] = {
         .fdc_device               = NULL,
         .vid_device               = NULL,
         .snd_device               = NULL,
-        .net_device               = NULL,
+        .net_device               = &vaxmate_lance_device,
         .aliases                  = { "", "" }
     },
 
