@@ -47,6 +47,7 @@
 #include <86box/keyboard.h>
 #include <86box/device.h>
 #include <86box/pic.h>
+#include <86box/mem.h>
 #include <86box/timer.h>
 
 /* HP-HIL opcodes (Table 4-1). */
@@ -101,7 +102,8 @@ typedef struct hp_hil_t {
     uint8_t kbd_addr;     /* 0 = not configured yet */
     uint8_t kbd_id;
     uint8_t kbd_passthru;
-    uint8_t scan_reported;
+    uint8_t  scan_reported;
+    uint32_t hle_ctx;
 
     pc_timer_t tick;
 } hp_hil_t;
@@ -174,13 +176,47 @@ hp_hil_fifo_push(uint16_t frame)
     hp_hil_irq();
 }
 
+/* The HIL driver keeps its context in RAM and finds it through the int 6Fh
+   record table: IVT 6Fh -> record 0x114 -> its data segment.  The 8041 owns
+   the bring-up, so this is where the "link initialised" bit of that context
+   is set; without it the driver parks in state 2 and POST waits forever. */
+static uint32_t
+hp_hil_driver_ctx(void)
+{
+    uint16_t ivt = (uint16_t) (mem_readb_phys(0x1be) | (mem_readb_phys(0x1bf) << 8));
+    uint16_t dseg = mem_readw_phys((uint32_t) ivt * 16 + 0x114 + 4);
+
+    if (dseg == 0x0000)
+        return 0;
+
+    return (uint32_t) dseg * 16;
+}
+
 void
 hp_hil_link_scan(void)
 {
     hp_hil_t *dev = hp_hil_dev;
+    uint32_t  ctx;
 
     if (dev == NULL)
         return;
+
+    /* A device answered the scan (the mouse is on the link), so the link is
+       up: mark the driver context initialised and let the driver service run
+       instead of reporting a broken link. */
+    ctx = hp_hil_driver_ctx();
+    if ((ctx != 0) && (dev->kbd_id != 0x00)) {
+        uint16_t flags = mem_readw_phys(ctx + 0x10);
+
+        /* Once per driver context: the driver clears the bit again at the end
+           of every service pass, so re-setting it would loop forever. */
+        if (ctx != dev->hle_ctx) {
+            dev->hle_ctx = ctx;
+            mem_writew_phys(ctx + 0x10, (uint16_t) (flags | 0x1000));
+            pic3_int(HIL_IRQ_LINE, 1);
+        }
+        return;
+    }
 
     /* Nothing on the link has been given an address (the System never issues
        ACF/IDD itself, that is the 8041's job), so the scan finds no device.
@@ -395,6 +431,7 @@ hp_hil_write(uint16_t port, uint8_t val, void *priv)
             dev->fifo_head  = 0;
             dev->fifo_count = 0;
             dev->r2         = 0x00;
+            hp_hil_trace("HIL: mode 0x%02X -> loop=%d\n", val, dev->loop);
             hp_hil_irq();
             break;
 
