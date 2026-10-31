@@ -112,6 +112,7 @@
 #define MFM_SECTOR_TIME    (500 * TIMER_USEC)
 #define MFM_TYPE_USER 255  /* user drive type */
 #define MFM_SLOT_MASK 0x07 /* planar slot mask */
+#define MFM_ACB_ESDI 0x20 /* ACB-2600 series variant with ESDI drives */
 
 enum {
     STATE_IDLE = 0,
@@ -434,6 +435,7 @@ typedef struct mfm_t {
     int8_t     reset; /* reset state counter */
     int8_t     ready; /* ready state counter */
     int8_t     abort; /* abort state counter */
+    uint8_t    hdd_bus; /* drive bus this instance serves */
 
     /* Data transfer. */
     int16_t buf_idx; /* buffer index and pointer */
@@ -715,7 +717,7 @@ do_format(mfm_t *dev, drive_t *drive, ccb_t *ccb)
         case STATE_FINIT:
 do_fmt:
             /* Activate the status icon. */
-            ui_sb_update_icon_write(SB_HDD | HDD_BUS_MFM, 1);
+            ui_sb_update_icon_write(SB_HDD | dev->hdd_bus, 1);
 
             /* Seek to cylinder. */
             if (do_seek(dev, drive, start_cyl)) {
@@ -753,7 +755,7 @@ do_fmt:
             }
 
             /* De-activate the status icon. */
-            ui_sb_update_icon_write(SB_HDD | HDD_BUS_MFM, 0);
+            ui_sb_update_icon_write(SB_HDD | dev->hdd_bus, 0);
 
             /* This saves us a LOT of code. */
             dev->state = STATE_FINIT;
@@ -766,11 +768,38 @@ do_fmt:
     /* If we errored out, go back idle. */
     if (intr) {
         /* De-activate the status icon. */
-        ui_sb_update_icon(SB_HDD | HDD_BUS_MFM, 0);
-        ui_sb_update_icon_write(SB_HDD | HDD_BUS_MFM, 0);
+        ui_sb_update_icon(SB_HDD | dev->hdd_bus, 0);
+        ui_sb_update_icon_write(SB_HDD | dev->hdd_bus, 0);
 
         do_finish(dev);
     }
+}
+
+/* ESDI drives answer the installer's "mode sense" request with this 12-byte drive parameters
+   block; the layout is taken from the parser in Adaptec's INSTESDI.EXE (tool contract). */
+static void
+st506_send_mode_sense(mfm_t *dev, drive_t *drive)
+{
+    uint8_t *resp = dev->data;
+
+    memset(resp, 0x00, 12);
+
+    resp[0] = 0x02; /* block signature the tool checks for */
+    resp[1] = (uint8_t) (drive->tracks >> 8);
+    resp[2] = (uint8_t) (drive->tracks & 0xff);
+    resp[3] = drive->hpc;
+    resp[4] = drive->spt;
+    resp[9] = 0x40; /* flag byte, bit 6 is required by the tool */
+
+    dev->buf_idx = 0;
+    dev->buf_len = 12;
+    dev->buf_ptr = resp;
+    dev->state   = STATE_SDATA;
+    dev->attn &= ~ATT_CCB;
+    dev->status |= (ASR_TX_EN | ASR_DATA_REQ | ASR_DIR);
+
+    /* The tool polls INT_REQ for command completion before reading the block. */
+    set_intr(dev, 1);
 }
 
 /* Execute the CCB we just received. */
@@ -866,13 +895,13 @@ st506_callback(void *priv)
 
                 case STATE_SEND:
                     /* Activate the status icon. */
-                    ui_sb_update_icon(SB_HDD | HDD_BUS_MFM, 1);
+                    ui_sb_update_icon(SB_HDD | dev->hdd_bus, 1);
 
 do_send:
                     /* Get address of sector to load. */
                     if (get_sector(dev, drive, &addr)) {
                         /* De-activate the status icon. */
-                        ui_sb_update_icon(SB_HDD | HDD_BUS_MFM, 0);
+                        ui_sb_update_icon(SB_HDD | dev->hdd_bus, 0);
                         do_finish(dev);
                         return;
                     }
@@ -915,7 +944,7 @@ do_send:
                                 st506_mca_log("ST506: CMD_READ_SECTORS out of data (idx=%d, len=%d)!\n", dev->buf_idx, dev->buf_len);
 
                                 /* De-activate the status icon. */
-                                ui_sb_update_icon(SB_HDD | HDD_BUS_MFM, 0);
+                                ui_sb_update_icon(SB_HDD | dev->hdd_bus, 0);
 
                                 dev->intstat |= ISR_EQUIP_CHECK;
                                 dev->ssb.need_reset = 1;
@@ -933,7 +962,7 @@ do_send:
                     dev->buf_idx = 0;
                     if (--dev->count == 0) {
                         /* De-activate the status icon. */
-                        ui_sb_update_icon(SB_HDD | HDD_BUS_MFM, 0);
+                        ui_sb_update_icon(SB_HDD | dev->hdd_bus, 0);
 
                         if (!(dev->ctrl & ACR_DMA_EN))
                             dev->status &= ~(ASR_DATA_REQ | ASR_DIR);
@@ -979,7 +1008,7 @@ do_send:
                     dev->buf_len = (128 << dev->ssb.sect_size);
 
                     /* Activate the status icon. */
-                    ui_sb_update_icon(SB_HDD | HDD_BUS_MFM, 1);
+                    ui_sb_update_icon(SB_HDD | dev->hdd_bus, 1);
 
                     /* Ready to transfer the data out. */
                     dev->state = STATE_SDONE;
@@ -992,7 +1021,7 @@ do_send:
                     dev->buf_idx = 0;
 
                     /* De-activate the status icon. */
-                    ui_sb_update_icon(SB_HDD | HDD_BUS_MFM, 0);
+                    ui_sb_update_icon(SB_HDD | dev->hdd_bus, 0);
 
                     if (!(dev->ctrl & ACR_DMA_EN))
                         dev->status &= ~(ASR_DATA_REQ | ASR_DIR);
@@ -1018,6 +1047,12 @@ do_send:
             break;
 
         case CMD_RECALIBRATE: /* RECALIBRATE */
+            /* ESDI drives answer the installer's "mode sense" request, which sets byte 4 to 0x1A. */
+            if ((dev->hdd_bus == HDD_BUS_ESDI) && (((const uint8_t *) ccb)[4] == 0x1a)) {
+                st506_send_mode_sense(dev, drive);
+                return;
+            }
+
             if (drive->present) {
                 dev->track = drive->cur_cyl = 0;
                 dev->ssb.seek_end = 1;
@@ -1065,7 +1100,7 @@ do_send:
 
                 case STATE_RECV:
                     /* Activate the status icon. */
-                    ui_sb_update_icon_write(SB_HDD | HDD_BUS_MFM, 1);
+                    ui_sb_update_icon_write(SB_HDD | dev->hdd_bus, 1);
 do_recv:
                     /* Ready to transfer the data in. */
                     dev->state   = STATE_RDATA;
@@ -1095,7 +1130,7 @@ do_recv:
                                 st506_mca_log("ST506: CMD_WRITE_SECTORS out of data (idx=%d, len=%d)!\n", dev->buf_idx, dev->buf_len);
 
                                 /* De-activate the status icon. */
-                                ui_sb_update_icon_write(SB_HDD | HDD_BUS_MFM, 0);
+                                ui_sb_update_icon_write(SB_HDD | dev->hdd_bus, 0);
 
                                 dev->intstat |= ISR_EQUIP_CHECK;
                                 dev->ssb.need_reset = 1;
@@ -1120,7 +1155,7 @@ do_recv:
                     /* Get address of sector to write. */
                     if (get_sector(dev, drive, &addr)) {
                         /* De-activate the status icon. */
-                        ui_sb_update_icon_write(SB_HDD | HDD_BUS_MFM, 0);
+                        ui_sb_update_icon_write(SB_HDD | dev->hdd_bus, 0);
                         do_finish(dev);
                         return;
                     }
@@ -1132,7 +1167,7 @@ do_recv:
                     dev->buf_idx = 0;
                     if (--dev->count == 0) {
                         /* De-activate the status icon. */
-                        ui_sb_update_icon_write(SB_HDD | HDD_BUS_MFM, 0);
+                        ui_sb_update_icon_write(SB_HDD | dev->hdd_bus, 0);
 
                         if (!(dev->ctrl & ACR_DMA_EN))
                             dev->status &= ~ASR_DATA_REQ;
@@ -1433,7 +1468,7 @@ mfm_readw(uint16_t port, void *priv)
                 }
 
                 /* Read the data from the buffer. */
-                ret = dev->buf_ptr[dev->buf_idx];
+                ret = dev->buf_ptr[dev->buf_idx] | (dev->buf_ptr[dev->buf_idx + 1] << 8);
                 dev->buf_idx += 2;
 
                 if (dev->buf_idx >= dev->buf_len) {
@@ -1603,11 +1638,14 @@ mfm_init(UNUSED(const device_t *info))
     dev->irq  = 14;
     dev->dma  = 3;
 
+    /* The ACB-2600 ESDI model serves ESDI drives, which provide the installer's "mode sense" parameters. */
+    dev->hdd_bus = (info->local & MFM_ACB_ESDI) ? HDD_BUS_ESDI : HDD_BUS_MFM;
+
     /* Load any disks for this device class. */
     c = 0;
     for (uint8_t i = 0; i < HDD_NUM; i++) {
-        if (hdd[i].bus_type == HDD_BUS_MFM) {
-            drive = &dev->drives[hdd[i].mfm_channel];
+        if (hdd[i].bus_type == dev->hdd_bus) {
+            drive = &dev->drives[(dev->hdd_bus == HDD_BUS_ESDI) ? hdd[i].esdi_channel : hdd[i].mfm_channel];
 
             if (!hdd_image_load(i)) {
                 drive->present = 0;
@@ -1691,6 +1729,35 @@ const device_t st506_ps2_device = {
     .internal_name = "st506_mca",
     .flags         = DEVICE_MCA,
     .local         = 0,
+    .init          = mfm_init,
+    .close         = mfm_close,
+    .reset         = NULL,
+    .available     = NULL,
+    .speed_changed = NULL,
+    .force_redraw  = NULL,
+    .config        = NULL
+};
+
+/* The ACB-2600 series presents IBM's Fixed Disk Adapter (AdapterID DFFD) interface, so it reuses the ST506/MCA core. */
+const device_t acb2610_mca_device = {
+    .name          = "Adaptec ACB-2610 (MFM)",
+    .internal_name = "st506_mca_adaptec_2610",
+    .flags         = DEVICE_MCA,
+    .local         = 0,
+    .init          = mfm_init,
+    .close         = mfm_close,
+    .reset         = NULL,
+    .available     = NULL,
+    .speed_changed = NULL,
+    .force_redraw  = NULL,
+    .config        = NULL
+};
+
+const device_t acb2620_mca_device = {
+    .name          = "Adaptec ACB-2620 (ESDI)",
+    .internal_name = "esdi_mca_adaptec_2620",
+    .flags         = DEVICE_MCA,
+    .local         = MFM_ACB_ESDI,
     .init          = mfm_init,
     .close         = mfm_close,
     .reset         = NULL,
