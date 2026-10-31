@@ -156,6 +156,7 @@ typedef struct vaxmate_video_t {
 
     uint64_t dispontime;
     uint64_t dispofftime;
+    uint64_t line_ticks;
     pc_timer_t timer;
 
     int      mode;
@@ -183,11 +184,22 @@ static vaxmate_video_t *vaxmate_vid_global = NULL;  /* 临时诊断：0=3D8 1=3D
 static video_timings_t timing_vaxmate = { .type = VIDEO_ISA, .write_b = 8, .write_w = 16, .write_l = 32,
                                           .read_b = 8, .read_w = 16, .read_l = 32 };
 
-/* 14.31818 MHz pixel clock divided by 8 = 1.7897725 MHz character clock */
-/* 点时钟：原来抄了别的卡的 1.7897725 MHz（NES APU 时钟），
-   导致一行要 20 ms、整帧 1 s，比实时慢 60 倍。
-   VAXmate 640 点/行、400 行、25.2 kHz 行频一档，取 16 MHz 点时钟。 */
-#define VAXMATECONST ((cpuclock * (double) (1ULL << 32)) / 16000000.0)
+/* Dot clock: the video gate array runs from the 22.367195 MHz crystal for
+   every mode except VT240 emulation, which switches to 27.977244 MHz
+   (TRM 4.2.7).  The monitor then sees 26.40 kHz horizontal / 60 Hz vertical
+   with 848 dots per line at 640 pixels, and 26.49 kHz with 1056 dots at
+   800 pixels (TRM chapter 6, "I/O - Video Module"). */
+#define VAXMATE_CLK_NORMAL  22367195.0
+#define VAXMATE_CLK_VT240   27977244.0
+
+/* Dot counts that make up one scan line, active plus blanking. */
+#define VAXMATE_DOTS_640    848
+#define VAXMATE_DOTS_800    1056
+
+/* Lines per frame at 60 Hz: 26.40 kHz / 60 Hz = 440, and 441 for the
+   800x250 mode (26.49 kHz).  Only the first 400 (or 252) are displayed. */
+#define VAXMATE_LINES_640   440
+#define VAXMATE_LINES_800   441
 
 /* defined after the mode table; used by recalctimings() */
 static int vaxmate_mode_width(int mode);
@@ -215,39 +227,42 @@ static int vaxmate_mode_width(int mode);
  * touches this path, so the translation only affects software written for an
  * industry-standard CGA.
  */
+static double
+vaxmate_ticks_per_dot(vaxmate_video_t *vid)
+{
+    double clk = (vid->mode == VMODE_G800x252x4) ? VAXMATE_CLK_VT240
+                                                 : VAXMATE_CLK_NORMAL;
+
+    return (cpuclock * (double) (1ULL << 32)) / clk;
+}
+
+static int
+vaxmate_line_dots(vaxmate_video_t *vid)
+{
+    return (vid->mode == VMODE_G800x252x4) ? VAXMATE_DOTS_800
+                                           : VAXMATE_DOTS_640;
+}
+
 static void
 vaxmate_video_recalctimings(vaxmate_video_t *vid)
 {
-    double _dispontime;
-    double _dispofftime;
+    /* One scan line is a fixed number of dots at the crystal frequency, no
+       matter what the guest programmed: the translation ROM keeps the field
+       at exactly 26.40 kHz (26.49 in the 800-pixel mode) so the DEC monitor
+       stays locked.  The CRTC only decides where inside that line the active
+       area starts. */
+    int    dots   = vaxmate_line_dots(vid);
+    int    active = vaxmate_mode_width(vid->mode);
+    double ticks  = vaxmate_ticks_per_dot(vid);
 
-    /* R0/R1 are counted in CHARACTER times, not pixels (TRM 7-27).  The dot
-       clock halves in the 40-cell modes (16 dots per cell), so scale by the
-       pixel width the mode actually drives: 640/40 = 16, 640/80 = 8. */
-    {
-        int    cells = vid->crtc[CRTC_HDISP] + 1;
-        double dots  = 8.0;
+    if (active < 320)
+        active = 640;
 
-        if (cells >= 32) {
-            int w = vaxmate_mode_width(vid->mode);
-            if (w > 0)
-                dots = (double) w / (double) cells;
-        }
-        if ((dots < 1.0) || (dots > 32.0))
-            dots = 8.0;
-
-        _dispontime  = (double) cells * dots;
-        _dispofftime = (double) ((vid->crtc[CRTC_HTOTAL] + 1) - cells) * dots;
-    }
-    if (_dispofftime < 0.0)
-        _dispofftime = 0.0;
-
-    _dispontime *= VAXMATECONST;
-    _dispofftime *= VAXMATECONST;
-
-    vid->dispontime  = (uint64_t) _dispontime;
-    vid->dispofftime = (uint64_t) _dispofftime;
+    vid->dispontime  = (uint64_t) ((double) active * ticks);
+    vid->dispofftime = (uint64_t) ((double) (dots - active) * ticks);
+    vid->line_ticks  = (uint64_t) ((double) dots * ticks);
 }
+
 
 static int
 vaxmate_video_mode(vaxmate_video_t *vid)
@@ -597,7 +612,7 @@ static void
 vaxmate_video_poll(void *priv)
 {
     vaxmate_video_t *vid = (vaxmate_video_t *) priv;
-    int lpr, vdisp_rows, row, sub, start;
+    int lpr, vdisp_rows, row, sub, start, active, total;
 
     VAXMATE_MONITOR_PROLOGUE()
 
@@ -614,12 +629,16 @@ vaxmate_video_poll(void *priv)
         vdisp_rows = 400;
     }
 
+    active = vdisp_rows * lpr;
+    total  = (vid->mode == VMODE_G800x252x4) ? VAXMATE_LINES_800
+                                             : VAXMATE_LINES_640;
+
     /* 状态位每次调用翻转一次：BIOS 靠轮询 3DA/3BA 的 bit0 找显示期，
        只要它会变化就不会死等。 */
     vid->status_a ^= STATA_DISPENSE;
 
-    if (vid->displine >= vdisp_rows * lpr) {
-        /* 垂直消隐：等下一帧 */
+    if (vid->displine >= active) {
+        /* 垂直消隐：40 行左右，凑满 440 行 / 60 Hz */
         vid->dispon = 0;
     } else {
         vid->dispon = 1;
@@ -643,9 +662,9 @@ vaxmate_video_poll(void *priv)
 
     vid->displine++;
 
-    if (vid->displine >= vdisp_rows * lpr) {
+    if (vid->displine >= total) {
         /* 帧结束：把这一帧送屏 */
-        int h = vdisp_rows * lpr;
+        int h = active;
         int w = vaxmate_modes[vid->mode].width;
 
         if (w < 320) w = 640;
@@ -672,22 +691,9 @@ vaxmate_video_poll(void *priv)
         vid->vc       = 0;
     }
 
-    /* 一行的时长：按 R0/R1 的字符数 × 每格点数 */
-    {
-        int    cells = (vid->crtc[CRTC_HDISP] & 0x7f) + 1;
-        int    total = (vid->crtc[CRTC_HTOTAL] & 0x7f) + 1;
-        double dots  = 8.0;
-
-        if (cells >= 32) {
-            int mw = vaxmate_modes[vid->mode].width;
-            if (mw > 0)
-                dots = (double) mw / (double) cells;
-        }
-        if ((dots < 1.0) || (dots > 32.0))
-            dots = 8.0;
-
-        timer_advance_u64(&vid->timer, (uint64_t) ((double) total * dots * VAXMATECONST));
-    }
+    /* 一行固定为 848（或 1056）个点周期：行频由监视器锁定，与 guest 写进
+       CRTC 的 R0/R1 无关。 */
+    timer_advance_u64(&vid->timer, vid->line_ticks);
 }
 
 static void
