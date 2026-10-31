@@ -20,4 +20,8 @@ extern const device_t hp_hil_device;
    scan comes back empty and the adapter reports a link error. */
 extern void hp_hil_link_scan(void);
 
+/* Non-zero once a device on the link has been configured and talks to the
+   System (the link left loop-back). */
+extern int  hp_hil_link_up(void);
+
 #endif /*EMU_HP_HIL_H*/

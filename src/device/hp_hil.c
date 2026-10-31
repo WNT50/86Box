@@ -197,6 +197,12 @@ hp_hil_driver_ctx(void)
     return (uint32_t) dseg * 16;
 }
 
+int
+hp_hil_link_up(void)
+{
+    return (hp_hil_dev != NULL) && hp_hil_dev->kbd_passthru;
+}
+
 void
 hp_hil_link_scan(void)
 {
