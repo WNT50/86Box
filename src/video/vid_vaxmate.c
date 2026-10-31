@@ -261,10 +261,13 @@ vaxmate_video_mode(vaxmate_video_t *vid)
 {
     int mode = vid->ctrl_a & CTLA_MODE_MASK;
 
-    /* 扩展模式 0xD0：control A = 10h（显示关）/18h（显示开），低 3 位为 0。
-       显存布局与 640x400 2 色一致（B8000 起 4 个 8 KB 平面，每行 80 字节）。 */
+    /* 扩展模式（control A 的 bit4 置位，低 3 位是扩展模式号）：
+       0xD0 -> 10h/18h，640x400 2 色；
+       0xD1 -> 13h/1Bh，640x400 4 色；0xD2 用同值，靠 control B 的 252 行位区分。 */
     if ((vid->ctrl_a & 0x17) == 0x10)
         return 4;
+    if ((vid->ctrl_a & 0x17) == 0x13)
+        return (vid->ctrl_b & CTLB_MONITOR252) ? 8 : 7;
 
     if (mode == 7 && (vid->ctrl_b & CTLB_MONITOR252))
         return VMODE_G800x252x4;
@@ -549,11 +552,18 @@ vaxmate_video_poll(void *priv)
 
     VAXMATE_MONITOR_PROLOGUE()
 
-    /* 一条字符行占多少扫描线：文本固定 8x16 格（TRM 7-6），
-       图形模式按 CRTC R9。 */
-    lpr = (vid->mode <= VMODE_TEXT80) ? 16 : ((vid->crtc[CRTC_MAXSCAN] & 0x1f) + 1);
-
-    vdisp_rows = (vid->crtc[CRTC_VDISP] & 0x7f) + 1;
+    /* 一条字符行占多少扫描线：文本固定 8x16 格（TRM 7-6）。
+       帧高固定：文本 25 行 x 16 点，图形一律 400 行。
+       CRTC 的 R6/R9 是 guest 按“行业标准时序”写的值，要经门阵列的
+       4Kx8 参数翻译 ROM 才变成真正的 LAD 值；我们没建模这张表，
+       直接拿 R6/R9 算帧高会得出上千行（Windows 设 0xD0 时窗口被拉长）。 */
+    if (vid->mode <= VMODE_TEXT80) {
+        lpr        = 16;
+        vdisp_rows = 25;
+    } else {
+        lpr        = 1;
+        vdisp_rows = 400;
+    }
 
     /* 状态位每次调用翻转一次：BIOS 靠轮询 3DA/3BA 的 bit0 找显示期，
        只要它会变化就不会死等。 */
