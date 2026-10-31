@@ -80,6 +80,8 @@ extern void kbc_at_ext_out(uint8_t val);
    0x68-0x6A mailbox), so the only device on the HP-HIL link is the mouse.
    Relative positioners are 60..6Fh; 68h is the HP Mouse 46060A. */
 #define HIL_MOUSE_ID    0x68
+/* Leading byte of a poll record: keycode set 1, relative coordinates. */
+#define HIL_POL_RECORD  0x40
 /* Describe header: 8-bit relative X and Y, I/O descriptor byte follows. */
 #define HIL_MOUSE_DESCR 0x12
 
@@ -210,8 +212,9 @@ hp_hil_reply(uint8_t addr, uint8_t data)
 }
 
 /*
- * One device on the link: an ITF keyboard.  hlekbd.cpp in MAME does the same
- * thing, with the key matrix left out until the link is known to work.
+ * The single device on the link: an HP Mouse 46060A.  It starts out in
+ * loop-back so the System's link self test sees its own frames come back;
+ * EPT takes it out of loop-back and from then on it answers as a device.
  */
 static void
 hp_hil_kbd_frame(uint16_t frame)
@@ -238,11 +241,17 @@ hp_hil_kbd_frame(uint16_t frame)
             break;
 
         case HIL_EPT:
+            /* Enter Poll Transfer: the link is no longer a mirror, commands
+               now reach this device and it is expected to answer them. */
             dev->kbd_passthru = 1;
+            dev->loop         = 0;
+            hp_hil_trace("HIL: link leaves loop-back (EPT)\n");
             break;
 
         case HIL_ELB:
             dev->kbd_passthru = 0;
+            dev->loop         = 1;
+            hp_hil_trace("HIL: link back in loop-back (ELB)\n");
             break;
 
         case HIL_DSR:
@@ -284,10 +293,15 @@ hp_hil_kbd_frame(uint16_t frame)
 
         default:
             if ((data >= HIL_POL) && (data <= (HIL_POL + 0x0f))) {
-                /* A Poll record is only returned when there is something to
-                   report; this keyboard has no key matrix yet. */
+                /* Poll record: report type first (0x40 = keycode set 1 with
+                   relative coordinates), then X and Y motion.  Nothing has
+                   moved yet, so both deltas are zero. */
+                hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, HIL_POL_RECORD));
+                hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, 0x00));
+                hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, 0x00));
             } else if ((data >= HIL_RPL) && (data <= (HIL_RPL + 0x0f))) {
-                /* RePoll: same, nothing queued. */
+                /* RePoll: answer with an empty record. */
+                hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, HIL_POL_RECORD));
             }
             break;
     }
