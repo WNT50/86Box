@@ -1,0 +1,27 @@
+ HP Vectra 45945A — SETUP 错误页：原版 ROM vs 打过补丁的 ROM
+ 采集：2026-11-01，86Box（vectra-hdd2 复制体，XT-IDE + 20 MB 空盘，NVR 删除后冷启动）
+ 补丁：even EPROM 偏移 0x0B31，0x82 -> 0x00（平坦地址 F000:1662，自检失败也返回 AX=0）
+ 运行确认：运行中的内存在 F000:1662 读到 00（原版为 82）
+
+=== stock（原版 ROM，ROM@1662=82）===
+ Configuration Errors Found:
+ CLOCK CHIP LOST POWER
+ CONFIGURATION RECORD BAD
+ INCORRECT CONFIGURATION INFORMATION
+ MEMORY SIZE MISCOMPAREDISK C: FAILED INITIALIZATIONTIME OR DATE INVALID
+ Press <Enter> to continue ...
+ 含 'DISK C' 行: True
+ CMOS[0Eh] = 0xFF
+
+=== patch（补丁 ROM，ROM@1662=00）===
+ Configuration Errors Found:
+ CLOCK CHIP LOST POWER
+ CONFIGURATION RECORD BAD
+ INCORRECT CONFIGURATION INFORMATION
+ MEMORY SIZE MISCOMPAREDISK C: FAILED INITIALIZATIONTIME OR DATE INVALID
+ Press <Enter> to continue ...
+ 含 'DISK C' 行: True
+ CMOS[0Eh] = 0xFF
+
+结论：补掉硬盘自检不改变这一页。CMOS[0Eh] 的 0xFF 是"配置记录无效"时的一揽子写法，
+bit3（Hard disc failed initialization）被顺带置起，与自检结果无关。
