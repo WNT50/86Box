@@ -24,7 +24,11 @@
 #define EMU_MOUSE_VAXMATE_H
 
 #include <86box/device.h>
+#include <86box/serial.h>
 
 extern const device_t vaxmate_mouse_device;
+
+/* The USART the mouse hangs on takes it as its backend. */
+extern const serial_backend_t *vaxmate_mouse_backend(void);
 
 #endif /*EMU_MOUSE_VAXMATE_H*/

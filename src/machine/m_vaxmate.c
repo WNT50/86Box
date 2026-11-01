@@ -26,6 +26,7 @@
 #include <86box/timer.h>
 #include <86box/mem.h>
 #include <86box/io.h>
+#include <86box/serial.h>
 #include <86box/fdc.h>
 #include <86box/hdc.h>
 #include <86box/nvr.h>
@@ -336,10 +337,21 @@ machine_at_vaxmate_init(const machine_t *model)
                   vaxmate_uart_read, NULL, NULL,
                   vaxmate_uart_write, NULL, NULL,
                   &vax_uart[1]);
+    void *vaxmate_uart;
+
     device_add(&vaxmate_video_device);
 
-    /* 板载鼠标：DEC 三键鼠标挂在 0x0C40 的 SCN2661 上，中断走 IRQ12。 */
+    /* 板载鼠标：DEC 三键鼠标挂在 0x0C40 的 SCN2661 上，中断走 IRQ12。
+       串口芯片是独立设备（standalone 变体，不占用 COM 口表），鼠标把
+       自己作为 serial_backend_t 挂上去：芯片按需向它取字节。 */
     device_add(&vaxmate_mouse_device);
+    vaxmate_uart = device_add(&scn2661_standalone_device);
+    io_sethandler(0x0c40, 0x0004,
+                  scn26x1_read, NULL, NULL,
+                  scn26x1_write, NULL, NULL,
+                  vaxmate_uart);
+    scn26x1_set_irq(vaxmate_uart, 0x1000);
+    scn26x1_set_backend(vaxmate_uart, vaxmate_mouse_backend());
     /* 板载网卡按 86Box 惯例走 "Internal" 条目：机型表里 .net_device 指向
        本设备，只有用户在"网络"设置里选了 Internal 才实例化。 */
     if ((net_cards_conf[0].device_num == NET_INTERNAL) && machine_get_net_device(machine))

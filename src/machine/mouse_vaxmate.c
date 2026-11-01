@@ -22,7 +22,9 @@
  *            byte 3  error code, 0 = OK
  *            byte 4  button state, 0 = OK
  *
- *
+ *          The mouse is the USART's backend: the chip pulls a byte whenever
+ *          its receive holding register frees up and hands whatever the
+ *          guest transmits to the command parser here.
  *
  * Authors: WNT50
  *
@@ -36,12 +38,9 @@
 #include <86box/device.h>
 #include <86box/timer.h>
 #include <86box/mouse.h>
-#include <86box/pic.h>
-#include <86box/serial_scn26x1.h>
+#include <86box/serial.h>
+#include <86box/plat_unused.h>
 #include <86box/mouse_vaxmate.h>
-
-#define VAXMATE_MOUSE_PORT 0x0c40
-#define VAXMATE_MOUSE_IRQ  12
 
 #define MOUSE_CMD_PROMPT      0x44 /* 'D' */
 #define MOUSE_CMD_REQUEST     0x50 /* 'P' */
@@ -55,8 +54,8 @@
 #define MOUSE_QUEUE 32
 
 typedef struct vaxmate_mouse_t {
-    scn26x1_t *uart;
-    pc_timer_t timer;
+    serial_backend_t be;
+    pc_timer_t       timer;
 
     uint8_t queue[MOUSE_QUEUE];
     int     q_head;
@@ -68,8 +67,7 @@ typedef struct vaxmate_mouse_t {
     int buttons;    /* last button state, 86Box bit order */
 } vaxmate_mouse_t;
 
-static void vaxmate_mouse_poll(void *priv);
-static void vaxmate_mouse_command(void *priv, uint8_t val);
+static vaxmate_mouse_t *vaxmate_mouse_inst;
 
 static void
 vaxmate_mouse_queue(vaxmate_mouse_t *dev, uint8_t val)
@@ -81,15 +79,6 @@ vaxmate_mouse_queue(vaxmate_mouse_t *dev, uint8_t val)
 
     dev->queue[dev->q_tail] = val;
     dev->q_tail             = next;
-}
-
-static void
-vaxmate_mouse_irq(void *priv, int level)
-{
-    if (level)
-        picint(1 << VAXMATE_MOUSE_IRQ);
-    else
-        picintc(1 << VAXMATE_MOUSE_IRQ);
 }
 
 /* Three-byte position report; the caller has already clamped the deltas. */
@@ -124,14 +113,10 @@ vaxmate_mouse_selftest(vaxmate_mouse_t *dev)
     vaxmate_mouse_queue(dev, 0x00); /* no button stuck */
 }
 
-static void vaxmate_mouse_pull(void *priv);
-
-/* A byte written by the CPU to the USART transmit register. */
+/* A byte the guest wrote to the USART transmit register. */
 static void
-vaxmate_mouse_command(void *priv, uint8_t val)
+vaxmate_mouse_command(vaxmate_mouse_t *dev, uint8_t val)
 {
-    vaxmate_mouse_t *dev = (vaxmate_mouse_t *) priv;
-
     if (dev->vendor_arg) {
         dev->vendor_arg = 0;
         return;
@@ -147,8 +132,8 @@ vaxmate_mouse_command(void *priv, uint8_t val)
             break;
 
         case MOUSE_CMD_REQUEST:
-            dev->mode     = MOUSE_MODE_PROMPT;
-            dev->buttons  = mouse_get_buttons_ex();
+            dev->mode    = MOUSE_MODE_PROMPT;
+            dev->buttons = mouse_get_buttons_ex();
             vaxmate_mouse_report(dev, 0, 0);
             break;
 
@@ -164,23 +149,38 @@ vaxmate_mouse_command(void *priv, uint8_t val)
         default:
             break;
     }
-
-    /* 命令的回应要立刻进串口：POST 的轮询循环只有 64K 次迭代，
-       等不到下一个定时器节拍。 */
-    vaxmate_mouse_pull(dev);
 }
 
-/* 串口把收到的字符交给 CPU 后立刻补下一个：真机 4800 baud 是 208 us
-   一个字，POST 的自检循环等不起一个定时器节拍。 */
-static void
-vaxmate_mouse_pull(void *priv)
+/* ---- the backend the USART talks to ------------------------------------ */
+
+/* One byte per call. The chip asks again as soon as the guest takes the
+   previous character, so a four byte self test drains within one poll. */
+static int
+vaxmate_mouse_read_byte(void *priv)
 {
     vaxmate_mouse_t *dev = (vaxmate_mouse_t *) priv;
+    uint8_t          val;
 
-    if ((dev->q_head != dev->q_tail) && scn26x1_rx_free(dev->uart)) {
-        scn26x1_rx_byte(dev->uart, dev->queue[dev->q_head]);
-        dev->q_head = (dev->q_head + 1) % MOUSE_QUEUE;
-    }
+    if (dev->q_head == dev->q_tail)
+        return -1;
+
+    val         = dev->queue[dev->q_head];
+    dev->q_head = (dev->q_head + 1) % MOUSE_QUEUE;
+
+    return (int) val;
+}
+
+static void
+vaxmate_mouse_write_byte(void *priv, uint8_t val)
+{
+    vaxmate_mouse_command((vaxmate_mouse_t *) priv, val);
+}
+
+/* The protocol is fixed at 4800 8O1; nothing to reconfigure. */
+static void
+vaxmate_mouse_set_format(UNUSED(void *priv), UNUSED(int baud), UNUSED(int data_bits),
+                         UNUSED(int parity), UNUSED(int stop_bits))
+{
 }
 
 static void
@@ -190,13 +190,6 @@ vaxmate_mouse_poll(void *priv)
     int              dx  = 0;
     int              dy  = 0;
     int              buttons;
-
-    /* Hand the next report byte over as soon as the holding register is
-       free again; the chip only has room for one character. */
-    if ((dev->q_head != dev->q_tail) && scn26x1_rx_free(dev->uart)) {
-        scn26x1_rx_byte(dev->uart, dev->queue[dev->q_head]);
-        dev->q_head = (dev->q_head + 1) % MOUSE_QUEUE;
-    }
 
     /* Incremental stream mode reports at 100 Hz, and only when something
        actually changed (TRM 2.11.2). */
@@ -211,8 +204,14 @@ vaxmate_mouse_poll(void *priv)
         }
     }
 
-    /* 1 ms 后继续：串口一次只放一个字符，靠这个节拍把报告铺开。 */
     timer_advance_u64(&dev->timer, 1000 * TIMER_USEC);
+}
+
+/* The machine binds this to the USART once both devices exist. */
+const serial_backend_t *
+vaxmate_mouse_backend(void)
+{
+    return (vaxmate_mouse_inst != NULL) ? &vaxmate_mouse_inst->be : NULL;
 }
 
 static void *
@@ -220,19 +219,17 @@ vaxmate_mouse_init(const device_t *info)
 {
     vaxmate_mouse_t *dev = calloc(1, sizeof(vaxmate_mouse_t));
 
-    dev->uart = scn26x1_init(VAXMATE_MOUSE_PORT, vaxmate_mouse_irq, dev);
-    if (dev->uart == NULL) {
-        free(dev);
-        return NULL;
-    }
-
-    scn26x1_set_tx_handler(dev->uart, vaxmate_mouse_command, dev);
-    scn26x1_set_rx_pull_handler(dev->uart, vaxmate_mouse_pull, dev);
+    dev->be.priv       = dev;
+    dev->be.read_byte  = vaxmate_mouse_read_byte;
+    dev->be.write_byte = vaxmate_mouse_write_byte;
+    dev->be.set_format = vaxmate_mouse_set_format;
 
     dev->mode    = MOUSE_MODE_PROMPT;
     dev->buttons = 0;
 
     timer_add(&dev->timer, vaxmate_mouse_poll, dev, 1);
+
+    vaxmate_mouse_inst = dev;
 
     return dev;
 }
@@ -243,7 +240,10 @@ vaxmate_mouse_close(void *priv)
     vaxmate_mouse_t *dev = (vaxmate_mouse_t *) priv;
 
     timer_disable(&dev->timer);
-    scn26x1_close(dev->uart);
+
+    if (vaxmate_mouse_inst == dev)
+        vaxmate_mouse_inst = NULL;
+
     free(dev);
 }
 
@@ -251,9 +251,6 @@ static void
 vaxmate_mouse_reset(void *priv)
 {
     vaxmate_mouse_t *dev = (vaxmate_mouse_t *) priv;
-
-    scn26x1_reset(dev->uart);
-    scn26x1_set_tx_handler(dev->uart, vaxmate_mouse_command, dev);
 
     dev->q_head     = dev->q_tail = 0;
     dev->mode       = MOUSE_MODE_PROMPT;
