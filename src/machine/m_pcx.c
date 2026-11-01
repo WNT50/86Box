@@ -593,17 +593,17 @@ machine_pcx_init(const machine_t *model)
        PIC, IR3 / IR2 / IR4 for the first / second / third USART. */
     serial_set_next_inst(SERIAL_MAX - 1);
 
-    pcx.usart[0] = device_add(&scn2661_device);
+    pcx.usart[0] = device_add_inst(&scn2661_device, 1);
     scn26x1_set_irq(pcx.usart[0], 1 << 3);
     io_sethandler(PCX_USART1_PORT, 0x0004, scn26x1_read, NULL, NULL,
                   scn26x1_write, NULL, NULL, pcx.usart[0]);
 
-    pcx.usart[1] = device_add(&scn2661_device);
+    pcx.usart[1] = device_add_inst(&scn2661_device, 2);
     scn26x1_set_irq(pcx.usart[1], 1 << 2);
     io_sethandler(PCX_USART2_PORT, 0x0004, scn26x1_read, NULL, NULL,
                   scn26x1_write, NULL, NULL, pcx.usart[1]);
 
-    pcx.usart[2] = device_add(&scn2661_device);
+    pcx.usart[2] = device_add_inst(&scn2661_device, 3);
     scn26x1_set_irq(pcx.usart[2], 1 << 4);
     io_sethandler(PCX_USART3_PORT, 0x0004, scn26x1_read, NULL, NULL,
                   scn26x1_write, NULL, NULL, pcx.usart[2]);
