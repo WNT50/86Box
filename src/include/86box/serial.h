@@ -281,6 +281,14 @@ extern void      i8251_set_irq(void *priv, int irq_mask);
 extern void      i8251_set_clock(void *priv, double hz);
 
 /* ------------------------------------------------------------------------ */
+/* Signetics SCN2661                                                        */
+/* ------------------------------------------------------------------------ */
+
+extern uint8_t   scn26x1_read(uint16_t addr, void *priv);
+extern void      scn26x1_write(uint16_t addr, uint8_t val, void *priv);
+extern void      scn26x1_set_irq(void *priv, int irq_mask);
+
+/* ------------------------------------------------------------------------ */
 /* Device declarations                                                      */
 /* ------------------------------------------------------------------------ */
 
@@ -294,5 +302,6 @@ extern const device_t ns16650_device;
 extern const device_t ns16750_device;
 extern const device_t ns16850_device;
 extern const device_t ns16950_device;
+extern const device_t scn2661_device;
 
 #endif /*EMU_SERIAL_H*/
