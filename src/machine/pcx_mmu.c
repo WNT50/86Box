@@ -96,6 +96,11 @@ typedef struct {
 
 static pcx_mmu_t pcx_mmu;
 
+/* Bit 4 / bit 5 enforcement.  Off by default: the model's table content still
+   loses the loader's own map to its self test, so enforcing now only moves the
+   failure.  Set PCX_PROT=1 to enable it (see the notes, section 250). */
+static int pcx_mmu_prot = -1;
+
 /* Addresses this machine does not decode at all (PC-X: 0x80000-0xFBFFF, the
    region between the RAM behind the MMU and the ROM).  MAME models it as a
    two-instruction fallback in the address map that just raises NMI; the same
@@ -153,6 +158,12 @@ pcx_mmu_translate(uint32_t addr, UNUSED(int rw))
         return 0xffffffffu;
     }
 
+    if (pcx_mmu_prot < 0) {
+        const char *env = getenv("PCX_PROT");
+
+        pcx_mmu_prot = (env && (env[0] == '1')) ? 1 : 0;
+    }
+
     if ((pcx_mmu.type == PCX_MMU_NONE) || !(pcx_mmu.ctl & 0x0020) ||
         (addr >= PCX_MMU_WINDOW))
         return addr;
@@ -162,6 +173,21 @@ pcx_mmu_translate(uint32_t addr, UNUSED(int rw))
 
     if (entry == 0x0000)
         return addr;
+
+    /* Protection, as the card does it: bit 5 is the present bit (an absent page
+       faults on any access) and bit 4 is the write allow bit (a write to a page
+       without it faults).  Neither is an x86 exception -- the card raises IRQ0
+       of the first controller and reports the status in bits 7-6 of the entry
+       register for the handler at INT 0x20, and the access does not take
+       effect. */
+    if (pcx_mmu_prot) {
+        if (!(entry & 0x0020) || (rw && !(entry & 0x0010))) {
+            pcx_mmu.fault = addr;
+            pcx_mmu.fpend = 1;
+            picint(0x0001);
+            return 0xffffffffu;
+        }
+    }
 
     return ((uint32_t) (entry & 0xff00u)) | (addr & (PCX_MMU_PGSIZE - 1));
 }
