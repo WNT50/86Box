@@ -113,6 +113,10 @@ static int pcx_mmu_absf  = -1;
 static uint32_t pcx_mmu_hole_lo;
 static uint32_t pcx_mmu_hole_hi;
 
+/* RAM wrap mask: the entry can name pages of a 2 MB space, the board holds at
+   most 1 MB, so the high half of that range folds back onto the low half. */
+static uint32_t pcx_mmu_ram_mask = 0x000fffffu;
+
 /* Entry port -> table slot, or -1 when the port is not an entry.  Every port
    from 0x8400 to 0x84f8 is one: the POST writes 0x5015 to all thirty-two of
    them, 0x84f0 and 0x84f8 included, and reads the value back (v3 BIOS
@@ -238,7 +242,7 @@ static uint32_t
 pcx_mmu_translate(uint32_t addr, UNUSED(int rw))
 {
     uint16_t entry;
-    uint32_t page;
+    uint32_t page, frame;
 
     /* Undecoded space first: it is a hole whether the MMU is on, off, or not
        fitted at all -- the board decodes nothing there. */
@@ -302,20 +306,25 @@ pcx_mmu_translate(uint32_t addr, UNUSED(int rw))
             pclog("[RL] ctl=%04X addr=%05X idx=%03X entry=%04X -> %05X rw=%d @%04X:%04X\n",
                   pcx_mmu.ctl, addr & 0xfffffu,
                   pcx_mmu_index(addr >> 11), entry,
-                  (addr & 0xf0000u) | ((uint32_t) (entry & 0xf800u)) |
-                      (addr & (PCX_MMU_PGSIZE - 1)), rw,
+                  (((uint32_t) (((entry & 0x001fu) << 5) |
+                                ((entry >> 11) & 0x1fu)) << 11) |
+                   (addr & (PCX_MMU_PGSIZE - 1))) & pcx_mmu_ram_mask, rw,
                   cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
         }
     }
 
-    /* The entry rewrites A15..A11 only -- five bits, one per 2 KB page of a
-       64 KB block -- and the block number (A19..A16) comes from the address
-       itself.  That is what lets a 1 MB machine work: the stored bits cannot
-       name a page anywhere in a megabyte, only one inside the block.  The
-       kernel uses it: the loader maps logical page 0x20 to entry 0xd821 while
-       the image it just copied sits at physical 0x1d800 (notes, section 264). */
-    return (addr & 0xf0000u) | ((uint32_t) (entry & 0xf800u)) |
-           (addr & (PCX_MMU_PGSIZE - 1));
+    /* Entry layout, read back out of the loader's own table (PCX_TLOG capture,
+       1108 writes): the page number is split -- bits 15..11 hold its low five
+       bits, bits 4..0 its high five -- and bit 5 is present.  The loader writes
+       identity entries 0x0030, 0x0830, ... 0xd030 for pages 0..0x1a, and the
+       next value it writes for page 0x1b in a write-allowed bank is 0xd830|.1:
+       crossing 0x1f carries out of bit 15 and lands in bit 0, which is only
+       possible if those five bits are the high half of the page number.  Ten
+       bits of page at 2 KB each covers the 2 MB the POST walks; the board holds
+       1 MB, so the address wraps there (0x1f7800 -> 0xf7800). */
+    frame = (uint32_t) (((entry & 0x001fu) << 5) | ((entry >> 11) & 0x1fu));
+
+    return ((frame << 11) | (addr & (PCX_MMU_PGSIZE - 1))) & pcx_mmu_ram_mask;
 }
 
 static uint16_t pcx_mmu_inw(uint16_t port, void *priv);
@@ -423,11 +432,27 @@ pcx_mmu_outw(uint16_t port, uint16_t val, UNUSED(void *priv))
     }
 
     idx = pcx_mmu_slot(port);
-    if (idx >= 0)
+    if (idx >= 0) {
+        /* PCX_TLOG=1 dumps every table write, with the controlling register and
+           the instruction that issued it: the loader builds the kernel's map
+           through these ports and the encoding has to be read back out of them
+           (caps at 6000 lines so a runaway loop cannot flood the log). */
+        static int tl = -1, tn;
+
+        if (tl < 0)
+            tl = getenv("PCX_TLOG") ? 1 : 0;
+        if (tl && (tn < 6000)) {
+            tn++;
+            pclog("[TLOG] w port=%04X slot=%02X val=%04X ctl=%02X @%04X:%04X\n",
+                  port, idx, val, pcx_mmu.ctl,
+                  cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
+        }
+
         /* Bits 0..5 hold the flags and 11..15 the page; 6..10 are the status
            lines the handler reads back, not storage (the POST at 0xfe29a
            compares through the mask 0x3f:0xf800). */
         pcx_mmu.pg[idx] = val & 0xf83f;
+    }
 }
 
 void
@@ -467,6 +492,11 @@ pcx_mmu_init(int type)
     pcx_mmu_reset();
     pcx_mmu_set_hole(0, 0);
     pcx_mmu.type = type;
+
+    /* The entry names a page in a 2 MB space; fold anything past the installed
+       RAM back onto it (1 MB machine: 0x1f7800 reads as 0xf7800). */
+    if (mem_size > 0)
+        pcx_mmu_ram_mask = (mem_size << 10) - 1u;
 
     /* "MMU Type = None" is the card-less PC-D arrangement: the window is not
        decoded at all, so 0x8000-0x8fff answers like the rest of the hole. */
