@@ -25,11 +25,16 @@
  *          first register, the next the second, and a third access wraps.
  *          Reading the command register rewinds both sequencers.
  *
- *          Baud rates are the SCN2661B set (BRCLK 4.9152 MHz, Table 1):
- *          45.5, 50, 75, 110, 134.5, 150, 300, 600, 1200, 1800, 2000, 2400,
- *          4800, 9600, 19200, 38400. The A part has no 45.5 and decodes 1000
- *          and 0101 as 1050 and 200; the C part runs from a 5.0688 MHz BRCLK
- *          and swaps the top of the table for 3600 and 7200.
+ *          Two of the three parts from Table 1 are modelled, picked by the
+ *          variant byte of device_t.local:
+ *
+ *            B   BRCLK 4.9152 MHz  45.5 50 75 110 134.5 150 300 600 1200
+ *                                   1800 2000 2400 4800 9600 19200 38400
+ *            C   BRCLK 5.0688 MHz  50 75 110 134.5 150 300 600 1200 1800
+ *                                   2000 2400 3600 4800 7200 9600 19200
+ *
+ *          The A part is not modelled: it has no 45.5 and decodes 1000 and 0101
+ *          as 1050 and 200.
  *
  *          What is not modelled: synchronous (BISYNC/SDLC) framing, the
  *          external clock pins (an external clock source is assumed to run
@@ -112,6 +117,12 @@ scn26x1_log(const char *fmt, ...)
 #define SCN_MR1_CLOCK(x) ((uint8_t) ((x) & 0x03))
 #define SCN_MR1_STOP(x)  ((uint8_t) (((x) >> 6) & 0x03))
 
+/* `device_t.local` carries the COM port index in the low byte (0xff = the
+   board owns the chip, no COM port) and the variant in the next byte, so the
+   two can be OR-ed together the way device_add_params() does it. */
+#define SCN26X1_VARIANT_B 2
+#define SCN26X1_VARIANT_C 3
+
 typedef struct scn26x1_t {
     uint8_t  mr1, mr2, cr, sr;
     uint8_t  tdr;      /* transmit holding register */
@@ -128,6 +139,7 @@ typedef struct scn26x1_t {
     int      dsr;      /* modem inputs, idle high */
     int      dcd;
     int      port;     /* COM port this chip is wired to */
+    const double *rates; /* Table 1 row set: B or C */
     int      irq_mask; /* IRQ line as a PIC bit mask, 0 = not connected */
     int      irq_state;
 
@@ -143,10 +155,18 @@ typedef struct scn26x1_t {
     pc_timer_t rx_timer;
 } scn26x1_t;
 
-/* Table 1, SCN2661B (BRCLK 4.9152 MHz). Siemens PC-X carries the B version. */
-static const double scn26x1_rates[16] = {
+/* Table 1 of the data book. The A/B parts run from a 4.9152 MHz BRCLK and the
+   C part from 5.0688 MHz, so the same MR2[3:0] code selects a different rate
+   on each: 0x08 is 1200 on the B and 1800 on the C, 0x0B is 2400 against 3600,
+   0x0D is 9600 against 7200. */
+static const double scn26x1_rates_b[16] = {
     45.5, 50.0, 75.0, 110.0, 134.5, 150.0, 300.0, 600.0,
     1200.0, 1800.0, 2000.0, 2400.0, 4800.0, 9600.0, 19200.0, 38400.0
+};
+
+static const double scn26x1_rates_c[16] = {
+    50.0, 75.0, 110.0, 134.5, 150.0, 300.0, 600.0, 1200.0,
+    1800.0, 2000.0, 2400.0, 3600.0, 4800.0, 7200.0, 9600.0, 19200.0
 };
 
 /* Bit time of the programmed rate, in microseconds. Mode register 2 bits 7-4
@@ -155,7 +175,7 @@ static const double scn26x1_rates[16] = {
 static double
 scn26x1_bit_time(scn26x1_t *dev)
 {
-    double baud = scn26x1_rates[dev->mr2 & 0x0f];
+    double baud = dev->rates[dev->mr2 & 0x0f];
 
     if (baud <= 0.0)
         baud = 9600.0;
@@ -193,7 +213,7 @@ scn26x1_frame_bits(scn26x1_t *dev)
 static double
 scn26x1_baud(scn26x1_t *dev)
 {
-    double baud = scn26x1_rates[dev->mr2 & 0x0f];
+    double baud = dev->rates[dev->mr2 & 0x0f];
 
     if (baud <= 0.0)
         baud = 9600.0;
@@ -757,10 +777,12 @@ scn26x1_reset_state(scn26x1_t *dev)
 static void *
 scn26x1_init(const device_t *info)
 {
-    int        port = (int) (info->local & 0xff);
-    scn26x1_t *dev  = (scn26x1_t *) calloc(1, sizeof(scn26x1_t));
+    int        port    = (int) (info->local & 0xff);
+    int        variant = (int) ((info->local >> 8) & 0xff);
+    scn26x1_t *dev     = (scn26x1_t *) calloc(1, sizeof(scn26x1_t));
 
-    dev->port = port;
+    dev->port  = port;
+    dev->rates = (variant == SCN26X1_VARIANT_C) ? scn26x1_rates_c : scn26x1_rates_b;
 
     timer_add(&dev->timer, scn26x1_tx_done, dev, 0);
     timer_add(&dev->rx_timer, scn26x1_rx_poll, dev, 0);
@@ -813,11 +835,31 @@ scn26x1_reset(void *priv)
     scn26x1_reset_state((scn26x1_t *) priv);
 }
 
-const device_t scn2661_device = {
+/* Siemens PC-X carries three SCN2661B parts at 4.9152 MHz (0xf9c0/0xf9d0/
+   0xf9e0); the DEC VAXmate's mouse USART runs off a 5.0688 MHz oscillator,
+   which is the C part. Both default to "no COM port" (low byte 0xff) because
+   the board that owns the chip wires it up itself. device_add_params() ORs
+   its argument into .local, so a board cannot turn 0xff back into a port
+   index; one that needs a COM port gets its own device definition. */
+const device_t scn2661b_device = {
     .name          = "Signetics SCN2661B EPCI",
-    .internal_name = "scn2661",
+    .internal_name = "scn2661b",
     .flags         = 0,
-    .local         = 0,
+    .local         = 0xff | (SCN26X1_VARIANT_B << 8),
+    .init          = scn26x1_init,
+    .close         = scn26x1_close,
+    .reset         = scn26x1_reset,
+    .available     = NULL,
+    .speed_changed = NULL,
+    .force_redraw  = NULL,
+    .config        = NULL
+};
+
+const device_t scn2661c_device = {
+    .name          = "Signetics SCN2661C EPCI",
+    .internal_name = "scn2661c",
+    .flags         = 0,
+    .local         = 0xff | (SCN26X1_VARIANT_C << 8),
     .init          = scn26x1_init,
     .close         = scn26x1_close,
     .reset         = scn26x1_reset,

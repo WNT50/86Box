@@ -302,6 +302,7 @@ extern const device_t ns16650_device;
 extern const device_t ns16750_device;
 extern const device_t ns16850_device;
 extern const device_t ns16950_device;
-extern const device_t scn2661_device;
+extern const device_t scn2661b_device;
+extern const device_t scn2661c_device;
 
 #endif /*EMU_SERIAL_H*/
