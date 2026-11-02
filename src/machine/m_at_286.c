@@ -333,6 +333,10 @@ machine_at_vectra_init(const machine_t *model)
     /* HP-HIL host controller (U777) at 0x6C-0x6F. */
     device_add(&hp_hil_device);
 
+    /* HP hard disc adapter: registers at 0x300, option ROM at C8000. */
+    if (hdc_current[0] == HDC_INTERNAL)
+        device_add(&hp_disc_device);
+
     if (getenv("HP_VECTRA_TRACE") != NULL)
         hp_trace_init();
 

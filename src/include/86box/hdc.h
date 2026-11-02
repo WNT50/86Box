@@ -30,6 +30,9 @@
 extern int hdc_current[HDC_MAX];
 extern int hdc_onboard_enabled;
 
+/* HP Vectra hard disc adapter (45816A family). */
+extern const device_t hp_disc_device;
+
 extern const device_t st506_xt_xebec_device;              /* st506_xt_xebec */
 extern const device_t st506_xt_wdxt_gen_device;           /* st506_xt_wdxt_gen */
 extern const device_t st506_xt_dtc5150x_device;           /* st506_xt_dtc */
