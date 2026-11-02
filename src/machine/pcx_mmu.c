@@ -80,7 +80,7 @@
 #define PCX_MMU_DAT      0x00f8                    /* 0x84f8 data */
 #define PCX_MMU_ENTRY_LO 0x0400                    /* 0x8400 first entry port */
 #define PCX_MMU_ACK      0x0800                    /* 0x8800 system call */
-#define PCX_MMU_PAGES    128                       /* 0x8400-0x87f8 / 8 */
+#define PCX_MMU_PAGES    1024                      /* 8 banks x 128 slots */
 #define PCX_MMU_PGSIZE   0x800                     /* 2 KB */
 #define PCX_MMU_WINDOW   0x80000                   /* what the card decodes */
 
@@ -125,11 +125,15 @@ pcx_mmu_slot(uint16_t port)
     if (off & 7)
         return -1;
 
-    idx = (off - PCX_MMU_ENTRY_LO) >> 3;
+    idx = (off - PCX_MMU_ENTRY_LO) >> 3;      /* 0..127 inside the bank */
     if ((idx == (PCX_MMU_IDX >> 3)) || (idx == (PCX_MMU_DAT >> 3)))
         return -1;
 
-    return idx;
+    /* The control register picks the bank: its bits 2-4 select one of eight
+       128-entry banks, which is what keeps the loader's self test (it walks the
+       control register through 4,8,...0x1c and rewrites slots 0 and 2) from
+       destroying the map the loader itself built under control 0-2. */
+    return (int) (((pcx_mmu.ctl & 0x1c) << 5) | idx);
 }
 
 /* Slot the index latch points at, or -1. */
@@ -169,7 +173,7 @@ pcx_mmu_translate(uint32_t addr, UNUSED(int rw))
         return addr;
 
     page  = addr >> 11;
-    entry = pcx_mmu.pg[page & (PCX_MMU_PAGES - 1)];
+    entry = pcx_mmu.pg[((pcx_mmu.ctl & 0x1c) << 5) | (page & 0x7f)];
 
     if (entry == 0x0000)
         return addr;
