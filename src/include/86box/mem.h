@@ -314,6 +314,7 @@ extern int is_compare;
    the physical address, or 0xffffffff when the MMU access faulted -- the
    machine has already latched the reason and raised whatever it raises. */
 extern uint32_t (*mem_machine_translate)(uint32_t addr, int rw);
+extern void   (*mem_machine_cs_load)(void);
 
 extern uint8_t  read_mem_b(uint32_t addr);
 extern uint16_t read_mem_w(uint32_t addr);

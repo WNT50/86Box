@@ -53,6 +53,7 @@
    on the 808x path goes through read_mem_b/read_mem_w/write_mem_b/write_mem_w,
    so a hook there covers data accesses and instruction fetches alike. */
 uint32_t (*mem_machine_translate)(uint32_t addr, int rw) = NULL;
+void   (*mem_machine_cs_load)(void) = NULL;
 
 /* Translate, and report a fault to the caller instead of letting it fall into
    random mapping: the machine's hook has raised its own NMI by then. Only the
