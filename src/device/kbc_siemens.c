@@ -47,6 +47,7 @@
 #include <86box/device.h>
 #include <86box/timer.h>
 #include <86box/log.h>
+#include <86box/io.h>
 #include <86box/kbc_siemens.h>
 
 #ifdef ENABLE_KBC_SIEMENS_LOG
@@ -86,6 +87,13 @@ struct kbc_siemens_t {
     /* Queued key strokes are host events, not command stream: they share the
        same channel and therefore the same FIFO. */
     void *log;
+
+    /* 8741A side of the keyboard: the POST drains the identity answer, after
+       which the channel is free.  The DOS loader then probes the keyboard by
+       polling 0xf9b2 bit 0; one pending byte is what tells it a keyboard is
+       wired up at all (0x6a92..0x6aa1 in the loader's print path). */
+    int identity_done;
+    int present_sent;
 };
 
 static int
@@ -118,6 +126,8 @@ kbc_answer_identity(kbc_siemens_t *dev)
     for (i = 0; i < 7; i++)
         kbc_fifo_put(dev, reply[i]);
 
+    dev->identity_done = 1;
+
     kbc_siemens_log(dev->log, "identity query answered\n");
 }
 
@@ -131,6 +141,14 @@ kbc_siemens_rx(kbc_siemens_t *dev, uint8_t byte)
         case KBC_ST_IDLE:
             if (byte == 0x1b)
                 dev->state = KBC_ST_ESC;
+            else if (byte == 0x26) {
+                /* The DOS loader asks the keyboard whether it is there with a
+                   lone '&' and gives up after 0xffff polls, printing
+                   "Keyboard not conneced or can't be driven in PC-Mode"
+                   (0x6ac6..0x6ad9).  It accepts '<' as the answer. */
+                kbc_fifo_put(dev, '<');
+                kbc_siemens_log(dev->log, "presence query answered\n");
+            }
             break;
 
         case KBC_ST_ESC:
@@ -180,6 +198,12 @@ kbc_siemens_read_data(kbc_siemens_t *dev)
     if (!kbc_fifo_empty(dev)) {
         ret        = dev->fifo[dev->fifo_head];
         dev->fifo_head = (dev->fifo_head + 1) % KBC_FIFO_SIZE;
+    } else if (dev->identity_done && !dev->present_sent) {
+        /* The keyboard answers the first poll after the terminal handshake so
+           the loader sees a live 8741A; after that the channel stays quiet
+           until a key is injected. */
+        ret               = 0x00;
+        dev->present_sent = 1;
     }
 
     kbc_siemens_log(dev->log, "read %02X\n", ret);
@@ -214,6 +238,48 @@ kbc_siemens_key(kbc_siemens_t *dev, uint8_t byte)
 
     kbc_fifo_put(dev, byte);
     kbc_siemens_log(dev->log, "key %02X\n", byte);
+}
+
+
+/* 8741A master side as the board wires it: 0xf9b0 is the data register, the
+   ports next to it the status word.  The DOS loader polls 0xf9b2 for "a byte
+   waits" (bit 0) and then reads 0xf9b0, so the same FIFO serves both views. */
+static uint8_t
+kbc_upi_read(uint16_t port, void *priv)
+{
+    kbc_siemens_t *dev = (kbc_siemens_t *) priv;
+
+    switch (port & 0x03) {
+        case 0x00:
+            return kbc_siemens_read_data(dev);
+
+        case 0x01:
+        case 0x02:
+            return kbc_siemens_read_status(dev);
+
+        default:
+            return 0x00;
+    }
+}
+
+static void
+kbc_upi_write(uint16_t port, uint8_t val, void *priv)
+{
+    kbc_siemens_t *dev = (kbc_siemens_t *) priv;
+
+    if ((port & 0x03) == 0x00)
+        kbc_siemens_rx(dev, val);
+}
+
+/* The board owns the four ports, so the machine only has to ask for them. */
+void
+kbc_siemens_ports(kbc_siemens_t *dev)
+{
+    if (dev == NULL)
+        return;
+
+    io_sethandler(0xf9b0, 0x0004, kbc_upi_read, NULL, NULL,
+                  kbc_upi_write, NULL, NULL, dev);
 }
 
 kbc_siemens_t *

@@ -67,6 +67,12 @@ typedef struct pcx_video_t {
     int           parm_left; /* bytes left of the 15-byte setup block */
     int           cmd_prev;  /* previous 0xf982 value, for the double write */
     int           mon;
+    int           vram_sw;    /* 0xf9a0 bit 0: 1 = display RAM, 0 = chargen RAM */
+    int           chargen_on; /* the host has uploaded a character generator */
+    int           text_mode;  /* the display RAM holds character/attribute pairs */
+    uint8_t       chargen[0x2000];
+    int           cmd;        /* last command written to 0xf982 */
+    int           cmd_left;   /* operand bytes still owed by that command */
     kbc_siemens_t *kbc;     /* protocol level keyboard/terminal channel */
 } pcx_video_t;
 
@@ -103,6 +109,45 @@ pcx_video_scan_bitmap(pcx_video_t *dev)
     dev->vram_dirty = 0;
 }
 
+
+/* Character mode: the display RAM holds one character and one attribute byte
+   per cell (MAME pcd_v.cpp display_pixels reads m_vram[address] as the code and
+   m_vram[address+1] as the attribute).  The glyph comes from the character
+   generator the host downloaded with 0xf9a0 = 0 -- 32 bytes per character, the
+   loader writes 14 of them and then skips 4 (0x5494-0x5498). */
+static void
+pcx_video_scan_text(pcx_video_t *dev)
+{
+    int           row, col, line, bit, x, y;
+    uint8_t       ch, glyph;
+    const uint8_t *font;
+    uint32_t      fg = 0x00e8e8e8;
+
+    for (row = 0; row < PCX_TERM_ROWS; row++) {
+        for (col = 0; col < PCX_TERM_COLS; col++) {
+            ch = dev->vram[(row * PCX_TERM_COLS + col) * 2];
+
+            if (dev->chargen_on)
+                font = &dev->chargen[(ch * 32) & 0x1fff];
+            else
+                font = &dev->term.font[(ch * 16) % PCX_TERM_FONT_SIZE];
+
+            for (line = 0; line < PCX_TERM_CELL_H; line++) {
+                glyph = font[line];
+                y     = row * PCX_TERM_CELL_H + line;
+
+                for (bit = 0; bit < PCX_TERM_CELL_W; bit++) {
+                    x = col * PCX_TERM_CELL_W + bit;
+                    dev->fb[y * PCX_VIDEO_XSIZE + x] =
+                        (glyph & (0x80 >> bit)) ? fg : 0x00000000;
+                }
+            }
+        }
+    }
+
+    dev->vram_dirty = 0;
+}
+
 static void
 pcx_video_poll(void *priv)
 {
@@ -121,7 +166,35 @@ pcx_video_poll(void *priv)
        The BIOS turns the graphics mode on unconditionally -- and fills the
        window with 0xaa while it tests it -- so the command alone cannot
        decide; whichever channel was used last is what the host is talking to. */
-    if (dev->gfx_on && dev->vram_active && (dev->src == 2)) {
+    /* Decide what the display RAM holds from its contents, every frame: text
+       pages store an attribute in every odd byte (00 or 07 on this board),
+       while a bitmap writes pixel data there.  The DOS loader does both -- it
+       prints text and then draws a logo into the same window -- so the answer
+       cannot be latched. */
+    if (dev->vram_active) {
+        int i, attr = 0;
+
+        for (i = 0; i < 800; i++)
+            if ((dev->vram[i * 2 + 1] == 0x00) || (dev->vram[i * 2 + 1] == 0x07))
+                attr++;
+
+        dev->text_mode = (attr > 600);
+    }
+
+    if (dev->text_mode) {
+        if (dev->vram_dirty)
+            pcx_video_scan_text(dev);
+
+        for (y = 0; y < PCX_VIDEO_YSIZE; y++)
+            memcpy(buffer32->line[y], &dev->fb[y * PCX_VIDEO_XSIZE],
+                   PCX_VIDEO_XSIZE * 4);
+        video_blit_memtoscreen(0, 0, PCX_VIDEO_XSIZE, PCX_VIDEO_YSIZE);
+
+        timer_advance_u64(&dev->timer, TIMER_USEC * (1000000ULL / PCX_VIDEO_FREQ));
+        return;
+    }
+
+    if (dev->vram_active) {
         if (dev->vram_dirty)
             pcx_video_scan_bitmap(dev);
 
@@ -166,6 +239,11 @@ pcx_video_read(uint16_t addr, void *priv)
             /* 0xf981: bit 0 "a byte waits", bit 1 "not taken yet". */
             return kbc_siemens_read_status(dev->kbc);
 
+        case 0x02:
+            /* 0xf982: command register; bit 4 reads back as "ready" -- the
+               loader's handshake (0x547d) polls it after every command. */
+            return 0x10 | (dev->regs[reg] & 0x0f);
+
         default:
             return dev->regs[reg];
     }
@@ -200,6 +278,15 @@ pcx_video_write(uint16_t addr, uint8_t val, void *priv)
             pcx_term_init(&dev->term);
         }
         dev->cmd_prev = val;
+        dev->cmd      = val;
+        /* 0x16 takes a cursor address, 0x17 an attribute byte.  Their
+           operands arrive on 0xf980 and are not characters. */
+        if (val == 0x16)
+            dev->cmd_left = 2;
+        else if (val == 0x17)
+            dev->cmd_left = 1;
+        else
+            dev->cmd_left = 0;
         /* SCN267x command group 0x20: bit1 selects the graphics path, bit0 is
            on/off.  0x23 is what the BIOS sends (v3 0xfd6fc). */
         if (((val & 0xe0) == 0x20) && (val & 0x02)) {
@@ -214,6 +301,8 @@ pcx_video_write(uint16_t addr, uint8_t val, void *priv)
                Nothing of it reaches the screen; the 8031 turns it into SCN2672
                timing.  Kept as a byte count for now, see the file header. */
             dev->parm_left--;
+        } else if (dev->cmd_left > 0) {
+            dev->cmd_left--;
         } else {
             pcx_term_write(&dev->term, val);
             dev->src = 1;
@@ -221,6 +310,17 @@ pcx_video_write(uint16_t addr, uint8_t val, void *priv)
             kbc_siemens_rx(dev->kbc, val);
         }
     }
+}
+
+static void
+pcx_vram_sw_write(UNUSED(uint16_t addr), uint8_t val, void *priv)
+{
+    pcx_video_t *dev = (pcx_video_t *) priv;
+
+    /* 0xf9a0 bit 0 picks what the host window at 0xf0000 is: 0 the character
+       generator RAM (one byte per word, the loader's font download at 0x5485),
+       1 the display RAM the CRTC scans out. */
+    dev->vram_sw = val & 1;
 }
 
 static uint8_t
@@ -235,6 +335,14 @@ static void
 pcx_vram_write(uint32_t addr, uint8_t val, void *priv)
 {
     pcx_video_t *dev = (pcx_video_t *) priv;
+
+    if (!dev->vram_sw) {
+        if (!(addr & 1)) {
+            dev->chargen[(addr >> 1) & 0x1fff] = val;
+            dev->chargen_on                    = 1;
+        }
+        return;
+    }
 
     dev->vram[addr & 0x7fff] = val;
     dev->vram_dirty          = 1;
@@ -286,6 +394,8 @@ pcx_video_init(const device_t *info)
     memset(dev->regs, 0x00, sizeof(dev->regs));
     dev->parm_left = 0;
     dev->cmd_prev  = 0xff;
+    dev->vram_sw   = 1;
+    dev->cmd       = 0xff;
 
     overscan_x = 0;
     overscan_y = 0;
@@ -299,6 +409,8 @@ pcx_video_init(const device_t *info)
     timer_add(&dev->timer, pcx_video_poll, dev, 1);
     io_sethandler(0xf980, 0x0010,
                   pcx_video_read, NULL, NULL, pcx_video_write, NULL, NULL, dev);
+    io_sethandler(0xf9a0, 0x0001,
+                  NULL, NULL, NULL, pcx_vram_sw_write, NULL, NULL, dev);
 
     return dev;
 }

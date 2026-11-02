@@ -268,6 +268,31 @@ pcx_dip_write(UNUSED(uint16_t port), uint8_t val, UNUSED(void *priv))
     pcx.led = val;
 }
 
+
+/* Undecoded ports on the PC-X read back as zero, not open bus 0xff: the POST's
+   device scan (0xfb00-0xfb0f) decides presence from the high byte, and the
+   DOS boot loader checks the resulting bitmap at 0x402. */
+
+
+/* USART2 carries the keyboard.  The DOS loader asks "are you there?" with a
+   lone '&' on the transmit side and then polls RxRDY on 0xf9d1 (0x6ace); it
+   only accepts '<'.  Play the keyboard's part: hand the answer straight back
+   to the receiver. */
+static void
+pcx_kbd_usart_write(uint16_t addr, uint8_t val, void *priv)
+{
+    scn26x1_write(addr, val, priv);
+
+    if (((addr & 0x0003) == 0x0000) && (val == 0x26))
+        scn26x1_inject(priv, '<');
+}
+
+static uint8_t
+pcx_scan_read8(UNUSED(uint16_t port), UNUSED(void *priv))
+{
+    return 0x00;
+}
+
 static uint8_t
 pcx_faultseg_read(UNUSED(uint16_t port), UNUSED(void *priv))
 {
@@ -568,6 +593,18 @@ machine_pcx_init(const machine_t *model)
        scans 0xfb00-0xffff for devices before it has put a vector in IVT 8
        (0xfc405-0xfc433, vector written at 0xfc458), so every one of those reads
        would raise an NMI nobody is listening for and kill the boot. */
+    /* The POST's device scan (v2 0xfc38c, v3 0xfc405) reads 0xfb00-0xfb0f and
+       treats a port whose high byte reads zero as absent, setting one bit per
+       absent port in the equipment word at 0x402.  Undecoded 86Box I/O answers
+       0xff, which makes every port look present and leaves 0x402 at zero; the
+       PC-D DOS loader refuses to boot unless bit 1 of that word is set, so the
+       scan window answers zero here, the way an undriven bus does on the card. */
+    io_sethandler(0xfb01, 0x0001, pcx_scan_read8, NULL, NULL, NULL, NULL, NULL,
+                  NULL);
+    io_sethandler(0xfb00, 0x0001, pcx_io_hole_read8, NULL, NULL, NULL, NULL, NULL,
+                  NULL);
+    io_sethandler(0xfb02, 0x000e, pcx_io_hole_read8, NULL, NULL, NULL, NULL, NULL,
+                  NULL);
     io_sethandler(0xfbbe, 0x0001, pcx_io_hole_read8, pcx_io_hole_read16, NULL,
                   pcx_io_hole_write8, pcx_io_hole_write16, NULL, NULL);
 
@@ -605,6 +642,9 @@ machine_pcx_init(const machine_t *model)
        controller answers what the POST asks it and will carry key strokes. */
     pcx.kbc = kbc_siemens_init();
     pcx_video_set_kbc(video, pcx.kbc);
+    /* The 8741A keyboard interface sits next to the terminal channel
+       (0xf9b0-0xf9b3); the controller registers those ports itself. */
+    kbc_siemens_ports(pcx.kbc);
 
     /* WD2791 formatter: registers at 0xf900-0xf903, INTRQ on IR6, DRQ on the
        80186 DMA channel 1.  The 0xf904 latch above feeds it drive/side/DDEN. */
@@ -636,7 +676,7 @@ machine_pcx_init(const machine_t *model)
     pcx.usart[1] = device_add_inst_params(&scn2661b_device, 2, (void *) (intptr_t) SERIAL_PORT_NONE); /* no connector */
     scn26x1_set_irq(pcx.usart[1], 1 << 2);
     io_sethandler(PCX_USART2_PORT, 0x0004, scn26x1_read, NULL, NULL,
-                  scn26x1_write, NULL, NULL, pcx.usart[1]);
+                  pcx_kbd_usart_write, NULL, NULL, pcx.usart[1]);
 
     pcx.usart[2] = device_add_inst_params(&scn2661b_device, 3, (void *) (intptr_t) 1);              /* reserve -> COM2 */
     scn26x1_set_irq(pcx.usart[2], 1 << 4);

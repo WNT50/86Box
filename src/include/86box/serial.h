@@ -288,6 +288,7 @@ extern void      i8251_set_clock(void *priv, double hz);
 
 extern uint8_t   scn26x1_read(uint16_t addr, void *priv);
 extern void      scn26x1_write(uint16_t addr, uint8_t val, void *priv);
+extern void      scn26x1_inject(void *dev, uint8_t val);
 extern void      scn26x1_set_irq(void *priv, int irq_mask);
 
 /* ------------------------------------------------------------------------ */
