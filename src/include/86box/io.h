@@ -127,6 +127,11 @@ extern void  io_trap_remove(void *handle);
 /* Lets a chipset see each byte cycle at the port before the devices there.
    When the claim function returns 1, the devices never see the cycle, and
    a claimed read returns FFh. A NULL claim removes the port's claim. */
+/* Machine hook consulted before every I/O cycle: return non-zero and the cycle
+   never reaches its handler.  The PC-X MMU uses it for the port that turns all
+   further I/O into a non maskable interrupt. */
+extern int (*io_guard)(uint16_t port, uint8_t write);
+
 extern void  io_set_claim(uint16_t port, int (*claim)(uint16_t port, uint8_t write, uint8_t val, void *priv),
                           void *priv);
 

@@ -80,6 +80,7 @@
 #define PCX_MMU_DAT      0x00f8                    /* 0x84f8 data */
 #define PCX_MMU_ENTRY_LO 0x0400                    /* 0x8400 first entry port */
 #define PCX_MMU_ACK      0x0800                    /* 0x8800 system call */
+#define PCX_MMU_IOOFF    0x0a00                    /* 0x8a00 read and all I/O is trapped */
 #define PCX_MMU_PAGES    1024                      /* 8 banks x 128 slots */
 #define PCX_MMU_PGSIZE   0x800                     /* 2 KB */
 #define PCX_MMU_WINDOW   0x80000                   /* what the card decodes */
@@ -92,6 +93,7 @@ typedef struct {
     int      type;
     int      ack;                                  /* system call latched */
     int      fpend;                                /* protection fault latched */
+    int      ioguard;                              /* 0x8a00 read: I/O is trapped */
     uint32_t fault;                                /* last faulted address */
 } pcx_mmu_t;
 
@@ -127,6 +129,27 @@ static uint32_t pcx_mmu_hole_hi;
    writes the control register, patches the return frame's segment and does an
    lret; it can only survive its own write if the new mapping starts applying
    after that lret. */
+/* 0x8a00: reading it turns every further I/O cycle into a non maskable
+   interrupt.  The card is meant to keep user mode out of the hardware; SINIX
+   never arms it, and neither the loader nor the kernel ever touch the port, so
+   this path only runs if a guest asks for it.  One interrupt is raised for the
+   first refused cycle and the rest are swallowed -- raising on every cycle
+   would re-enter the handler that is itself doing I/O. */
+static int
+pcx_mmu_io_guard(UNUSED(uint16_t port), UNUSED(uint8_t write))
+{
+    if (!pcx_mmu.ioguard)
+        return 0;
+
+    if (!pcx_mmu.fpend) {
+        pcx_mmu.fpend = 1;
+        pcx_mmu.fault = PCX_MMU_BASE + PCX_MMU_IOOFF;
+        nmi_raise();
+    }
+
+    return 1;
+}
+
 static void
 pcx_mmu_cs_load(void)
 {
@@ -325,6 +348,14 @@ pcx_mmu_inw(uint16_t port, UNUSED(void *priv))
         return (idx < 0) ? 0x0000 : pcx_mmu.pg[idx];
     }
 
+    if (off == PCX_MMU_IOOFF) {
+        /* Reading the trap port arms it: from here on every I/O cycle is kept
+           from its handler and the first one raises NMI. */
+        pcx_mmu.ioguard = 1;
+        io_guard        = pcx_mmu_io_guard;
+        return 0;
+    }
+
     if (off == PCX_MMU_ACK) {
         /* Reading the acknowledge port drops the request and clears whichever
            fault latched it. */
@@ -342,8 +373,12 @@ pcx_mmu_inw(uint16_t port, UNUSED(void *priv))
        bit 7 says the last trap was a system call rather than a protection
        fault, bit 6 that one is pending at all.  A pending system call sets
        both, which is what the 0xc0 on the first entry port means. */
-    if ((idx == pcx_mmu_index(0)) && pcx_mmu.ack)
-        return pcx_mmu.pg[idx] | 0xc0;
+    if (idx == pcx_mmu_index(0)) {
+        if (pcx_mmu.ack)
+            return pcx_mmu.pg[idx] | 0xc0;   /* bit 7 system call, bit 6 pending */
+        if (pcx_mmu.fpend)
+            return pcx_mmu.pg[idx] | 0x40;   /* bit 6: a fault is latched */
+    }
 
     return pcx_mmu.pg[idx];
 }
@@ -402,6 +437,8 @@ pcx_mmu_reset(void)
     pcx_mmu.ack   = 0;
     pcx_mmu.fpend = 0;
     pcx_mmu.fault = 0;
+    pcx_mmu.ioguard = 0;
+    io_guard        = NULL;
     memset(pcx_mmu.pg, 0x00, sizeof(pcx_mmu.pg));
 }
 
@@ -429,6 +466,11 @@ pcx_mmu_init(int type)
     pcx_mmu_set_hole(0, 0);
     pcx_mmu.type = type;
 
+    /* "MMU Type = None" is the card-less PC-D arrangement: the window is not
+       decoded at all, so 0x8000-0x8fff answers like the rest of the hole. */
+    if (type == PCX_MMU_NONE)
+        return;
+
     io_sethandler(PCX_MMU_BASE, PCX_MMU_SIZE,
                   pcx_mmu_inb, pcx_mmu_inw, NULL,
                   pcx_mmu_outb, pcx_mmu_outw, NULL, NULL);
@@ -444,6 +486,11 @@ pcx_mmu_close(void)
 {
     mem_machine_translate = NULL;
     mem_machine_cs_load   = NULL;
+    io_guard              = NULL;
+
+    if (pcx_mmu.type == PCX_MMU_NONE)
+        return;
+
     io_removehandler(PCX_MMU_BASE, PCX_MMU_SIZE,
                      pcx_mmu_inb, pcx_mmu_inw, NULL,
                      pcx_mmu_outb, pcx_mmu_outw, NULL, NULL);
