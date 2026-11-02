@@ -86,6 +86,7 @@
 
 typedef struct {
     uint16_t ctl;
+    uint16_t en_cs;                                /* segment the enable was written from */
     uint16_t idx;                                  /* index latch */
     uint16_t pg[PCX_MMU_PAGES];
     int      type;
@@ -100,6 +101,7 @@ static pcx_mmu_t pcx_mmu;
    loses the loader's own map to its self test, so enforcing now only moves the
    failure.  Set PCX_PROT=1 to enable it (see the notes, section 250). */
 static int pcx_mmu_prot = -1;
+static int pcx_mmu_encs = -1;
 
 /* Addresses this machine does not decode at all (PC-X: 0x80000-0xFBFFF, the
    region between the RAM behind the MMU and the ROM).  MAME models it as a
@@ -118,6 +120,23 @@ static uint32_t pcx_mmu_hole_hi;
    index formulas do not even agree with each other.  Keep the three candidates
    selectable so they can be compared on the same boot. */
 static int pcx_mmu_selw = -1;
+
+/* PCX_EN_CS=1: the mapping the control register installs only applies once the
+   cpu has made a far transfer into another segment.  The routine at 0x103a
+   writes the control register, patches the return frame's segment and does an
+   lret; it can only survive its own write if the new mapping starts applying
+   after that lret. */
+static int
+pcx_mmu_def_cs(void)
+{
+    if (pcx_mmu_encs < 0) {
+        const char *env = getenv("PCX_EN_CS");
+
+        pcx_mmu_encs = (env && (env[0] == '0')) ? 0 : 1;
+    }
+
+    return pcx_mmu_encs;
+}
 
 static void
 pcx_mmu_sel_width(void)
@@ -203,6 +222,9 @@ pcx_mmu_translate(uint32_t addr, UNUSED(int rw))
 
     if ((pcx_mmu.type == PCX_MMU_NONE) || !(pcx_mmu.ctl & 0x0020) ||
         (addr >= PCX_MMU_WINDOW))
+        return addr;
+
+    if (pcx_mmu_def_cs() && (cpu_state.seg_cs.seg == pcx_mmu.en_cs))
         return addr;
 
     page  = addr >> 11;
@@ -313,6 +335,8 @@ pcx_mmu_outw(uint16_t port, uint16_t val, UNUSED(void *priv))
         /* Bit 5 turns translation on.  Nothing has to be rebuilt: the entry is
            read on every access, unlike a mapping-based model. */
         pcx_mmu.ctl = val;
+        if (val & 0x0020)
+            pcx_mmu.en_cs = cpu_state.seg_cs.seg;
         return;
     }
 
