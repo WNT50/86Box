@@ -232,6 +232,14 @@ pcx_nmi_writel(uint32_t addr, UNUSED(uint32_t val), UNUSED(void *priv))
 /* Ports                                                                     */
 /* ------------------------------------------------------------------------- */
 
+/* Called by the mmu when its I/O trap raises NMI; the status port is the only
+   way the handler can tell the sources apart. */
+static void
+pcx_nmi_status_set(uint8_t bits)
+{
+    pcx.stat |= bits;
+}
+
 static uint8_t
 pcx_stat_read(UNUSED(uint16_t port), UNUSED(void *priv))
 {
@@ -643,6 +651,7 @@ machine_pcx_init(const machine_t *model)
        the X8 jumper (1-2 = SINIX before 1.2A, 2-3 = 1.2A and later), and "None"
        fits no card at all, which is what the PC-D runs with. */
     pcx_nmi_enable();
+    pcx_mmu_nmi_status = pcx_nmi_status_set;
 
     pcx_mmu_init(machine_get_config_int((char *) "mmu"));
     pcx_mmu_set_hole(0, 0); /* the mapping above already reports the hole */

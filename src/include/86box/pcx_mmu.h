@@ -31,6 +31,11 @@
 #define PCX_MMU_SINIX10 1
 #define PCX_MMU_SINIX12 2
 
+/* The card's NMI shares the board's status port with the bus time-out, and the
+   POST's handler only takes the "not a debug trap" path when the matching bit
+   is visible there, so the machine hands the mmu a way to set it. */
+extern void (*pcx_mmu_nmi_status)(uint8_t bits);
+
 extern void pcx_mmu_init(int type);
 /* Undecoded address range (hi exclusive) that raises NMI on access; hi <= lo
    disables it.  Alternative to a CPU-only catch-all mapping -- use one, not
