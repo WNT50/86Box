@@ -342,8 +342,9 @@ machine_at_vaxmate_init(const machine_t *model)
     device_add(&vaxmate_video_device);
 
     /* 板载鼠标：DEC 三键鼠标挂在 0x0C40 的 SCN2661 上，中断走 IRQ12。
-       串口芯片是独立设备（params 把 local 置 0xFF，不占 COM 口表），鼠标把
-       自己作为 serial_backend_t 挂上去：芯片按需向它取字节。 */
+       串口芯片是独立设备（params 把 local 置 0xFF，不占 COM 口表），板子拿
+       芯片自己的 endpoint 把鼠标的 backend 直接接上去：芯片按需向它取字节，
+       全程不经过 com_ports[]。 */
     device_add(&vaxmate_mouse_device);
     vaxmate_uart = device_add_params(&scn2661c_device, (void *) 0xff);
     io_sethandler(0x0c40, 0x0004,
@@ -351,7 +352,15 @@ machine_at_vaxmate_init(const machine_t *model)
                   scn26x1_write, NULL, NULL,
                   vaxmate_uart);
     scn26x1_set_irq(vaxmate_uart, 0x1000);
-    scn26x1_set_backend(vaxmate_uart, vaxmate_mouse_backend());
+    serial_endpoint_t *vaxmate_uart_ep = scn26x1_endpoint(vaxmate_uart);
+
+    /* 新 API 不提供「直接挂裸 backend」，但 endpoint 的 be/on_attach 是公开字段：
+       板载设备自己生产 backend（priv 指向自己），挂上后让芯片把格式与线态推过去。 */
+    if (vaxmate_uart_ep != NULL) {
+        vaxmate_uart_ep->be = vaxmate_mouse_backend();
+        if (vaxmate_uart_ep->on_attach != NULL)
+            vaxmate_uart_ep->on_attach(vaxmate_uart_ep->chip);
+    }
     /* 板载网卡按 86Box 惯例走 "Internal" 条目：机型表里 .net_device 指向
        本设备，只有用户在"网络"设置里选了 Internal 才实例化。 */
     if ((net_cards_conf[0].device_num == NET_INTERNAL) && machine_get_net_device(machine))
