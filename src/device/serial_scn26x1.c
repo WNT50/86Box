@@ -123,6 +123,7 @@ scn26x1_log(const char *fmt, ...)
 #define SCN26X1_PORT_MASK  0xff /* passed through device_add_params() */
 #define SCN26X1_VARIANT_B  2
 #define SCN26X1_VARIANT_C  3
+#define SCN26X1_PORT_NONE  SERIAL_PORT_NONE /* passed through device_add_params() */
 
 typedef struct scn26x1_t {
     uint8_t  mr1, mr2, cr, sr;

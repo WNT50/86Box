@@ -586,31 +586,31 @@ machine_pcx_init(const machine_t *model)
 
     pcx.scsi = scsi_sm912_init(PCX_SCSI_PORT, pcx_usart_irq, (void *) (intptr_t) 5);
 
-    /* The three USARTs are SCN2661B parts: the board feeds all three from one
-       4.9152 MHz crystal, which is the B rate table.  USART1 (0xf9c0) is the
-       printer line, USART2 (0xf9d0) the modem line and USART3 (0xf9e0) the
-       reserve line the kernel runs its console on.  On the PC-D the second part
-       is wired to the keyboard instead; the PC-X keeps its keyboard on the
-       video board's terminal channel, which is why 0xf9d0 is free for the modem
-       here.  The low byte of .local is the COM port the chip answers as -- 0,
-       1, 2 for COM1, COM2 and COM3 -- and the chip claims that port in its init
-       only when the machine config has it enabled.  The chip decodes no address
-       of its own: the four consecutive ports are registered here and A1:A0
-       picks the register.  INTR is a level line on the system PIC, IR3 / IR2 /
-       IR4 for the first / second / third USART. */
+    /* The three USARTs are SCN2661B parts, all fed from one 4.9152 MHz crystal,
+       which is the B rate table.  The shared BIOS names them after their PC-D
+       wiring -- PRINTER (0xf9c0), KEYBORD (0xf9d0), RESERVE (0xf9e0) -- but the
+       PC-X only brings two of them out: the printer line and the reserve line,
+       the one the kernel polls as its console.  The second part is fitted and
+       answers the POST's loopback, yet it reaches no connector: it is the line
+       kept for a modem and, on the PC-D, the line the keyboard hangs off.  So
+       only the first and third parts claim a COM port here; the middle one is
+       handed SERIAL_PORT_NONE and stays invisible to the host.  The chip
+       decodes no address of its own: the four consecutive ports are registered
+       below and A1:A0 picks the register.  INTR is a level line on the system
+       PIC, IR3 / IR2 / IR4 for the first / second / third USART. */
     serial_set_next_inst(SERIAL_MAX - 1);
 
-    pcx.usart[0] = device_add_inst_params(&scn2661b_device, 1, (void *) (intptr_t) 0);
+    pcx.usart[0] = device_add_inst_params(&scn2661b_device, 1, (void *) (intptr_t) 0);              /* printer -> COM1 */
     scn26x1_set_irq(pcx.usart[0], 1 << 3);
     io_sethandler(PCX_USART1_PORT, 0x0004, scn26x1_read, NULL, NULL,
                   scn26x1_write, NULL, NULL, pcx.usart[0]);
 
-    pcx.usart[1] = device_add_inst_params(&scn2661b_device, 2, (void *) (intptr_t) 1);
+    pcx.usart[1] = device_add_inst_params(&scn2661b_device, 2, (void *) (intptr_t) SERIAL_PORT_NONE); /* no connector */
     scn26x1_set_irq(pcx.usart[1], 1 << 2);
     io_sethandler(PCX_USART2_PORT, 0x0004, scn26x1_read, NULL, NULL,
                   scn26x1_write, NULL, NULL, pcx.usart[1]);
 
-    pcx.usart[2] = device_add_inst_params(&scn2661b_device, 3, (void *) (intptr_t) 2);
+    pcx.usart[2] = device_add_inst_params(&scn2661b_device, 3, (void *) (intptr_t) 1);              /* reserve -> COM2 */
     scn26x1_set_irq(pcx.usart[2], 1 << 4);
     io_sethandler(PCX_USART3_PORT, 0x0004, scn26x1_read, NULL, NULL,
                   scn26x1_write, NULL, NULL, pcx.usart[2]);
