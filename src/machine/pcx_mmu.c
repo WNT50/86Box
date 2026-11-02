@@ -44,7 +44,8 @@
  *              the frame number in bits 15..8 and 0x20 = present.
  *
  * so: page = address >> 11, entry = table[page & 0x7f], physical address =
- * (entry & 0xff00) | (address & 0x7ff).  A zero entry means the page was never
+ * (address & 0xf0000) | (entry & 0xff00) | (address & 0x7ff) -- the entry
+ * rewrites A15..A8 only, the 64 KB block (A19..A16) passes through.  A zero entry means the page was never
  * programmed and passes through untranslated -- the loader and the kernel both
  * execute out of the RAM below the card's window without ever writing an entry
  * for it.
@@ -83,7 +84,7 @@
 #define PCX_MMU_IOOFF    0x0a00                    /* 0x8a00 read and all I/O is trapped */
 #define PCX_MMU_PAGES    1024                      /* 8 banks x 128 slots */
 #define PCX_MMU_PGSIZE   0x800                     /* 2 KB */
-#define PCX_MMU_WINDOW   0x80000                   /* what the card decodes */
+#define PCX_MMU_WINDOW   0x100000                  /* the card sits under the whole 1 MB */
 
 typedef struct {
     uint16_t ctl;
@@ -295,12 +296,21 @@ pcx_mmu_translate(uint32_t addr, UNUSED(int rw))
             pclog("[RL] ctl=%04X addr=%05X idx=%03X entry=%04X -> %05X rw=%d @%04X:%04X\n",
                   pcx_mmu.ctl, addr & 0xfffffu,
                   pcx_mmu_index(addr >> 11), entry,
-                  ((uint32_t) (entry & 0xff00u)) | (addr & (PCX_MMU_PGSIZE - 1)), rw,
+                  (addr & 0xf0000u) | ((uint32_t) (entry & 0xff00u)) |
+                      (addr & (PCX_MMU_PGSIZE - 1)), rw,
                   cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
         }
     }
 
-    return ((uint32_t) (entry & 0xff00u)) | (addr & (PCX_MMU_PGSIZE - 1));
+    /* The entry only rewrites A15..A8: the 64 KB block number (A19..A16) comes
+       from the address itself.  That is what lets a 1 MB machine work at all --
+       the eight bits of frame in a twelve bit entry can only name a page inside
+       a block, not a page anywhere in a megabyte.  The kernel uses it: the
+       loader maps logical page 0x20 to entry 0xd821 while the image it just
+       copied sits at physical 0x1d800, and the code it runs lives from 0x10000
+       up (see the notes, section 264). */
+    return (addr & 0xf0000u) | ((uint32_t) (entry & 0xff00u)) |
+           (addr & (PCX_MMU_PGSIZE - 1));
 }
 
 static uint16_t pcx_mmu_inw(uint16_t port, void *priv);
