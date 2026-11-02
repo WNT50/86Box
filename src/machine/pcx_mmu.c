@@ -407,6 +407,18 @@ pcx_mmu_outw(uint16_t port, uint16_t val, UNUSED(void *priv))
     uint16_t off = (uint16_t) (port - PCX_MMU_BASE);
     int      idx;
 
+    {
+        static int on = -1, n;
+
+        if (on < 0)
+            on = getenv("PCX_PLOG") ? 1 : 0;
+        if (on && (n < 2400) && (off < PCX_MMU_ACK)) {
+            n++;
+            pclog("[PLOG] %04X %04X ctl=%02X @%04X:%04X\n", port, val,
+                  pcx_mmu.ctl, cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
+        }
+    }
+
     if (off == PCX_MMU_CTL) {
         /* Bit 5 turns translation on.  Nothing has to be rebuilt: the entry is
            read on every access, unlike a mapping-based model. */
@@ -492,6 +504,7 @@ pcx_mmu_init(int type)
     pcx_mmu_reset();
     pcx_mmu_set_hole(0, 0);
     pcx_mmu.type = type;
+    pclog("[MMU] type=%d\n", type);
 
     /* The entry names a page in a 2 MB space; fold anything past the installed
        RAM back onto it (1 MB machine: 0x1f7800 reads as 0xf7800). */

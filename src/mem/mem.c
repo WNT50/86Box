@@ -1114,10 +1114,29 @@ read_mem_w(uint32_t addr)
     return ret;
 }
 
+
+/* PCX_W475=1 in the environment logs every write to the loader's device word
+   at 0x0475, with the writer's CS:IP -- the byte decides which boot path the
+   Siemens loader takes (0x6b90/0x6bb1 increment it, 0x6b5d compares it). */
+static int pcx_w475 = -1;
+
+static void
+pcx_w475_trace(uint32_t addr, uint32_t val, int size)
+{
+    if (pcx_w475 < 0)
+        pcx_w475 = (getenv("PCX_W475") != NULL);
+
+    if (pcx_w475 && (addr >= 0x0475) && (addr <= 0x0476))
+        pclog("[W475] %05X = %02X size=%i from %04X:%04X\n", addr, val & 0xff,
+              size, CS, cpu_state.pc);
+}
+
 void
 write_mem_b(uint32_t addr, uint8_t val)
 {
     mem_mapping_t *map;
+
+    pcx_w475_trace(addr, val, 1);
 
     mem_logical_addr = addr;
     addr &= rammask;

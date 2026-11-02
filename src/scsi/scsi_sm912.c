@@ -42,6 +42,7 @@
 #include <string.h>
 
 #include <86box/86box.h>
+#include "cpu.h"
 #include <86box/io.h>
 #include <86box/scsi_sm912.h>
 #include <86box/timer.h>
@@ -119,6 +120,8 @@ scsi_sm912_update_irq(scsi_sm912_t *dev)
 static uint8_t
 scsi_sm912_status(scsi_sm912_t *dev)
 {
+    static int log_on = -1;
+    static int log_n;
     uint8_t ret = 0;
 
     switch (dev->phase) {
@@ -134,6 +137,12 @@ scsi_sm912_status(scsi_sm912_t *dev)
         default:
             break;
     }
+
+    if (log_on < 0)
+        log_on = (getenv("PCX_SCSILOG") != NULL);
+    if (log_on && (log_n++ < 400))
+        pclog("[SM912] status phase=%i -> %02X from %04X:%04X\n", dev->phase, ret,
+              CS, cpu_state.pc);
 
     return ret;
 }

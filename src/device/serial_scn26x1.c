@@ -414,6 +414,15 @@ scn26x1_cts_on(scn26x1_t *dev)
     return 1;
 }
 
+/* Hand a byte to the receiver from the machine side: the PC-D keyboard sits on
+   USART2, and the DOS loader's presence query ('&', 0x6ac6) has to be answered
+   on the same link (it accepts '<' at 0x6ae3). */
+void
+scn26x1_inject(void *dev, uint8_t val)
+{
+    scn26x1_receive((scn26x1_t *) dev, val);
+}
+
 static void
 scn26x1_receive(scn26x1_t *dev, uint8_t val)
 {

@@ -35,4 +35,6 @@ extern uint8_t kbc_siemens_read_status(kbc_siemens_t *dev);
 /* Inject a byte from the keyboard, delivered on the next host read. */
 extern void kbc_siemens_key(kbc_siemens_t *dev, uint8_t byte);
 
+void kbc_siemens_ports(kbc_siemens_t *dev);
+
 #endif /*EMU_KBC_SIEMENS_H*/

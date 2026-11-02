@@ -343,6 +343,7 @@ extern serial_endpoint_t *scn26x1_endpoint(void *priv);
 
 extern uint8_t   scn26x1_read(uint16_t addr, void *priv);
 extern void      scn26x1_write(uint16_t addr, uint8_t val, void *priv);
+extern void      scn26x1_inject(void *dev, uint8_t val);
 extern void      scn26x1_set_irq(void *priv, int irq_mask);
 
 /* ------------------------------------------------------------------------ */
