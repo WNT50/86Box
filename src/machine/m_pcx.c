@@ -587,13 +587,17 @@ machine_pcx_init(const machine_t *model)
     pcx.scsi = scsi_sm912_init(PCX_SCSI_PORT, pcx_usart_irq, (void *) (intptr_t) 5);
 
     /* The three USARTs are SCN2661B parts: the board feeds all three from one
-       4.9152 MHz crystal, which is the B rate table.  The low byte of .local is
-       the COM port the chip answers as -- 0, 1, 2 for COM1, COM2 and COM3 --
-       and the chip claims that port in its init only when the machine config
-       has it enabled.  The chip decodes no address of its own: the four
-       consecutive ports are registered here and A1:A0 picks the register.  INTR
-       is a level line on the system PIC, IR3 / IR2 / IR4 for the first /
-       second / third USART. */
+       4.9152 MHz crystal, which is the B rate table.  USART1 (0xf9c0) is the
+       printer line, USART2 (0xf9d0) the modem line and USART3 (0xf9e0) the
+       reserve line the kernel runs its console on.  On the PC-D the second part
+       is wired to the keyboard instead; the PC-X keeps its keyboard on the
+       video board's terminal channel, which is why 0xf9d0 is free for the modem
+       here.  The low byte of .local is the COM port the chip answers as -- 0,
+       1, 2 for COM1, COM2 and COM3 -- and the chip claims that port in its init
+       only when the machine config has it enabled.  The chip decodes no address
+       of its own: the four consecutive ports are registered here and A1:A0
+       picks the register.  INTR is a level line on the system PIC, IR3 / IR2 /
+       IR4 for the first / second / third USART. */
     serial_set_next_inst(SERIAL_MAX - 1);
 
     pcx.usart[0] = device_add_inst_params(&scn2661b_device, 1, (void *) (intptr_t) 0);
