@@ -112,6 +112,38 @@ static uint32_t pcx_mmu_hole_hi;
 /* Entry port -> table slot, or -1 when the port is not an entry.  0x84f0 and
    0x84f8 are the index / data pair the kernel driver uses, so they are not
    entry ports even though they sit inside the window. */
+/* Which bits of the control register pick the bank is the one thing neither the
+   forum nor MAME pins down: the forum author calls it "the biggest mystery" and
+   MAME papers over it with a "SINIX 1.0 / 1.2" switch whose read and write
+   index formulas do not even agree with each other.  Keep the three candidates
+   selectable so they can be compared on the same boot. */
+static int pcx_mmu_selw = -1;
+
+static void
+pcx_mmu_sel_width(void)
+{
+    const char *env;
+
+    if (pcx_mmu_selw >= 0)
+        return;
+
+    env = getenv("PCX_SELW");
+    pcx_mmu_selw = env ? atoi(env) : 0;
+}
+
+/* Index of a table slot: the control register picks the bank, the slot number
+   comes from the port (0x8400 + slot * 8) or from the page being translated
+   (bit 11 of the address upwards). */
+static int
+pcx_mmu_index(uint32_t slot)
+{
+    switch (pcx_mmu_selw) {
+        case 1:  return (int) (((pcx_mmu.ctl & 0x18) << 5) | (slot & 0xff));  /* 2 bits, 256 slots */
+        case 2:  return (int) (((pcx_mmu.ctl & 0x1f) << 5) | (slot & 0x1f));  /* 5 bits,  32 slots */
+        default: return (int) (((pcx_mmu.ctl & 0x1c) << 5) | (slot & 0x7f));  /* 3 bits, 128 slots */
+    }
+}
+
 static int
 pcx_mmu_slot(uint16_t port)
 {
@@ -129,11 +161,12 @@ pcx_mmu_slot(uint16_t port)
     if ((idx == (PCX_MMU_IDX >> 3)) || (idx == (PCX_MMU_DAT >> 3)))
         return -1;
 
-    /* The control register picks the bank: its bits 2-4 select one of eight
-       128-entry banks, which is what keeps the loader's self test (it walks the
-       control register through 4,8,...0x1c and rewrites slots 0 and 2) from
-       destroying the map the loader itself built under control 0-2. */
-    return (int) (((pcx_mmu.ctl & 0x1c) << 5) | idx);
+    /* The control register picks the bank, which is what keeps the loader's self
+       test (it walks the control register through 4,8,...0x1c and rewrites slots
+       0 and 2) from destroying the map the loader itself built under 0-2. */
+    pcx_mmu_sel_width();
+
+    return pcx_mmu_index((uint32_t) idx);
 }
 
 /* Slot the index latch points at, or -1. */
@@ -173,7 +206,8 @@ pcx_mmu_translate(uint32_t addr, UNUSED(int rw))
         return addr;
 
     page  = addr >> 11;
-    entry = pcx_mmu.pg[((pcx_mmu.ctl & 0x1c) << 5) | (page & 0x7f)];
+    pcx_mmu_sel_width();
+    entry = pcx_mmu.pg[pcx_mmu_index(page)];
 
     if (entry == 0x0000)
         return addr;
@@ -201,7 +235,7 @@ pcx_mmu_translate(uint32_t addr, UNUSED(int rw))
             n++;
             pclog("[RL] ctl=%04X addr=%05X idx=%03X entry=%04X -> %05X rw=%d @%04X:%04X\n",
                   pcx_mmu.ctl, addr & 0xfffffu,
-                  ((pcx_mmu.ctl & 0x1c) << 5) | ((addr >> 11) & 0x7f), entry,
+                  pcx_mmu_index(addr >> 11), entry,
                   ((uint32_t) (entry & 0xff00u)) | (addr & (PCX_MMU_PGSIZE - 1)), rw,
                   cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
         }
