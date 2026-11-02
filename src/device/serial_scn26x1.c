@@ -120,8 +120,9 @@ scn26x1_log(const char *fmt, ...)
 /* `device_t.local` carries the COM port index in the low byte (0xff = the
    board owns the chip, no COM port) and the variant in the next byte, so the
    two can be OR-ed together the way device_add_params() does it. */
-#define SCN26X1_VARIANT_B 2
-#define SCN26X1_VARIANT_C 3
+#define SCN26X1_VARIANT_B  2
+#define SCN26X1_VARIANT_C  3
+#define SCN26X1_PORT_NONE  0xff /* passed through device_add_params() */
 
 typedef struct scn26x1_t {
     uint8_t  mr1, mr2, cr, sr;
@@ -837,15 +838,14 @@ scn26x1_reset(void *priv)
 
 /* Siemens PC-X carries three SCN2661B parts at 4.9152 MHz (0xf9c0/0xf9d0/
    0xf9e0); the DEC VAXmate's mouse USART runs off a 5.0688 MHz oscillator,
-   which is the C part. Both default to "no COM port" (low byte 0xff) because
-   the board that owns the chip wires it up itself. device_add_params() ORs
-   its argument into .local, so a board cannot turn 0xff back into a port
-   index; one that needs a COM port gets its own device definition. */
+   which is the C part. The low byte of .local is left clear so a board can OR
+   a COM port index into it through device_add_params(); a board that owns the
+   chip and wants no COM port passes SCN26X1_PORT_NONE (0xff) instead. */
 const device_t scn2661b_device = {
     .name          = "Signetics SCN2661B EPCI",
     .internal_name = "scn2661b",
     .flags         = 0,
-    .local         = 0xff | (SCN26X1_VARIANT_B << 8),
+    .local         = (SCN26X1_VARIANT_B << 8),
     .init          = scn26x1_init,
     .close         = scn26x1_close,
     .reset         = scn26x1_reset,
@@ -859,7 +859,7 @@ const device_t scn2661c_device = {
     .name          = "Signetics SCN2661C EPCI",
     .internal_name = "scn2661c",
     .flags         = 0,
-    .local         = 0xff | (SCN26X1_VARIANT_C << 8),
+    .local         = (SCN26X1_VARIANT_C << 8),
     .init          = scn26x1_init,
     .close         = scn26x1_close,
     .reset         = scn26x1_reset,
