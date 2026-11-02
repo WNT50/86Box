@@ -53,15 +53,24 @@ serial_endpoint_init(serial_endpoint_t *ep, void *chip, const serial_port_ops_t 
 }
 
 void
+serial_endpoint_attach_backend(serial_endpoint_t *ep, const serial_backend_t *be)
+{
+    if (ep == NULL)
+        return;
+
+    ep->be = be;
+
+    if (ep->on_attach != NULL)
+        ep->on_attach(ep->chip);
+}
+
+void
 serial_endpoint_attach_chardev(serial_endpoint_t *ep, char_port_t *port)
 {
     if (ep == NULL)
         return;
 
-    ep->be = (port != NULL) ? serial_backend_from_chardev(port, &ep->store) : NULL;
-
-    if (ep->on_attach != NULL)
-        ep->on_attach(ep->chip);
+    serial_endpoint_attach_backend(ep, (port != NULL) ? serial_backend_from_chardev(port, &ep->store) : NULL);
 }
 
 void
@@ -71,10 +80,7 @@ serial_endpoint_attach_device(serial_endpoint_t *ep, const serial_device_t *sd)
         return;
 
     ep->dev = *sd;
-    ep->be  = serial_backend_from_device(ep->serial, &ep->dev, &ep->store);
-
-    if (ep->on_attach != NULL)
-        ep->on_attach(ep->chip);
+    serial_endpoint_attach_backend(ep, serial_backend_from_device(ep->serial, &ep->dev, &ep->store));
 }
 
 void

@@ -167,6 +167,10 @@ typedef struct serial_endpoint_s {
 } serial_endpoint_t;
 
 extern void serial_endpoint_init(serial_endpoint_t *ep, void *chip, const serial_port_ops_t *ops);
+
+/* Attach whatever speaks the seam: a raw backend (a device that owns its own
+   vtable), a host chardev, or an in-machine device given as callbacks. */
+extern void serial_endpoint_attach_backend(serial_endpoint_t *ep, const serial_backend_t *be);
 extern void serial_endpoint_attach_chardev(serial_endpoint_t *ep, char_port_t *port);
 extern void serial_endpoint_attach_device(serial_endpoint_t *ep, const serial_device_t *sd);
 extern void serial_endpoint_detach(serial_endpoint_t *ep);
