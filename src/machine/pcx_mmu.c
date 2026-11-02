@@ -91,6 +91,7 @@ typedef struct {
     int      type;
     int      ack;                                  /* system call latched */
     int      fpend;                                /* protection fault latched */
+    int      iotrap;                               /* 0x8a00 trap raised the nmi */
     int      ioguard;                              /* 0x8a00 read: I/O is trapped */
     uint32_t fault;                                /* last faulted address */
 } pcx_mmu_t;
@@ -136,15 +137,25 @@ static uint32_t pcx_mmu_hole_hi;
    goes out and the trap opens again: the POST arms it, touches a port and then
    expects its own handler -- which does I/O itself -- to have run (v3 BIOS
    0xfe35e-0xfe36e). */
+void (*pcx_mmu_nmi_status)(uint8_t bits) = NULL;
+
 static int
 pcx_mmu_io_guard(UNUSED(uint16_t port), UNUSED(uint8_t write))
 {
     if (!pcx_mmu.ioguard)
         return 0;
 
-    if (!pcx_mmu.fpend) {
-        pcx_mmu.fpend = 1;
+    if (!pcx_mmu.iotrap) {
+        pcx_mmu.iotrap = 1;
         pcx_mmu.fault = PCX_MMU_BASE + PCX_MMU_IOOFF;
+        /* The handler the POST installs looks at the status byte before it does
+           anything else: with no bit set it treats the interrupt as a debug
+           trap and drops into the ROM monitor (v3 BIOS 0xfe361-0xfe373, the
+           handler it builds at 0x879).  The trap reports as 0x08 -- the "not a
+           debug trap" line -- and leaves the time-out bit clear, which is the
+           combination the test then accepts. */
+        if (pcx_mmu_nmi_status != NULL)
+            pcx_mmu_nmi_status(0x08);
         nmi_raise();
     }
 
@@ -354,8 +365,9 @@ pcx_mmu_inw(uint16_t port, UNUSED(void *priv))
     if (off == PCX_MMU_ACK) {
         /* Reading the acknowledge port drops the request and clears whichever
            fault latched it. */
-        pcx_mmu.ack   = 0;
-        pcx_mmu.fpend = 0;
+        pcx_mmu.ack    = 0;
+        pcx_mmu.fpend  = 0;
+        pcx_mmu.iotrap = 0;
         picintc(0x0001);
         return 0;
     }
@@ -373,6 +385,8 @@ pcx_mmu_inw(uint16_t port, UNUSED(void *priv))
             return pcx_mmu.pg[idx] | 0xc0;   /* bit 7 system call, bit 6 pending */
         if (pcx_mmu.fpend)
             return pcx_mmu.pg[idx] | 0x40;   /* bit 6: a fault is latched */
+        if (pcx_mmu.iotrap)
+            return pcx_mmu.pg[idx] | 0x80;   /* the 0x8a00 trap, not a fault */
     }
 
     return pcx_mmu.pg[idx];
@@ -422,8 +436,9 @@ pcx_mmu_reset(void)
     pcx_mmu.ctl   = 0;
     pcx_mmu.defer = 0;
     pcx_mmu.ack   = 0;
-    pcx_mmu.fpend = 0;
-    pcx_mmu.fault = 0;
+    pcx_mmu.fpend  = 0;
+    pcx_mmu.iotrap = 0;
+    pcx_mmu.fault  = 0;
     pcx_mmu.ioguard = 0;
     io_guard        = NULL;
     memset(pcx_mmu.pg, 0x00, sizeof(pcx_mmu.pg));
