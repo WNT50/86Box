@@ -212,6 +212,8 @@ typedef struct ser_port_s {
     serial_t *serial;
 } ser_port_t;
 
+#define SERIAL_PORT_NONE 0xff /* a board mounted chip that answers no COM port */
+
 extern ser_port_t com_ports[SERIAL_MAX];
 
 /* Storage for an in-machine device's callbacks; owned by serial_host.c. */
