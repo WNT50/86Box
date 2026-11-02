@@ -193,6 +193,20 @@ pcx_mmu_translate(uint32_t addr, UNUSED(int rw))
         }
     }
 
+    {
+        static int rl = -1, n;
+        if (rl < 0)
+            rl = getenv("PCX_RL") ? 1 : 0;
+        if (rl && (n < 40) && (pcx_mmu.ctl != 0)) {
+            n++;
+            pclog("[RL] ctl=%04X addr=%05X idx=%03X entry=%04X -> %05X rw=%d @%04X:%04X\n",
+                  pcx_mmu.ctl, addr & 0xfffffu,
+                  ((pcx_mmu.ctl & 0x1c) << 5) | ((addr >> 11) & 0x7f), entry,
+                  ((uint32_t) (entry & 0xff00u)) | (addr & (PCX_MMU_PGSIZE - 1)), rw,
+                  cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
+        }
+    }
+
     return ((uint32_t) (entry & 0xff00u)) | (addr & (PCX_MMU_PGSIZE - 1));
 }
 
