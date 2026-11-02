@@ -75,6 +75,8 @@ typedef struct io_claim_t {
 } io_claim_t;
 
 static io_claim_t io_claims[IO_CLAIMS];
+
+int (*io_guard)(uint16_t port, uint8_t write) = NULL;
 static uint8_t    io_claimed[NPORTS / 8];
 
 #ifdef ENABLE_IO_LOG
@@ -404,6 +406,8 @@ io_debug_check_addr(uint16_t port)
 uint8_t
 inb(uint16_t port)
 {
+    if ((io_guard != NULL) && io_guard(port, 0))
+        return 0xff;
     uint8_t ret = 0xff;
     io_t   *p;
     io_t   *q;
@@ -480,6 +484,8 @@ inb(uint16_t port)
 void
 outb(uint16_t port, uint8_t val)
 {
+    if ((io_guard != NULL) && io_guard(port, 1))
+        return;
     io_t   *p;
     io_t   *q;
     uint8_t found  = 0;
@@ -544,6 +550,8 @@ outb(uint16_t port, uint8_t val)
 uint16_t
 inw(uint16_t port)
 {
+    if ((io_guard != NULL) && io_guard(port, 0))
+        return 0xffff;
     io_t    *p;
     io_t    *q;
     uint16_t ret    = 0xffff;
@@ -635,6 +643,8 @@ inw(uint16_t port)
 void
 outw(uint16_t port, uint16_t val)
 {
+    if ((io_guard != NULL) && io_guard(port, 1))
+        return;
     io_t   *p;
     io_t   *q;
     uint8_t found  = 0;
@@ -716,6 +726,8 @@ outw(uint16_t port, uint16_t val)
 uint32_t
 inl(uint16_t port)
 {
+    if ((io_guard != NULL) && io_guard(port, 0))
+        return 0xffffffff;
     io_t    *p;
     io_t    *q;
     uint32_t ret = 0xffffffff;
@@ -839,6 +851,8 @@ inl(uint16_t port)
 void
 outl(uint16_t port, uint32_t val)
 {
+    if ((io_guard != NULL) && io_guard(port, 1))
+        return;
     io_t   *p;
     io_t   *q;
     uint8_t found  = 0;

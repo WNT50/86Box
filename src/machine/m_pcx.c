@@ -79,6 +79,7 @@
 #define PCX_PIC2_PORT     0x00f820
 #define PCX_STAT_PORT     0x00f840
 #define PCX_DIP_PORT      0x00f841
+#define PCX_FAULTSEG_PORT 0x00f842
 #define PCX_RTC_PORT      0x00f880
 #define PCX_RTC_SIZE      0x0040 /* 64 registers, 0x0e-0x3f are battery RAM */
 #define PCX_RTC_DATA      0x00f880
@@ -257,6 +258,18 @@ pcx_dip_write(UNUSED(uint16_t port), uint8_t val, UNUSED(void *priv))
        touches anything else.  Keep the value for a display model later. */
 
     pcx.led = val;
+}
+
+static uint8_t
+pcx_faultseg_read(UNUSED(uint16_t port), UNUSED(void *priv))
+{
+    /* 0xf842: what the NMI handler reads to name the segment the fault was
+       taken in.  The forum only knows the name the manual gives it
+       ("SPEICHER-SEGMENT") and asks whether it is the high eight bits of the
+       faulting address; nothing in the ROM or the kernel reads it back in a way
+       that settles the polarity, so report bits 19..16 of the address the card
+       refused and let the firmware print what it likes. */
+    return (uint8_t) ((pcx_mmu_fault_addr() >> 16) & 0xff);
 }
 
 static uint8_t
@@ -549,6 +562,8 @@ machine_pcx_init(const machine_t *model)
                   pcx_stat_write, NULL, NULL, NULL);
     io_sethandler(PCX_DIP_PORT, 0x0001, pcx_dip_read, NULL, NULL,
                   pcx_dip_write, NULL, NULL, NULL);
+    io_sethandler(PCX_FAULTSEG_PORT, 0x0001, pcx_faultseg_read, NULL, NULL,
+                  NULL, NULL, NULL, NULL);
     io_sethandler(PCX_DSKCTL_PORT, 0x0001, pcx_dskctl_read, NULL, NULL,
                   pcx_dskctl_write, NULL, NULL, NULL);
     io_sethandler(PCX_DSKCTL2_PORT, 0x0001, pcx_dskctl2_read, NULL, NULL,
