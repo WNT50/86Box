@@ -624,6 +624,13 @@ scn26x1_write(uint16_t port, uint8_t val, void *priv)
             dev->thr_full = 1;
             dev->tx_emt   = 0;
             scn26x1_tx_start(dev);
+
+            /* Command bits 7:6 = 10 put the part in local loopback: the
+               transmitter is wired to the receiver inside the chip, which is
+               how the Siemens POST proves each port (it writes a pattern and
+               reads it straight back, v3 0xc6e..0xc8f). */
+            if ((dev->cr & 0xc0) == 0x80)
+                scn26x1_receive(dev, val);
             break;
 
         case SCN_SYN:
