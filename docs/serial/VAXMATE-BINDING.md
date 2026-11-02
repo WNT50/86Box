@@ -21,7 +21,7 @@ VAXmate 的 SCN2661 在 `0x0C40–0x0C43`，只接 DEC 三键鼠标，**不是 C
 ```c
 /* m_vaxmate.c */
 device_add(&vaxmate_mouse_device);
-vaxmate_uart = device_add(&scn2661_standalone_device);   /* .local = 0xff，不占 COM */
+vaxmate_uart = device_add_params(&scn2661_device, (void *) 0xff);  /* local |= 0xff */
 io_sethandler(0x0c40, 0x0004,
               scn26x1_read, NULL, NULL,
               scn26x1_write, NULL, NULL,
@@ -30,12 +30,15 @@ scn26x1_set_irq(vaxmate_uart, 0x1000);                    /* IRQ12 */
 scn26x1_set_backend(vaxmate_uart, vaxmate_mouse_backend());
 ```
 
-芯片侧为此新增两处：
+芯片侧为此只新增一处：
 
 - `scn26x1_set_backend(void *priv, const serial_backend_t *be)`
   直连后端，绕过 `com_ports`；设置后立刻 `scn26x1_rx_try_read()` 取第一个字节。
-- `scn2661_standalone_device`
-  与 `scn2661_device` 同一颗芯片，仅 `.local = 0xff`，`scn26x1_init()` 因此跳过端口表注册。
+
+「不占 COM 口」不需要另立 device_t：`device_add_common()` 对 `params` 做的是
+`init_dev->local |= (uintptr_t) params`，传 `(void *) 0xff` 就把 `local` 置成 `0xff`，
+`scn26x1_init()` 里的 `port = info->local & 0xff` 因此落在 `SERIAL_MAX` 之外，端口表注册被跳过。
+设备身份仍按 `local` 记账，与真正的 `scn2661_device`（`local = 0`）互不冲突。
 
 ## 3. 鼠标如何实现后端
 
@@ -88,3 +91,5 @@ if (!dev->modem_set && ((dev->be == NULL) || (dev->be->status == NULL)))
 - `serial_backend_from_device()` 刻意不提供 `read_byte`：那条路是「设备直接推 FIFO」。
   需要「设备有队列、芯片按需来取」时，实现完整 `serial_backend_t` 并直连（如本机鼠标）。
 - 芯片的 `be_store` 只用于适配器；直连后端是静态生命周期，不需要 store。
+- 想改 `local` 又不想另建 device_t 时用 `device_add_params()`：它只做 `|=`，
+  清不掉已有位；本例基值 0，或 `0xff` 正好得到 0xFF。

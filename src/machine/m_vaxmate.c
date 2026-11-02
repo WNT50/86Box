@@ -342,10 +342,10 @@ machine_at_vaxmate_init(const machine_t *model)
     device_add(&vaxmate_video_device);
 
     /* 板载鼠标：DEC 三键鼠标挂在 0x0C40 的 SCN2661 上，中断走 IRQ12。
-       串口芯片是独立设备（standalone 变体，不占用 COM 口表），鼠标把
+       串口芯片是独立设备（params 把 local 置 0xFF，不占 COM 口表），鼠标把
        自己作为 serial_backend_t 挂上去：芯片按需向它取字节。 */
     device_add(&vaxmate_mouse_device);
-    vaxmate_uart = device_add(&scn2661_standalone_device);
+    vaxmate_uart = device_add_params(&scn2661_device, (void *) 0xff);
     io_sethandler(0x0c40, 0x0004,
                   scn26x1_read, NULL, NULL,
                   scn26x1_write, NULL, NULL,
