@@ -284,7 +284,7 @@ pcx_kbd_usart_write(uint16_t addr, uint8_t val, void *priv)
     scn26x1_write(addr, val, priv);
 
     if (((addr & 0x0003) == 0x0000) && (val == 0x26))
-        scn26x1_inject(priv, '<');
+        serial_endpoint_receive(scn26x1_endpoint(priv), '<');
 }
 
 static uint8_t
