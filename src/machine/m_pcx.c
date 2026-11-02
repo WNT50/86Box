@@ -586,26 +586,27 @@ machine_pcx_init(const machine_t *model)
 
     pcx.scsi = scsi_sm912_init(PCX_SCSI_PORT, pcx_usart_irq, (void *) (intptr_t) 5);
 
-    /* The three USARTs are board devices with nothing behind them, so the
-       machine claims no COM port (0xff through device_add_params()) and each
-       chip runs with no backend.  They are SCN2661B parts: the board feeds all
-       three from one 4.9152 MHz crystal, which is the B rate table.  The chip
-       decodes no address of its own: the four consecutive ports are registered
-       here and A1:A0 picks the register.  INTR is a level line on the system
-       PIC, IR3 / IR2 / IR4 for the first / second / third USART. */
+    /* The three USARTs are SCN2661B parts: the board feeds all three from one
+       4.9152 MHz crystal, which is the B rate table.  The low byte of .local is
+       the COM port the chip answers as -- 0, 1, 2 for COM1, COM2 and COM3 --
+       and the chip claims that port in its init only when the machine config
+       has it enabled.  The chip decodes no address of its own: the four
+       consecutive ports are registered here and A1:A0 picks the register.  INTR
+       is a level line on the system PIC, IR3 / IR2 / IR4 for the first /
+       second / third USART. */
     serial_set_next_inst(SERIAL_MAX - 1);
 
-    pcx.usart[0] = device_add_inst_params(&scn2661b_device, 1, (void *) (intptr_t) 0xff);
+    pcx.usart[0] = device_add_inst_params(&scn2661b_device, 1, (void *) (intptr_t) 0);
     scn26x1_set_irq(pcx.usart[0], 1 << 3);
     io_sethandler(PCX_USART1_PORT, 0x0004, scn26x1_read, NULL, NULL,
                   scn26x1_write, NULL, NULL, pcx.usart[0]);
 
-    pcx.usart[1] = device_add_inst_params(&scn2661b_device, 2, (void *) (intptr_t) 0xff);
+    pcx.usart[1] = device_add_inst_params(&scn2661b_device, 2, (void *) (intptr_t) 1);
     scn26x1_set_irq(pcx.usart[1], 1 << 2);
     io_sethandler(PCX_USART2_PORT, 0x0004, scn26x1_read, NULL, NULL,
                   scn26x1_write, NULL, NULL, pcx.usart[1]);
 
-    pcx.usart[2] = device_add_inst_params(&scn2661b_device, 3, (void *) (intptr_t) 0xff);
+    pcx.usart[2] = device_add_inst_params(&scn2661b_device, 3, (void *) (intptr_t) 2);
     scn26x1_set_irq(pcx.usart[2], 1 << 4);
     io_sethandler(PCX_USART3_PORT, 0x0004, scn26x1_read, NULL, NULL,
                   scn26x1_write, NULL, NULL, pcx.usart[2]);
