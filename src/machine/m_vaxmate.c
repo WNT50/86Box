@@ -345,7 +345,7 @@ machine_at_vaxmate_init(const machine_t *model)
        串口芯片是独立设备（params 把 local 置 0xFF，不占 COM 口表），鼠标把
        自己作为 serial_backend_t 挂上去：芯片按需向它取字节。 */
     device_add(&vaxmate_mouse_device);
-    vaxmate_uart = device_add_params(&scn2661_device, (void *) 0xff);
+    vaxmate_uart = device_add_params(&scn2661c_device, (void *) 0xff);
     io_sethandler(0x0c40, 0x0004,
                   scn26x1_read, NULL, NULL,
                   scn26x1_write, NULL, NULL,

@@ -21,7 +21,7 @@ VAXmate 的 SCN2661 在 `0x0C40–0x0C43`，只接 DEC 三键鼠标，**不是 C
 ```c
 /* m_vaxmate.c */
 device_add(&vaxmate_mouse_device);
-vaxmate_uart = device_add_params(&scn2661_device, (void *) 0xff);  /* local |= 0xff */
+vaxmate_uart = device_add_params(&scn2661c_device, (void *) 0xff); /* C part, no COM port */
 io_sethandler(0x0c40, 0x0004,
               scn26x1_read, NULL, NULL,
               scn26x1_write, NULL, NULL,
@@ -36,9 +36,26 @@ scn26x1_set_backend(vaxmate_uart, vaxmate_mouse_backend());
   直连后端，绕过 `com_ports`；设置后立刻 `scn26x1_rx_try_read()` 取第一个字节。
 
 「不占 COM 口」不需要另立 device_t：`device_add_common()` 对 `params` 做的是
-`init_dev->local |= (uintptr_t) params`，传 `(void *) 0xff` 就把 `local` 置成 `0xff`，
+`init_dev->local |= (uintptr_t) params`（基值 `3 << 8`，或上 `0xff` 后低字节即端口号 ff），传 `(void *) 0xff` 就把 `local` 置成 `0xff`，
 `scn26x1_init()` 里的 `port = info->local & 0xff` 因此落在 `SERIAL_MAX` 之外，端口表注册被跳过。
 设备身份仍按 `local` 记账，与真正的 `scn2661_device`（`local = 0`）互不冲突。
+
+## 2.1 用的是 C 变体（SCN2661C，5.0688 MHz）
+
+芯片族按 BRCLK 分成两个部件，`device_t.local` 的高字节存变体号（低字节留端口号）：
+
+| 器件 | BRCLK | 速率表 | `local` |
+|---|---|---|---:|
+| `scn2661b_device` | 4.9152 MHz | 45.5 … 38400 | `2 << 8` |
+| `scn2661c_device` | 5.0688 MHz | 50 … 19200 | `3 << 8` |
+
+VAXmate 的鼠标 USART 走 **SCN2661C**，判据链：
+
+1. 数据手册（`ocrpage/scn2661_epci/ch6_1_ELECTRICAL_CHARACTERISTICS.md`）：
+   `fBRG Baud rate generator (2661 C) 1.0 / 5.0688 / 5.0738` MHz，C 件的 BRCLK 就是 5.0688。
+2. ROM 初始化 `MR2 = 0x7C`：高半字节 7 = 16× 时钟，低半字节 C → 分频 66。
+3. 66 × 16 × 4800 = **5,068,800 Hz**，与 C 件的 BRCLK 精确吻合；4.9152 MHz 下同一档只有 4654 baud。
+4. 5.0688 MHz 的 4800 档在 C 表（`ch1_1_…` 第 269 行，`1100 → 4800 / 66`），B 表同档的分频值不同。
 
 ## 3. 鼠标如何实现后端
 
