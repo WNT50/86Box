@@ -25,6 +25,12 @@
  *          first register, the next the second, and a third access wraps.
  *          Reading the command register rewinds both sequencers.
  *
+ *          Baud rates are the SCN2661B set (BRCLK 4.9152 MHz, Table 1):
+ *          45.5, 50, 75, 110, 134.5, 150, 300, 600, 1200, 1800, 2000, 2400,
+ *          4800, 9600, 19200, 38400. The A part has no 45.5 and decodes 1000
+ *          and 0101 as 1050 and 200; the C part runs from a 5.0688 MHz BRCLK
+ *          and swaps the top of the table for 3600 and 7200.
+ *
  *          What is not modelled: synchronous (BISYNC/SDLC) framing, the
  *          external clock pins (an external clock source is assumed to run
  *          at the BRG rate), the serial BREAK waveform (the command bit is
@@ -808,7 +814,7 @@ scn26x1_reset(void *priv)
 }
 
 const device_t scn2661_device = {
-    .name          = "Signetics SCN2661 EPCI",
+    .name          = "Signetics SCN2661B EPCI",
     .internal_name = "scn2661",
     .flags         = 0,
     .local         = 0,
