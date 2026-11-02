@@ -120,6 +120,8 @@ typedef struct pcx_t {
     uint8_t nvram[PCX_NVRAM_SIZE];
     uint8_t       rtc[PCX_RTC_SIZE]; /* 0xf880-0xf8bf, MC146818 register file */
     pc_timer_t    rtc_timer;         /* one-second time base for registers 0-9 */
+    uint8_t       kbd_q[8];          /* keyboard answers waiting for the receiver */
+    int           kbd_qh, kbd_qt, kbd_out;
 
     uint8_t vid_data, vid_ctrl, vid_exec;
     uint8_t err_seg; /* A19..A12 of the last bus timeout / parity error */
@@ -131,6 +133,34 @@ typedef struct pcx_t {
 } pcx_t;
 
 static pcx_t pcx;
+
+static uint8_t pcx_usart2_read(uint16_t addr, void *priv);
+
+static uint8_t
+pcx_usart2_read(uint16_t addr, void *priv)
+{
+    uint8_t ret = scn26x1_read(addr, priv);
+
+    if ((addr & 0x0003) == 0x0000) {
+        pcx.kbd_out = 0;
+
+        if (pcx.kbd_qh != pcx.kbd_qt) {
+            serial_endpoint_receive(scn26x1_endpoint(priv),
+                                    pcx.kbd_q[pcx.kbd_qh & 7]);
+            pcx.kbd_qh++;
+            pcx.kbd_out = 1;
+        }
+    }
+
+    if ((getenv("PCX_RXLOG") != NULL) && (CS == 0xfc00) &&
+        (cpu_state.pc == 0x0c86))
+        pclog("[CMP] al=%02X cl=%02X port=%03X\n", ret,
+              cpu_state.regs[1].w & 0xff, addr);
+
+    return ret;
+}
+
+
 
 /* ------------------------------------------------------------------------- */
 /* Undecoded space                                                           */
@@ -283,9 +313,25 @@ pcx_kbd_usart_write(uint16_t addr, uint8_t val, void *priv)
 {
     scn26x1_write(addr, val, priv);
 
-    if (((addr & 0x0003) == 0x0000) && (val == 0x26))
-        serial_endpoint_receive(scn26x1_endpoint(priv), '<');
+    /* One byte out, one byte back: the keyboard answers on the same line, so
+       the POST's write/read self test (v3 0xc6e..0xc8f) sees its own pattern
+       and the loader's '&' question gets '<'.  The answer is queued, not
+       injected blind: the POST writes its pattern back to back, and the
+       receiver only holds one character, so an unconditional inject loses
+       every byte that arrives while rdr is still full. */
+    if ((addr & 0x0003) == 0x0000) {
+        pcx.kbd_q[pcx.kbd_qt & 7] = kbc_siemens_kbd_rx(val);
+        pcx.kbd_qt++;
+
+        if (!pcx.kbd_out && (pcx.kbd_qh != pcx.kbd_qt)) {
+            serial_endpoint_receive(scn26x1_endpoint(priv),
+                                    pcx.kbd_q[pcx.kbd_qh & 7]);
+            pcx.kbd_qh++;
+            pcx.kbd_out = 1;
+        }
+    }
 }
+
 
 static uint8_t
 pcx_scan_read8(UNUSED(uint16_t port), UNUSED(void *priv))
@@ -652,7 +698,10 @@ machine_pcx_init(const machine_t *model)
 
     /* Not implemented yet -- see the TODO list below. */
 
-    pcx.scsi = scsi_sm912_init(PCX_SCSI_PORT, pcx_usart_irq, (void *) (intptr_t) 5);
+    /* PCX_NOSCSI=1 takes the adapter out of the machine entirely, so the boot
+       chain can be observed with no SCSI target to answer on 0xf940. */
+    if (getenv("PCX_NOSCSI") == NULL)
+        pcx.scsi = scsi_sm912_init(PCX_SCSI_PORT, pcx_usart_irq, (void *) (intptr_t) 5);
 
     /* The three USARTs are SCN2661B parts, all fed from one 4.9152 MHz crystal,
        which is the B rate table.  The shared BIOS names them after their PC-D
@@ -675,7 +724,7 @@ machine_pcx_init(const machine_t *model)
 
     pcx.usart[1] = device_add_inst_params(&scn2661b_device, 2, (void *) (intptr_t) SERIAL_PORT_NONE); /* no connector */
     scn26x1_set_irq(pcx.usart[1], 1 << 2);
-    io_sethandler(PCX_USART2_PORT, 0x0004, scn26x1_read, NULL, NULL,
+    io_sethandler(PCX_USART2_PORT, 0x0004, pcx_usart2_read, NULL, NULL,
                   pcx_kbd_usart_write, NULL, NULL, pcx.usart[1]);
 
     pcx.usart[2] = device_add_inst_params(&scn2661b_device, 3, (void *) (intptr_t) 1);              /* reserve -> COM2 */

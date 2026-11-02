@@ -308,3 +308,12 @@ kbc_siemens_close(kbc_siemens_t *dev)
 
     free(dev);
 }
+
+/* The keyboard sits on the far end of USART2.  Whatever the host shifts out
+   comes back in, and the loader's presence question ('&') is answered with
+   '<' -- one byte per byte, the way the keyboard MCU behaves. */
+uint8_t
+kbc_siemens_kbd_rx(uint8_t val)
+{
+    return (val == 0x26) ? '<' : val;
+}

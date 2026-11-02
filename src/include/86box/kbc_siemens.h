@@ -37,4 +37,7 @@ extern void kbc_siemens_key(kbc_siemens_t *dev, uint8_t byte);
 
 void kbc_siemens_ports(kbc_siemens_t *dev);
 
+/* What the keyboard puts back on the USART line for a byte the host sent. */
+extern uint8_t kbc_siemens_kbd_rx(uint8_t val);
+
 #endif /*EMU_KBC_SIEMENS_H*/
