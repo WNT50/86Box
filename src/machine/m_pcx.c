@@ -458,6 +458,11 @@ machine_pcx_init(const machine_t *model)
        the memory test: with it clear the ROM installs a keyboard-failure vector
        and never reaches the rest of the self test (v3 BIOS 0xfcab4-0xfcac6).
        MAME's pcd_v sets 0x01 here as well; 0x10/0x20 would drop into a monitor. */
+    /* 0xf841 bit 0 is the strap that tells the POST no MMU card is fitted.  It
+       stays set even when the "MMU Type" option fits one: with the strap clear
+       the POST runs its own MMU self test, which our model only satisfies up to
+       test four -- the I/O trap raises NMI but the handler the test installs
+       never runs -- so the machine would not come up at all. */
     pcx.dip  = 0x01;
     pcx.led  = 0x00;
     pcx.dskctl2 = 0x00;
