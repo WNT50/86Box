@@ -685,6 +685,9 @@ load_cs(uint16_t seg)
 {
     cpu_state.seg_cs.base = seg << 4;
     cpu_state.seg_cs.seg  = seg & 0xffff;
+
+    if (mem_machine_cs_load != NULL)
+        mem_machine_cs_load();
 }
 
 static void

@@ -86,7 +86,7 @@
 
 typedef struct {
     uint16_t ctl;
-    uint16_t en_cs;                                /* segment the enable was written from */
+    int      defer;                                /* mapping waits for the next cs load */
     uint16_t idx;                                  /* index latch */
     uint16_t pg[PCX_MMU_PAGES];
     int      type;
@@ -127,6 +127,12 @@ static int pcx_mmu_selw = -1;
    writes the control register, patches the return frame's segment and does an
    lret; it can only survive its own write if the new mapping starts applying
    after that lret. */
+static void
+pcx_mmu_cs_load(void)
+{
+    pcx_mmu.defer = 0;
+}
+
 static int
 pcx_mmu_abs(void)
 {
@@ -237,7 +243,7 @@ pcx_mmu_translate(uint32_t addr, UNUSED(int rw))
         (addr >= PCX_MMU_WINDOW))
         return addr;
 
-    if (pcx_mmu_def_cs() && (cpu_state.seg_cs.seg == pcx_mmu.en_cs))
+    if (pcx_mmu.defer)
         return addr;
 
     page  = addr >> 11;
@@ -368,8 +374,12 @@ pcx_mmu_outw(uint16_t port, uint16_t val, UNUSED(void *priv))
         /* Bit 5 turns translation on.  Nothing has to be rebuilt: the entry is
            read on every access, unlike a mapping-based model. */
         pcx_mmu.ctl = val;
+        /* The mapping the register installs applies from the next instruction
+           stream on: the routine that flips the bit keeps running out of the
+           prefetch queue, which is why it can patch its own return frame and
+           lret into the paged view. */
         if (val & 0x0020)
-            pcx_mmu.en_cs = cpu_state.seg_cs.seg;
+            pcx_mmu.defer = pcx_mmu_def_cs();
         return;
     }
 
@@ -403,6 +413,7 @@ void
 pcx_mmu_reset(void)
 {
     pcx_mmu.ctl   = 0;
+    pcx_mmu.defer = 0;
     pcx_mmu.idx   = 0;
     pcx_mmu.ack   = 0;
     pcx_mmu.fpend = 0;
@@ -441,12 +452,14 @@ pcx_mmu_init(int type)
     /* Hooked only while this machine runs; every other machine leaves it
        NULL and pays one test per access. */
     mem_machine_translate = pcx_mmu_translate;
+    mem_machine_cs_load   = pcx_mmu_cs_load;
 }
 
 void
 pcx_mmu_close(void)
 {
     mem_machine_translate = NULL;
+    mem_machine_cs_load   = NULL;
     io_removehandler(PCX_MMU_BASE, PCX_MMU_SIZE,
                      pcx_mmu_inb, pcx_mmu_inw, NULL,
                      pcx_mmu_outb, pcx_mmu_outw, NULL, NULL);
