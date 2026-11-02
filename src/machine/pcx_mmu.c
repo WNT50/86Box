@@ -102,6 +102,7 @@ static pcx_mmu_t pcx_mmu;
    failure.  Set PCX_PROT=1 to enable it (see the notes, section 250). */
 static int pcx_mmu_prot = -1;
 static int pcx_mmu_encs = -1;
+static int pcx_mmu_absf  = -1;
 
 /* Addresses this machine does not decode at all (PC-X: 0x80000-0xFBFFF, the
    region between the RAM behind the MMU and the ROM).  MAME models it as a
@@ -126,6 +127,18 @@ static int pcx_mmu_selw = -1;
    writes the control register, patches the return frame's segment and does an
    lret; it can only survive its own write if the new mapping starts applying
    after that lret. */
+static int
+pcx_mmu_abs(void)
+{
+    if (pcx_mmu_absf < 0) {
+        const char *env = getenv("PCX_ABS_NMI");
+
+        pcx_mmu_absf = (env && (env[0] == '1')) ? 1 : 0;
+    }
+
+    return pcx_mmu_absf;
+}
+
 static int
 pcx_mmu_def_cs(void)
 {
@@ -234,6 +247,17 @@ pcx_mmu_translate(uint32_t addr, UNUSED(int rw))
     if (entry == 0x0000)
         return addr;
 
+    /* An entry without the read allow bit is a null entry: the card does not
+       let the access reach memory, it raises the non maskable interrupt so the
+       firmware can report the segment.  PCX_ABS_NMI=1 to model that instead of
+       letting the access through. */
+    if (pcx_mmu_abs() && !(entry & 0x0020)) {
+        pcx_mmu.fault = addr;
+        pcx_mmu.fpend = 1;
+        nmi_raise();
+        return 0xffffffffu;
+    }
+
     /* Protection, as the card does it: bit 5 is the present bit (an absent page
        faults on any access) and bit 4 is the write allow bit (a write to a page
        without it faults).  Neither is an x86 exception -- the card raises IRQ0
@@ -321,8 +345,17 @@ pcx_mmu_inw(uint16_t port, UNUSED(void *priv))
     }
 
     idx = pcx_mmu_slot(port);
+    if (idx < 0)
+        return 0x0000;
 
-    return (idx < 0) ? 0x0000 : pcx_mmu.pg[idx];
+    /* Slot 0 of the active bank carries the two status bits the handler watches:
+       bit 7 says the last trap was a system call rather than a protection
+       fault, bit 6 that one is pending at all.  A pending system call sets
+       both, which is what the 0xc0 on the first entry port means. */
+    if ((idx == pcx_mmu_index(0)) && pcx_mmu.ack)
+        return pcx_mmu.pg[idx] | 0xc0;
+
+    return pcx_mmu.pg[idx];
 }
 
 static void
@@ -349,7 +382,7 @@ pcx_mmu_outw(uint16_t port, uint16_t val, UNUSED(void *priv))
     if (off == PCX_MMU_DAT) {
         idx = pcx_mmu_latched();
         if (idx >= 0)
-            pcx_mmu.pg[idx] = val;
+            pcx_mmu.pg[idx] = val & 0xfff0;   /* the card stores twelve bits */
         return;
     }
 
@@ -363,7 +396,7 @@ pcx_mmu_outw(uint16_t port, uint16_t val, UNUSED(void *priv))
 
     idx = pcx_mmu_slot(port);
     if (idx >= 0)
-        pcx_mmu.pg[idx] = val;
+        pcx_mmu.pg[idx] = val & 0xfff0;       /* twelve bits of sram per entry */
 }
 
 void
