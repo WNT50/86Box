@@ -3545,6 +3545,36 @@ execx86(int cycs)
         }
 
         execx86_instruction();
+{
+    static uint16_t rc[16], ri[16];
+    static uint16_t lcs = 0xffff;
+    static int      rn, arm = -1, n;
+    int             k;
+
+    rc[rn & 15] = CS;
+    ri[rn & 15] = (uint16_t) cpu_state.pc;
+    rn++;
+    if (arm < 0)
+        arm = getenv("PCX_SEGLOG") ? 1 : 0;
+    if (arm && (CS != lcs) && (n < 40)) {
+        switch (CS) {
+            case 0x0d80: case 0x1b58: case 0x3000: case 0x2001:
+            case 0xfc00: case 0xfff0: case 0x0000:
+                break;
+            default:
+                n++;
+                pclog("[NEW] -> %04X:%04X ss=%04X sp=%04X bp=%04X ctl=%04X "
+                      "ax=%04X bx=%04X cx=%04X dx=%04X si=%04X di=%04X\n",
+                      CS, (uint16_t) cpu_state.pc, SS, (uint16_t) (SP),
+                      (uint16_t) (BP), inw(0x8000), AX, BX, CX, DX, SI, DI);
+                for (k = 12; k > 0; k--)
+                    pclog("[NEW]   %04X:%04X\n", rc[(rn - k) & 15],
+                          ri[(rn - k) & 15]);
+                break;
+        }
+    }
+    lcs = CS;
+}
 
         /* The machine's translate hook refused an access, so nothing of this
            instruction may stand: put the IP back and let the pending request
