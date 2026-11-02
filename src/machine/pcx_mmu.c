@@ -77,19 +77,16 @@
 #define PCX_MMU_BASE     0x8000
 #define PCX_MMU_SIZE     0x1000
 #define PCX_MMU_CTL      0x0000                    /* 0x8000 */
-#define PCX_MMU_IDX      0x00f0                    /* 0x84f0 index latch */
-#define PCX_MMU_DAT      0x00f8                    /* 0x84f8 data */
 #define PCX_MMU_ENTRY_LO 0x0400                    /* 0x8400 first entry port */
 #define PCX_MMU_ACK      0x0800                    /* 0x8800 system call */
 #define PCX_MMU_IOOFF    0x0a00                    /* 0x8a00 read and all I/O is trapped */
-#define PCX_MMU_PAGES    1024                      /* 8 banks x 128 slots */
+#define PCX_MMU_PAGES    1024                      /* 32 banks x 32 slots */
 #define PCX_MMU_PGSIZE   0x800                     /* 2 KB */
 #define PCX_MMU_WINDOW   0x100000                  /* the card sits under the whole 1 MB */
 
 typedef struct {
     uint16_t ctl;
     int      defer;                                /* mapping waits for the next cs load */
-    uint16_t idx;                                  /* index latch */
     uint16_t pg[PCX_MMU_PAGES];
     int      type;
     int      ack;                                  /* system call latched */
@@ -115,15 +112,17 @@ static int pcx_mmu_absf  = -1;
 static uint32_t pcx_mmu_hole_lo;
 static uint32_t pcx_mmu_hole_hi;
 
-/* Entry port -> table slot, or -1 when the port is not an entry.  0x84f0 and
-   0x84f8 are the index / data pair the kernel driver uses, so they are not
-   entry ports even though they sit inside the window. */
-/* Which bits of the control register pick the bank is the property the board's
-   X8 jumper selects: 1-2 fits the SINIX releases before 1.2A, 2-3 the ones from
-   1.2A on, and the machine's "MMU Type" option stands in for the jumper.  The
-   two releases really do split the entry differently -- 1.0 uses three bank
-   bits and 128 slots, 1.2 four bank bits and 256 slots -- which is what MAME
-   shows behind its own "MMU Type" input port. */
+/* Entry port -> table slot, or -1 when the port is not an entry.  Every port
+   from 0x8400 to 0x84f8 is one: the POST writes 0x5015 to all thirty-two of
+   them, 0x84f0 and 0x84f8 included, and reads the value back (v3 BIOS
+   0xfe296-0xfe2c0), so the kernel driver's use of the last two is an ordinary
+   pair of entries, not an index / data register pair. */
+
+/* The X8 jumper ("MMU Type" on the machine) picks which SINIX release the card
+   is strapped for.  What the jumper changes is still open: the POST's own self
+   test only ever walks thirty-two banks of thirty-two slots, which is what the
+   table is built as here, so both releases take the same layout until something
+   shows a difference. */
 
 /* PCX_EN_CS=1: the mapping the control register installs only applies once the
    cpu has made a far transfer into another segment.  The routine at 0x103a
@@ -133,9 +132,10 @@ static uint32_t pcx_mmu_hole_hi;
 /* 0x8a00: reading it turns every further I/O cycle into a non maskable
    interrupt.  The card is meant to keep user mode out of the hardware; SINIX
    never arms it, and neither the loader nor the kernel ever touch the port, so
-   this path only runs if a guest asks for it.  One interrupt is raised for the
-   first refused cycle and the rest are swallowed -- raising on every cycle
-   would re-enter the handler that is itself doing I/O. */
+   this path only runs if a guest asks for it.  One cycle is refused, the NMI
+   goes out and the trap opens again: the POST arms it, touches a port and then
+   expects its own handler -- which does I/O itself -- to have run (v3 BIOS
+   0xfe35e-0xfe36e). */
 static int
 pcx_mmu_io_guard(UNUSED(uint16_t port), UNUSED(uint8_t write))
 {
@@ -147,6 +147,12 @@ pcx_mmu_io_guard(UNUSED(uint16_t port), UNUSED(uint8_t write))
         pcx_mmu.fault = PCX_MMU_BASE + PCX_MMU_IOOFF;
         nmi_raise();
     }
+
+    /* One refused cycle, then the line is open again: the POST arms the trap,
+       touches one port and expects its NMI handler -- which does I/O itself --
+       to have run (v3 BIOS 0xfe35e-0xfe36e). */
+    pcx_mmu.ioguard = 0;
+    io_guard        = NULL;
 
     return 1;
 }
@@ -181,16 +187,16 @@ pcx_mmu_def_cs(void)
     return pcx_mmu_encs;
 }
 
-/* Index of a table slot: the control register picks the bank, the slot number
-   comes from the port (0x8400 + slot * 8) or from the page being translated
-   (bit 11 of the address upwards). */
+/* The table is thirty-two banks of thirty-two slots.  The control register's
+   low five bits pick the bank: the POST walks it through 0..0x1f, writes
+   0x20 + n into slot n of every bank, then insists each bank reads back what
+   was written into it (v3 BIOS 0xfe2d3-0xfe31c).  The slot number comes from
+   the port or from the address, five bits of it, so one bank covers one 64 KB
+   block and the block number itself is not part of the index. */
 static int
 pcx_mmu_index(uint32_t slot)
 {
-    if (pcx_mmu.type == PCX_MMU_SINIX12)
-        return (int) (((pcx_mmu.ctl & 0x18) << 5) | (slot & 0xff));  /* 4 bank bits, 256 slots */
-
-    return (int) (((pcx_mmu.ctl & 0x1c) << 5) | (slot & 0x7f));      /* 3 bank bits, 128 slots */
+    return (int) (((pcx_mmu.ctl & 0x1fu) << 5) | (slot & 0x1fu));
 }
 
 static int
@@ -206,23 +212,12 @@ pcx_mmu_slot(uint16_t port)
     if (off & 7)
         return -1;
 
-    idx = (off - PCX_MMU_ENTRY_LO) >> 3;      /* 0..127 inside the bank */
-    if ((idx == (PCX_MMU_IDX >> 3)) || (idx == (PCX_MMU_DAT >> 3)))
-        return -1;
+    idx = (off - PCX_MMU_ENTRY_LO) >> 3;      /* 0..31 inside the bank */
 
     /* The control register picks the bank, which is what keeps the loader's self
        test (it walks the control register through 4,8,...0x1c and rewrites slots
        0 and 2) from destroying the map the loader itself built under 0-2. */
     return pcx_mmu_index((uint32_t) idx);
-}
-
-/* Slot the index latch points at, or -1. */
-static int
-pcx_mmu_latched(void)
-{
-    int idx = pcx_mmu_slot(pcx_mmu.idx);
-
-    return (idx < 0) ? -1 : idx;
 }
 
 /* Returns the physical address.  Called from the memory access helpers
@@ -296,20 +291,19 @@ pcx_mmu_translate(uint32_t addr, UNUSED(int rw))
             pclog("[RL] ctl=%04X addr=%05X idx=%03X entry=%04X -> %05X rw=%d @%04X:%04X\n",
                   pcx_mmu.ctl, addr & 0xfffffu,
                   pcx_mmu_index(addr >> 11), entry,
-                  (addr & 0xf0000u) | ((uint32_t) (entry & 0xff00u)) |
+                  (addr & 0xf0000u) | ((uint32_t) (entry & 0xf800u)) |
                       (addr & (PCX_MMU_PGSIZE - 1)), rw,
                   cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
         }
     }
 
-    /* The entry only rewrites A15..A8: the 64 KB block number (A19..A16) comes
-       from the address itself.  That is what lets a 1 MB machine work at all --
-       the eight bits of frame in a twelve bit entry can only name a page inside
-       a block, not a page anywhere in a megabyte.  The kernel uses it: the
-       loader maps logical page 0x20 to entry 0xd821 while the image it just
-       copied sits at physical 0x1d800, and the code it runs lives from 0x10000
-       up (see the notes, section 264). */
-    return (addr & 0xf0000u) | ((uint32_t) (entry & 0xff00u)) |
+    /* The entry rewrites A15..A11 only -- five bits, one per 2 KB page of a
+       64 KB block -- and the block number (A19..A16) comes from the address
+       itself.  That is what lets a 1 MB machine work: the stored bits cannot
+       name a page anywhere in a megabyte, only one inside the block.  The
+       kernel uses it: the loader maps logical page 0x20 to entry 0xd821 while
+       the image it just copied sits at physical 0x1d800 (notes, section 264). */
+    return (addr & 0xf0000u) | ((uint32_t) (entry & 0xf800u)) |
            (addr & (PCX_MMU_PGSIZE - 1));
 }
 
@@ -348,15 +342,6 @@ pcx_mmu_inw(uint16_t port, UNUSED(void *priv))
 
     if (off == PCX_MMU_CTL)
         return pcx_mmu.ctl;
-
-    if (off == PCX_MMU_IDX)
-        return pcx_mmu.idx;
-
-    if (off == PCX_MMU_DAT) {
-        idx = pcx_mmu_latched();
-
-        return (idx < 0) ? 0x0000 : pcx_mmu.pg[idx];
-    }
 
     if (off == PCX_MMU_IOOFF) {
         /* Reading the trap port arms it: from here on every I/O cycle is kept
@@ -402,26 +387,16 @@ pcx_mmu_outw(uint16_t port, uint16_t val, UNUSED(void *priv))
     if (off == PCX_MMU_CTL) {
         /* Bit 5 turns translation on.  Nothing has to be rebuilt: the entry is
            read on every access, unlike a mapping-based model. */
-        pcx_mmu.ctl = val;
+        /* Only the low six bits are storage: the POST writes 0x0a and 0x15 and
+           agrees with the read back value after masking with 0x3f (v3 BIOS
+           0xfe266-0xfe27e). */
+        pcx_mmu.ctl = val & 0x003f;
         /* The mapping the register installs applies from the next instruction
            stream on: the routine that flips the bit keeps running out of the
            prefetch queue, which is why it can patch its own return frame and
            lret into the paged view. */
         if (val & 0x0020)
             pcx_mmu.defer = pcx_mmu_def_cs();
-        return;
-    }
-
-    if (off == PCX_MMU_IDX) {
-        /* The driver writes the entry port here, not a table slot. */
-        pcx_mmu.idx = val;
-        return;
-    }
-
-    if (off == PCX_MMU_DAT) {
-        idx = pcx_mmu_latched();
-        if (idx >= 0)
-            pcx_mmu.pg[idx] = val & 0xfff0;   /* the card stores twelve bits */
         return;
     }
 
@@ -435,7 +410,10 @@ pcx_mmu_outw(uint16_t port, uint16_t val, UNUSED(void *priv))
 
     idx = pcx_mmu_slot(port);
     if (idx >= 0)
-        pcx_mmu.pg[idx] = val & 0xfff0;       /* twelve bits of sram per entry */
+        /* Bits 0..5 hold the flags and 11..15 the page; 6..10 are the status
+           lines the handler reads back, not storage (the POST at 0xfe29a
+           compares through the mask 0x3f:0xf800). */
+        pcx_mmu.pg[idx] = val & 0xf83f;
 }
 
 void
@@ -443,7 +421,6 @@ pcx_mmu_reset(void)
 {
     pcx_mmu.ctl   = 0;
     pcx_mmu.defer = 0;
-    pcx_mmu.idx   = 0;
     pcx_mmu.ack   = 0;
     pcx_mmu.fpend = 0;
     pcx_mmu.fault = 0;
