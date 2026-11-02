@@ -115,12 +115,12 @@ static uint32_t pcx_mmu_hole_hi;
 /* Entry port -> table slot, or -1 when the port is not an entry.  0x84f0 and
    0x84f8 are the index / data pair the kernel driver uses, so they are not
    entry ports even though they sit inside the window. */
-/* Which bits of the control register pick the bank is the one thing neither the
-   forum nor MAME pins down: the forum author calls it "the biggest mystery" and
-   MAME papers over it with a "SINIX 1.0 / 1.2" switch whose read and write
-   index formulas do not even agree with each other.  Keep the three candidates
-   selectable so they can be compared on the same boot. */
-static int pcx_mmu_selw = -1;
+/* Which bits of the control register pick the bank is the property the board's
+   X8 jumper selects: 1-2 fits the SINIX releases before 1.2A, 2-3 the ones from
+   1.2A on, and the machine's "MMU Type" option stands in for the jumper.  The
+   two releases really do split the entry differently -- 1.0 uses three bank
+   bits and 128 slots, 1.2 four bank bits and 256 slots -- which is what MAME
+   shows behind its own "MMU Type" input port. */
 
 /* PCX_EN_CS=1: the mapping the control register installs only applies once the
    cpu has made a far transfer into another segment.  The routine at 0x103a
@@ -157,29 +157,16 @@ pcx_mmu_def_cs(void)
     return pcx_mmu_encs;
 }
 
-static void
-pcx_mmu_sel_width(void)
-{
-    const char *env;
-
-    if (pcx_mmu_selw >= 0)
-        return;
-
-    env = getenv("PCX_SELW");
-    pcx_mmu_selw = env ? atoi(env) : 0;
-}
-
 /* Index of a table slot: the control register picks the bank, the slot number
    comes from the port (0x8400 + slot * 8) or from the page being translated
    (bit 11 of the address upwards). */
 static int
 pcx_mmu_index(uint32_t slot)
 {
-    switch (pcx_mmu_selw) {
-        case 1:  return (int) (((pcx_mmu.ctl & 0x18) << 5) | (slot & 0xff));  /* 2 bits, 256 slots */
-        case 2:  return (int) (((pcx_mmu.ctl & 0x1f) << 5) | (slot & 0x1f));  /* 5 bits,  32 slots */
-        default: return (int) (((pcx_mmu.ctl & 0x1c) << 5) | (slot & 0x7f));  /* 3 bits, 128 slots */
-    }
+    if (pcx_mmu.type == PCX_MMU_SINIX12)
+        return (int) (((pcx_mmu.ctl & 0x18) << 5) | (slot & 0xff));  /* 4 bank bits, 256 slots */
+
+    return (int) (((pcx_mmu.ctl & 0x1c) << 5) | (slot & 0x7f));      /* 3 bank bits, 128 slots */
 }
 
 static int
@@ -202,8 +189,6 @@ pcx_mmu_slot(uint16_t port)
     /* The control register picks the bank, which is what keeps the loader's self
        test (it walks the control register through 4,8,...0x1c and rewrites slots
        0 and 2) from destroying the map the loader itself built under 0-2. */
-    pcx_mmu_sel_width();
-
     return pcx_mmu_index((uint32_t) idx);
 }
 
@@ -247,7 +232,6 @@ pcx_mmu_translate(uint32_t addr, UNUSED(int rw))
         return addr;
 
     page  = addr >> 11;
-    pcx_mmu_sel_width();
     entry = pcx_mmu.pg[pcx_mmu_index(page)];
 
     if (entry == 0x0000)

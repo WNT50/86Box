@@ -23,8 +23,10 @@
 #ifndef EMU_PCX_MMU_H
 #define EMU_PCX_MMU_H
 
-/* Software selectable at machine level, the way MAME exposes it through the
-   "mmu" input port: the two SINIX releases use different page-number widths. */
+/* Machine level option "MMU Type": which part the board carries, i.e. how the
+   X8 jumper is strapped.  The two SINIX releases split the page table entries
+   differently (1.0: three bank bits / 128 slots, 1.2: four / 256), and None
+   means no card is fitted, which is the PC-D arrangement. */
 #define PCX_MMU_NONE 0
 #define PCX_MMU_SINIX10 1
 #define PCX_MMU_SINIX12 2

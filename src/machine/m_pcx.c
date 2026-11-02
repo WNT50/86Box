@@ -616,11 +616,15 @@ machine_pcx_init(const machine_t *model)
                   scn26x1_write, NULL, NULL, pcx.usart[2]);
 
     /* The MMU sits on port 0x8000-0x8fff and translates every CPU access to the
-       RAM window in 1 KB pages; it is also the place that catches the hole when
-       the board layout later maps more RAM than the configuration has. */
+       RAM window in 2 KB pages; it is also the place that catches the hole when
+       the board layout later maps more RAM than the configuration has.  Which
+       width the task / bank field of the control register has is a property of
+       the board rather than of the software: the "MMU Type" option stands in for
+       the X8 jumper (1-2 = SINIX before 1.2A, 2-3 = 1.2A and later), and "None"
+       fits no card at all, which is what the PC-D runs with. */
     pcx_nmi_enable();
 
-    pcx_mmu_init(PCX_MMU_SINIX12);
+    pcx_mmu_init(machine_get_config_int((char *) "mmu"));
     pcx_mmu_set_hole(0, 0); /* the mapping above already reports the hole */
 
     return ret;
@@ -637,6 +641,37 @@ pcx_reset(void *priv)
     pcx_mmu_reset();
 }
 
+/* Machine level options, the way the IBM 5550 exposes its font and model: the
+   MMU Type stands in for the X8 jumper of the board (and for MAME's input port
+   of the same name), because SINIX 1.0 and 1.2 split the page table entries
+   differently and nothing in software tells the card which one it is. */
+static const device_config_t pcx_config[] = {
+    // clang-format off
+    {
+        .name        = "mmu",
+        .description = "MMU Type",
+        .type        = CONFIG_SELECTION,
+        .default_int = PCX_MMU_NONE,
+        .selection   = {
+            {
+                .description = "None",
+                .value = PCX_MMU_NONE
+            },
+            {
+                .description = "SINIX 1.0",
+                .value = PCX_MMU_SINIX10
+            },
+            {
+                .description = "SINIX 1.2",
+                .value = PCX_MMU_SINIX12
+            },
+            { .description = "" }
+        }
+    },
+    { .name = "", .description = "", .type = CONFIG_END }
+    // clang-format on
+};
+
 const device_t pcx_device = {
     .name          = "Siemens PC-X",
     .internal_name = "pcx",
@@ -648,7 +683,7 @@ const device_t pcx_device = {
     .available     = NULL,
     .speed_changed = NULL,
     .force_redraw  = NULL,
-    .config        = NULL
+    .config        = pcx_config
 };
 
 /*
