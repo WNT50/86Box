@@ -374,6 +374,12 @@ scn26x1_receiver_on(scn26x1_t *dev)
     if (!(dev->cr & SCN_CR_RXEN))
         return 0;
 
+    /* With nothing driving DCD the input is treated as asserted, the same
+       way an unwired CTS does not stop the transmitter: a board that does
+       not model modem lines must not silently disable its receiver. */
+    if (!dev->modem_set && ((dev->be == NULL) || (dev->be->status == NULL)))
+        return 1;
+
     /* The stored state is the pin level: 0 means DCD is low, i.e. asserted. */
     return !dev->dcd;
 }
