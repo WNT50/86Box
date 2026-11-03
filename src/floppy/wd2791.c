@@ -398,6 +398,15 @@ wd_data_in(void *priv, uint8_t data, int last)
     }
 
     if (last || (dev->byte_count >= dev->sector_size)) {
+        {
+            static int cl2 = -1;
+            if (cl2 < 0)
+                cl2 = getenv("PCX_CMDN") ? 1 : 0;
+            if (cl2)
+                pclog("[CMDN] C=%d H=%d R=%d 交付=%d size=%d last=%d\n",
+                      dev->track_reg, dev->side, dev->sector_reg,
+                      dev->byte_count, dev->sector_size, last);
+        }
         if (dev->multi) {
             dev->byte_count = 0;
 
@@ -604,8 +613,11 @@ wd_start_read(wd2791_t *dev)
     if (drv == NULL)
         return;
 
-    dev->byte_count = 0;
-    dev->state      = WD_ST_READ;
+    dev->byte_count  = 0;
+    dev->state       = WD_ST_READ;
+    /* The record length the command asks for follows N (or the medium, in
+       single density); the transfer is that long, not a fixed 512 bytes. */
+    dev->sector_size = 128 << wd_sector_size_code(dev);
 
     {
         static int fl = -1;
@@ -613,9 +625,10 @@ wd_start_read(wd2791_t *dev)
         if (fl < 0)
             fl = (getenv("PCX_FDCLOG") != NULL);
         if (fl)
-            pclog("[FDC] read C=%d H=%d R=%d drv_track=%d rate=%d cmd=%02X from %04X:%04X dst=%04X:%04X\n",
+            pclog("[FDC] read C=%d H=%d R=%d drv_track=%d rate=%d cmd=%02X size=%d n=%d from %04X:%04X dst=%04X:%04X\n",
                   dev->track_reg, dev->side, dev->sector_reg, fdd_current_track(drv),
-                  dev->fdc.rate, dev->command, CS, cpu_state.pc, ES, DI);
+                  dev->fdc.rate, dev->command, dev->sector_size, wd_sector_size_code(dev),
+                  CS, cpu_state.pc, ES, DI);
     }
 
     d86f_set_track_pos(drv, 0);
