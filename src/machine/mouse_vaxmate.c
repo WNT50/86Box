@@ -10,8 +10,9 @@
  *          USART at I/O port 0x0C40, interrupt on IRQ12.
  *
  *          Position report (TRM 2.11.1.3):
- *            byte 1  7 = sign of X (1 = positive), 6 = sign of Y,
- *                    5 = left, 4 = middle, 3 = right, 2-0 = 100b
+ *            byte 1  7-5 = 100b frame sync, 4 = sign of X (1 = positive = right),
+ *                    3 = sign of Y (1 = positive = up), 2 = left, 1 = middle,
+ *                    0 = right button
  *            byte 2  bit 7 = 0, bits 6-0 = |dX|
  *            byte 3  bit 7 = 0, bits 6-0 = |dY|
  *
@@ -85,18 +86,23 @@ vaxmate_mouse_queue(vaxmate_mouse_t *dev, uint8_t val)
 static void
 vaxmate_mouse_report(vaxmate_mouse_t *dev, int dx, int dy)
 {
-    uint8_t b1 = 0x04; /* bits 2-0 always read 100b */
+    uint8_t b1 = 0x80; /* 100b frame sync */
 
+    /* The report frame is 100b | SIGN-X | SIGN-Y | L | M | R: the sync lives
+       in bits 7-5, not in the X sign -- a byte whose bit 7 is clear is not a
+       report at all, which is why packing the X sign into bit 7 made Windows
+       1.0's DECMOUSE.DRV drop every other packet. X is positive to the east,
+       Y positive to the north. */
     if (dx >= 0)
-        b1 |= 0x80;
-    if (dy >= 0)
-        b1 |= 0x40;
+        b1 |= 0x10;
+    if (dy < 0)
+        b1 |= 0x08;
     if (dev->buttons & 0x01)
-        b1 |= 0x20; /* left */
+        b1 |= 0x04; /* left */
     if (dev->buttons & 0x04)
-        b1 |= 0x10; /* middle */
+        b1 |= 0x02; /* middle */
     if (dev->buttons & 0x02)
-        b1 |= 0x08; /* right */
+        b1 |= 0x01; /* right */
 
     vaxmate_mouse_queue(dev, b1);
     vaxmate_mouse_queue(dev, (uint8_t) ((dx < 0) ? -dx : dx) & 0x7f);
