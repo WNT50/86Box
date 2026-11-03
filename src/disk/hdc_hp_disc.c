@@ -69,7 +69,7 @@
 
 #define HP_DISC_PACKET_WORDS 10
 #define HP_DISC_PACKET_BYTES (HP_DISC_PACKET_WORDS * 2)
-#define HP_DISC_MAX_SECTORS  64   /* 实测 FORMAT 用 17 扇区(8704B) 和 41 扇区(20992B) 的请求 */
+#define HP_DISC_MAX_SECTORS  255  /* FORMAT 用 17/40 扇区，拷贝用 125 扇区(64000B) */
 
 enum {
     HP_DISC_CMD_RESET = 0x00,
@@ -541,13 +541,21 @@ hp_disc_out(uint16_t addr, uint8_t val, void *priv)
         case 0:
             if (dev->tracing) {
                 uint32_t dseg = cpu_state.seg_ds.base;
-                pclog("hp_disc: >CS base=%05x ip=%04x DS st=%02x len=%04x err=%02x blk0=%04x\n",
+                pclog("hp_disc: >CS base=%05x ip=%04x DS st=%02x len=%04x err=%02x blk0=%04x"
+                      " unit=%02x lba=%02x%02x%02x%02x sec=%02x fl=%04x\n",
                       cpu_state.seg_cs.base, cpu_state.pc,
 
                       mem_readb_phys(dseg + 0x210),
                       mem_readw_phys(dseg + 0x282),
                       mem_readb_phys(dseg + 0x292),
-                      mem_readw_phys(dseg + 0x264));
+                      mem_readw_phys(dseg + 0x264),
+                      mem_readb_phys(dseg + 0x22d),
+                      mem_readb_phys(dseg + 0x22e),
+                      mem_readb_phys(dseg + 0x22f),
+                      mem_readb_phys(dseg + 0x230),
+                      mem_readb_phys(dseg + 0x231),
+                      mem_readb_phys(dseg + 0x232),
+                      mem_readw_phys(dseg + 0x218));
             }
             dev->cmd   = val;
             dev->error = 0;
@@ -625,6 +633,18 @@ hp_disc_out(uint16_t addr, uint8_t val, void *priv)
                         fprintf(stderr, "hp_disc: DRV %04x:", shmem_len);
                         for (int i = 0; i < shmem_len; i++)
                             fprintf(stderr, " %02x", mem_readb_phys(dseg + 0x264 + i));
+                        fprintf(stderr, "\n");
+                    }
+                    if (getenv("HP_DISC_BLK")) {
+                        uint8_t *b = (uint8_t *) dev->packet;
+                        uint32_t dseg2 = cpu_state.seg_ds.base;
+                        fprintf(stderr, "C1 %06x ip=%04x pp=%i drv_unit=%02x drv_lba=%02x%02x%02x%02x :",
+                                cpu_state.pc, cpu_state.pc, dev->packet_pos,
+                                mem_readb_phys(dseg2 + 0x22d),
+                                mem_readb_phys(dseg2 + 0x22e), mem_readb_phys(dseg2 + 0x22f),
+                                mem_readb_phys(dseg2 + 0x230), mem_readb_phys(dseg2 + 0x231));
+                        for (int i = 0; i < 16; i++)
+                            fprintf(stderr, " %02x", b[i]);
                         fprintf(stderr, "\n");
                     }
                     hp_disc_parse_packet(dev);
@@ -772,8 +792,12 @@ hp_disc_outw(uint16_t addr, uint16_t val, void *priv)
                 break;
             }
 
+            /* 注意：0x1020 的掩码必须包含 unit 低半字节，但**不能**在 OUT 阶段
+               生效。文件数据里随时可能出现 0x102X 这样的字（实测就是
+               `2b 10` = 0x102b，一段 8086 代码），一旦被当成新块首字就把
+               传输中剩下的数据全灌进命令包暂存，解析出 lba=0x81FBF70F。 */
             if (((val & 0xfff0) == 0x1020) && (dev->packet_pos == 0) &&
-                (dev->phase != HP_PHASE_IN)) {
+                (dev->phase != HP_PHASE_IN) && (dev->phase != HP_PHASE_OUT)) {
                 dev->phase     = HP_PHASE_IDLE;
                 dev->xfer_left = 0;
                 dev->wpos      = 0;
