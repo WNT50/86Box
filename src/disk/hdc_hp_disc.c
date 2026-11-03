@@ -48,6 +48,8 @@
 #include <string.h>
 #define HAVE_STDARG_H
 #include <86box/86box.h>
+#include <86box/config.h>
+#include <86box/ini.h>
 #include <86box/device.h>
 #include <86box/io.h>
 #include <86box/mem.h>
@@ -206,6 +208,14 @@ hp_disc_parse_packet(hp_disc_t *dev)
         dev->count = 1;
     if (dev->count > HP_DISC_MAX_SECTORS)
         dev->count = HP_DISC_MAX_SECTORS;
+}
+
+static int
+hp_disc_floppy_media(void)
+{
+    const char *fn = config_get_string(NULL, "fdd_01_fn", "");
+
+    return (fn != NULL) && (fn[0] != '\0');
 }
 
 static void
@@ -579,6 +589,10 @@ hp_disc_out(uint16_t addr, uint8_t val, void *priv)
                     dev->phase      = HP_PHASE_IDLE;
                     dev->packet_pos = 0;
                     dev->status     = 0x00;
+                    /* 给选项 ROM 的 int19 用：base+7 bit0 = A: 是否挂了镜像。
+                       BIOS 的 BDA 40:10 只要配了软驱就恒为 1，不能用来判断
+                       有没有可启动的盘，所以由宿主告诉它。 */
+                    dev->debug = hp_disc_floppy_media() ? 0x01 : 0x00;
                     break;
 
                 case 0x01:
