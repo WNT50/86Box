@@ -81,7 +81,7 @@
 #define PCX_MMU_ACK      0x0800                    /* 0x8800 system call */
 #define PCX_MMU_IOOFF    0x0a00                    /* 0x8a00 read and all I/O is trapped */
 #define PCX_MMU_PAGES    1024                      /* 32 banks x 32 slots */
-#define PCX_MMU_PGSIZE   0x800                     /* 2 KB */
+#define PCX_MMU_PGSIZE   0x400                     /* 1 KB */
 #define PCX_MMU_WINDOW   0x100000                  /* the card sits under the whole 1 MB */
 
 typedef struct {
@@ -221,7 +221,7 @@ pcx_mmu_index(uint32_t slot)
 static int
 pcx_mmu_page_index(uint32_t addr)
 {
-    uint32_t page = (addr >> 11) & 0x3ffu;
+    uint32_t page = (addr >> 10) & 0x3ffu;
 
     if (pcx_mmu.type == PCX_MMU_SINIX12)
         return (int) (((page & 0xffu) | ((pcx_mmu.ctl & 0x18u) << 5)) & (PCX_MMU_PAGES - 1));
@@ -254,10 +254,10 @@ pcx_mmu_slot(uint16_t port)
    (mem_machine_translate), so it must be cheap: one table read, no
    allocation, no logging in the normal path. */
 static uint32_t
-pcx_mmu_translate(uint32_t addr, UNUSED(int rw))
+pcx_mmu_translate(uint32_t addr, int rw)
 {
     uint16_t entry;
-    uint32_t page, frame;
+    uint32_t phys;
 
     /* Undecoded space first: it is a hole whether the MMU is on, off, or not
        fitted at all -- the board decodes nothing there. */
@@ -280,7 +280,6 @@ pcx_mmu_translate(uint32_t addr, UNUSED(int rw))
     if (pcx_mmu.defer)
         return addr;
 
-    page  = addr >> 11;
     entry = pcx_mmu.pg[pcx_mmu_page_index(addr)];
 
     if (entry == 0x0000)
@@ -290,7 +289,7 @@ pcx_mmu_translate(uint32_t addr, UNUSED(int rw))
        let the access reach memory, it raises the non maskable interrupt so the
        firmware can report the segment.  PCX_ABS_NMI=1 to model that instead of
        letting the access through. */
-    if (pcx_mmu_abs() && !(entry & 0x0020)) {
+    if (pcx_mmu_abs() && !(entry & 0x0002)) {
         pcx_mmu.fault = addr;
         pcx_mmu.fpend = 1;
         nmi_raise();
@@ -304,7 +303,7 @@ pcx_mmu_translate(uint32_t addr, UNUSED(int rw))
        register for the handler at INT 0x20, and the access does not take
        effect. */
     if (pcx_mmu_prot) {
-        if (!(entry & 0x0020) || (rw && !(entry & 0x0010))) {
+        if (!(entry & (rw ? 0x0002 : 0x0001))) {
             pcx_mmu.fault = addr;
             pcx_mmu.fpend = 1;
             picint(0x0001);
@@ -343,7 +342,7 @@ pcx_mmu_translate(uint32_t addr, UNUSED(int rw))
            0x0030 -> page 0x000,  0x0830 -> page 0x010,  0x1030 -> page 0x020
            0xB020 -> page 0x160 (0xB0000),  0x5022 -> page 0x0A0 (0x50000)
        2 KB per page, so the physical address is (entry >> 7) << 11. */
-    frame = (uint32_t) (((entry & 0x001fu) << 5) | ((entry >> 11) & 0x1fu));
+    phys = ((uint32_t) (entry << 3) & 0x7fc00u) | (addr & (PCX_MMU_PGSIZE - 1));
 
     {
         static int km = -1, kmn;
@@ -353,7 +352,7 @@ pcx_mmu_translate(uint32_t addr, UNUSED(int rw))
             kmn++;
             pclog("[KM] v=%05X idx=%03X entry=%04X -> p=%05X @%04X:%04X\n",
                   addr & 0xfffffu, pcx_mmu_page_index(addr), entry,
-                  ((frame << 11) | (addr & (PCX_MMU_PGSIZE - 1))) & pcx_mmu_ram_mask,
+                  phys & pcx_mmu_ram_mask,
                   cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
         }
     }
@@ -366,12 +365,12 @@ pcx_mmu_translate(uint32_t addr, UNUSED(int rw))
             kn++;
             pclog("[KL] %05X idx=%03X entry=%04X -> %05X rw=%d @%04X:%04X\n",
                   addr & 0xfffffu, pcx_mmu_page_index(addr), entry,
-                  ((frame << 11) | (addr & (PCX_MMU_PGSIZE - 1))) & pcx_mmu_ram_mask,
+                  phys & pcx_mmu_ram_mask,
                   rw, cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
         }
     }
 
-    return ((frame << 11) | (addr & (PCX_MMU_PGSIZE - 1))) & pcx_mmu_ram_mask;
+    return phys & pcx_mmu_ram_mask;
 }
 
 static uint16_t pcx_mmu_inw(uint16_t port, void *priv);
@@ -436,16 +435,23 @@ pcx_mmu_inw(uint16_t port, UNUSED(void *priv))
        bit 7 says the last trap was a system call rather than a protection
        fault, bit 6 that one is pending at all.  A pending system call sets
        both, which is what the 0xc0 on the first entry port means. */
-    if (idx == pcx_mmu_index(0)) {
-        if (pcx_mmu.ack)
-            return pcx_mmu.pg[idx] | 0xc0;   /* bit 7 system call, bit 6 pending */
-        if (pcx_mmu.fpend)
-            return pcx_mmu.pg[idx] | 0x40;   /* bit 6: a fault is latched */
-        if (pcx_mmu.iotrap)
-            return pcx_mmu.pg[idx] | 0x80;   /* the 0x8a00 trap, not a fault */
-    }
+    /* The card hands the entry back rotated four bits the other way; the
+       table stores it that way because the page number has to line up with
+       the address lines the card drives (MAME pcd.cpp mmu_r/mmu_w). */
+    {
+        uint16_t data = (uint16_t) ((pcx_mmu.pg[idx] << 4) | (pcx_mmu.pg[idx] >> 12));
 
-    return pcx_mmu.pg[idx];
+        if (idx == pcx_mmu_index(0)) {
+            if (pcx_mmu.ack)
+                return data | 0xc0;   /* bit 7 system call, bit 6 pending */
+            if (pcx_mmu.fpend)
+                return data | 0x40;   /* bit 6: a fault is latched */
+            if (pcx_mmu.iotrap)
+                return data | 0x80;   /* the 0x8a00 trap, not a fault */
+        }
+
+        return data;
+    }
 }
 
 static void
@@ -510,7 +516,7 @@ pcx_mmu_outw(uint16_t port, uint16_t val, UNUSED(void *priv))
         /* Bits 0..5 hold the flags and 11..15 the page; 6..10 are the status
            lines the handler reads back, not storage (the POST at 0xfe29a
            compares through the mask 0x3f:0xf800). */
-        pcx_mmu.pg[idx] = val & 0xf83f;
+        pcx_mmu.pg[idx] = (uint16_t) ((val >> 4) | (val << 12));
     }
 }
 
