@@ -382,7 +382,9 @@ hp_disc_end_out(hp_disc_t *dev)
 
     dev->phase      = HP_PHASE_IDLE;
     dev->packet_pos = 0;
-    dev->status     = 0x4c;
+    /* 整笔写完：bit7 表示「命令完成」，驱动 0x2575 就等这一位；
+       给 0x4C 会让它空转 180 万次后置 [0x292]=0xFF 报错。 */
+    dev->status     = 0xcc;
 
     if (!getenv("HP_DISC_NOIRQ"))
         picint(1 << dev->irq);
@@ -423,7 +425,7 @@ hp_disc_in(uint16_t addr, void *priv)
                         dev->phase      = HP_PHASE_IDLE;
                         dev->data_ready = 0;
                         dev->packet_pos = 0;
-                        dev->status     = 0x4c;
+                        dev->status     = 0xcc;
                     }
                 }
                 return v;
@@ -482,7 +484,7 @@ hp_disc_inw(uint16_t addr, void *priv)
                         dev->phase      = HP_PHASE_IDLE;
                         dev->data_ready = 0;
                         dev->packet_pos = 0;
-                        dev->status     = 0x4c;
+                        dev->status     = 0xcc;
                     } else if (--dev->xfer_left > 0) {
                         hp_disc_load_sector(dev);   /* 下一扇区，仍留在 IN */
                         dev->status = 0xcc;
@@ -497,7 +499,7 @@ hp_disc_inw(uint16_t addr, void *priv)
                         dev->phase      = HP_PHASE_IDLE;
                         dev->data_ready = 0;
                         dev->packet_pos = 0;
-                        dev->status     = 0x4c;
+                        dev->status     = 0xcc;
                         if (dev->tracing)
                             pclog("hp_disc: read request done at lba %06x\n", dev->lba - 1);
                     }
@@ -590,7 +592,7 @@ hp_disc_out(uint16_t addr, uint8_t val, void *priv)
                         dev->xfer_left  = 1;
                         dev->packet_pos = 0;
                         dev->phase      = HP_PHASE_ARMED;
-                        dev->status     = 0x4c;
+                        dev->status     = 0xcc;
 
                         if (dev->tracing)
                             pclog("hp_disc: short command %04x -> 20-byte status\n", sc);
@@ -628,7 +630,7 @@ hp_disc_out(uint16_t addr, uint8_t val, void *priv)
                     hp_disc_parse_packet(dev);
                     dev->packet_pos = 0;
                     dev->packets++;
-                    dev->status = 0x4c;
+                    dev->status = 0xcc;
                     if (!getenv("HP_DISC_NOIRQ"))
                         picint(1 << dev->irq);
                     if (dev->block_ok)
