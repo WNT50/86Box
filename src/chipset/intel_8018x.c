@@ -1041,6 +1041,73 @@ i8018x_pcb_dma_count_down(struct i8018x_pcb_t *dev, int slot)
     return 1;
 }
 
+/* An unsynchronized channel with both pointers in memory has nothing to wait
+   for, so the controller walks the whole block by itself the moment the guest
+   sets ST (iAPX 186 datasheet section "DMA Programming").  Channels that move
+   data for a board device keep going through the dma controller interface
+   below instead, which is why this one only takes memory-to-memory work. */
+
+/* The MMU card sits between the CPU's local bus and memory, so the on-chip
+   DMA channels see the same translation the CPU does; without it a block
+   lands at its linear address while the guest reads it through the page
+   table and finds nothing.  Returns 1 and the physical address when the
+   access may go ahead.  A null
+   page entry makes the card raise the non maskable interrupt and swallow the
+   transfer: the DMA cycle is lost, not redirected to the linear address
+   (MAME pcd.cpp mem_r/mem_w do the same). */
+static int
+i8018x_dma_xlate(uint32_t *addr, int rw)
+{
+    uint32_t phys;
+
+    if (mem_machine_translate == NULL)
+        return 1;
+
+    phys = mem_machine_translate(*addr, rw);
+    if (phys == 0xffffffffu)
+        return 0;
+
+    *addr = phys;
+    return 1;
+}
+
+static int
+i8018x_pcb_dma_freerun(struct i8018x_pcb_t *dev, int slot)
+{
+    uint16_t ctrl = dev->regs[I8018X_DMA_CTRL(slot) / 2];
+    uint32_t guard;
+
+    if ((ctrl & I8018X_DMA_SYN) != 0x0000u)
+        return 0;
+    if (!(ctrl & I8018X_DMA_SRC_MIO) || !(ctrl & I8018X_DMA_DST_MIO))
+        return 0;
+
+    for (guard = 0; guard < 0x40000u; guard++) {
+        uint32_t src = i8018x_pcb_dma_ptr(dev, slot, 0);
+        uint32_t dst = i8018x_pcb_dma_ptr(dev, slot, 1);
+
+        if (dev->regs[I8018X_DMA_CTRL(slot) / 2] & I8018X_DMA_BW) {
+            if (i8018x_dma_xlate(&src, 0) && i8018x_dma_xlate(&dst, 1))
+                mem_writew_phys(dst, mem_readw_phys(src));
+        } else {
+            if (i8018x_dma_xlate(&src, 0) && i8018x_dma_xlate(&dst, 1))
+                mem_writeb_phys(dst, mem_readb_phys(src));
+        }
+
+        i8018x_pcb_dma_step_ptr(dev, slot, 0);
+        i8018x_pcb_dma_step_ptr(dev, slot, 1);
+
+        if (i8018x_pcb_dma_count_down(dev, slot))
+            return 1;
+
+        /* The guest may clear ST or reprogram the channel while it runs. */
+        if (!(dev->regs[I8018X_DMA_CTRL(slot) / 2] & I8018X_DMA_ST))
+            break;
+    }
+
+    return 0;
+}
+
 /* The 80186 has no transfer mode register, so a channel that is ours is always
    able to move data in either direction; this answers both the readable and the
    writable query. */
@@ -1062,9 +1129,16 @@ i8018x_pcb_dma_read_only(int channel, void *priv)
 
     dev->dma_adv_pend[slot] = 1;
 
-    return (dev->regs[I8018X_DMA_CTRL(slot)] & I8018X_DMA_BW)
-               ? mem_readw_phys(i8018x_dma_xlate(i8018x_pcb_dma_ptr(dev, slot, 0), 0))
-               : mem_readb_phys(i8018x_dma_xlate(i8018x_pcb_dma_ptr(dev, slot, 0), 0));
+    {
+        uint32_t a = i8018x_pcb_dma_ptr(dev, slot, 0);
+
+        if (!i8018x_dma_xlate(&a, 0))
+            return 0xff;
+
+        return (dev->regs[I8018X_DMA_CTRL(slot)] & I8018X_DMA_BW)
+                   ? mem_readw_phys(a)
+                   : mem_readb_phys(a);
+    }
 }
 
 static int
@@ -1092,9 +1166,16 @@ i8018x_pcb_dma_read(int channel, void *priv)
     if ((slot < 0) || !i8018x_pcb_dma_armed(dev, slot))
         return DMA_NODATA;
 
-    ret = (dev->regs[I8018X_DMA_CTRL(slot)] & I8018X_DMA_BW)
-              ? mem_readw_phys(i8018x_dma_xlate(i8018x_pcb_dma_ptr(dev, slot, 0), 0))
-              : mem_readb_phys(i8018x_dma_xlate(i8018x_pcb_dma_ptr(dev, slot, 0), 0));
+    {
+        uint32_t a = i8018x_pcb_dma_ptr(dev, slot, 0);
+
+        if (!i8018x_dma_xlate(&a, 0))
+            ret = 0xff;
+        else if (dev->regs[I8018X_DMA_CTRL(slot)] & I8018X_DMA_BW)
+            ret = mem_readw_phys(a);
+        else
+            ret = mem_readb_phys(a);
+    }
     i8018x_pcb_dma_step_ptr(dev, slot, 0);
 
     return ret | (i8018x_pcb_dma_count_down(dev, slot) ? DMA_OVER : 0);
@@ -1109,33 +1190,20 @@ i8018x_pcb_dma_write(int channel, uint16_t val, void *priv)
     if ((slot < 0) || !i8018x_pcb_dma_armed(dev, slot))
         return DMA_NODATA;
 
-    if (dev->regs[I8018X_DMA_CTRL(slot)] & I8018X_DMA_BW)
-        mem_writew_phys(i8018x_dma_xlate(i8018x_pcb_dma_ptr(dev, slot, 1), 1), val);
-    else
-        mem_writeb_phys(i8018x_dma_xlate(i8018x_pcb_dma_ptr(dev, slot, 1), 1), (uint8_t) val);
+    {
+        uint32_t a = i8018x_pcb_dma_ptr(dev, slot, 1);
+
+        if (i8018x_dma_xlate(&a, 1)) {
+            if (dev->regs[I8018X_DMA_CTRL(slot)] & I8018X_DMA_BW)
+                mem_writew_phys(a, val);
+            else
+                mem_writeb_phys(a, (uint8_t) val);
+        }
+    }
 
     i8018x_pcb_dma_step_ptr(dev, slot, 1);
 
     return i8018x_pcb_dma_count_down(dev, slot) ? DMA_OVER : 0;
-}
-
-/* The MMU card sits between the CPU's local bus and memory, so the on-chip
-   DMA channels see the same translation the CPU does; without it a block
-   lands at its linear address while the guest reads it through the page
-   table and finds nothing. */
-static uint32_t
-i8018x_dma_xlate(uint32_t addr, int rw)
-{
-    uint32_t phys;
-
-    if (mem_machine_translate == NULL)
-        return addr;
-
-    phys = mem_machine_translate(addr, rw);
-    if (phys == 0xffffffffu)
-        return addr;
-
-    return phys;
 }
 
 /* An unsynchronized channel generates its own requests and moves the whole
@@ -1165,9 +1233,14 @@ i8018x_pcb_dma_freerun(struct i8018x_pcb_t *dev, int slot)
         dst = i8018x_pcb_dma_ptr(dev, slot, 1);
 
         if (dev->regs[I8018X_DMA_CTRL(slot)] & I8018X_DMA_BW)
-            mem_writew_phys(i8018x_dma_xlate(dst, 1), mem_readw_phys(i8018x_dma_xlate(src, 0)));
-        else
-            mem_writeb_phys(i8018x_dma_xlate(dst, 1), mem_readb_phys(i8018x_dma_xlate(src, 0)));
+            if (!i8018x_dma_xlate(&dst, 1) || !i8018x_dma_xlate(&src, 0))
+                return;
+            mem_writew_phys(dst, mem_readw_phys(src));
+        else {
+            if (!i8018x_dma_xlate(&dst, 1) || !i8018x_dma_xlate(&src, 0))
+                return;
+            mem_writeb_phys(dst, mem_readb_phys(src));
+        }
 
         i8018x_pcb_dma_step_ptr(dev, slot, 0);
         i8018x_pcb_dma_step_ptr(dev, slot, 1);
