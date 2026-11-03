@@ -54,6 +54,7 @@
 #include <stdarg.h>
 #define HAVE_STDARG_H
 #include <86box/86box.h>
+#include "cpu.h"
 #include <86box/timer.h>
 #include <86box/device.h>
 #include <86box/io.h>
@@ -541,6 +542,7 @@ scn26x1_read(uint16_t port, void *priv)
 {
     scn26x1_t *dev = (scn26x1_t *) priv;
     uint8_t    ret = 0xff;
+    uint16_t   port_saved = port;
 
     switch (port & 0x0003) {
         case SCN_RDR:
@@ -608,6 +610,15 @@ scn26x1_read(uint16_t port, void *priv)
     }
 
     scn26x1_log("SCN26X1: [%04X] read  %02X -> %02X\n", port, port & 0x0003, ret);
+    {
+        static int ul = -1;
+        if (ul < 0)
+            ul = (getenv("PCX_UARTLOG") != NULL);
+        if (ul)
+            pclog("[UART] R %03X -> %02X from %04X:%04X\n", port_saved, ret,
+                  CS, cpu_state.pc);
+    }
+
     return ret;
 }
 
@@ -617,6 +628,15 @@ scn26x1_write(uint16_t port, uint8_t val, void *priv)
     scn26x1_t *dev = (scn26x1_t *) priv;
 
     scn26x1_log("SCN26X1: [%04X] write %02X <- %02X\n", port, port & 0x0003, val);
+
+    {
+        static int ul = -1;
+        if (ul < 0)
+            ul = (getenv("PCX_UARTLOG") != NULL);
+        if (ul)
+            pclog("[UART] W %03X <- %02X (cr=%02X mr1=%02X) from %04X:%04X\n",
+                  port, val, dev->cr, dev->mr1, CS, cpu_state.pc);
+    }
 
     switch (port & 0x0003) {
         case SCN_TDR:

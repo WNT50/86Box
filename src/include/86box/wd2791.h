@@ -51,7 +51,11 @@ enum {
     WD_ST_WRITE,
     WD_ST_READID,
     WD_ST_READTRACK,
-    WD_ST_WRITETRACK
+    WD_ST_WRITETRACK,
+
+    /* The last data byte of a write has gone in; the drive still needs a
+       moment to put it on the track before the command may finish. */
+    WD_ST_WRITE_END
 };
 
 typedef struct wd2791_t {
@@ -71,6 +75,9 @@ typedef struct wd2791_t {
     int type1;    /* current command belongs to Type I */
     int busy;
     int drq;
+    /* A write that stopped on the protect tab keeps S6 set until the next
+       command; the guest often only looks at the status after BUSY drops. */
+    int wp_latched;
     int intrq;
 
     int drive;

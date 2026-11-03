@@ -754,6 +754,13 @@ i8018x_pcb_write_word(struct i8018x_pcb_t *dev, uint16_t off, uint16_t val)
         if (!(val & I8018X_TMR_CON_INH))
             val = (uint16_t) ((val & ~I8018X_TMR_CON_EN) | (dev->regs[off / 2] & I8018X_TMR_CON_EN));
 
+        /* MC is sticky: reaching the maximum sets it and only clears it when
+           the programmer asks.  Rewriting the control word to re-arm the timer
+           must not drop it, or a poller that re-arms every pass (the v3 POST
+           delay helper at 0xfcc77) can never observe the flag. */
+        val = (uint16_t) ((val & ~I8018X_TMR_CON_MC) |
+                          (dev->regs[off / 2] & I8018X_TMR_CON_MC));
+
         val &= (uint16_t) ~(I8018X_TMR_CON_INH | I8018X_TMR_CON_RIU);
         break;
     }
@@ -897,6 +904,7 @@ i8018x_pcb_inw(uint16_t port, void *priv)
 static void
 i8018x_pcb_outb(uint16_t port, uint8_t val, void *priv)
 {
+
     struct i8018x_pcb_t *dev = (struct i8018x_pcb_t *) priv;
     uint16_t  off = (uint16_t) (port - dev->base);
 
@@ -906,6 +914,7 @@ i8018x_pcb_outb(uint16_t port, uint8_t val, void *priv)
 static void
 i8018x_pcb_outw(uint16_t port, uint16_t val, void *priv)
 {
+
     i8018x_pcb_write_word((struct i8018x_pcb_t *) priv, (uint16_t) ((port - ((struct i8018x_pcb_t *) priv)->base) & 0xFEu), val);
 }
 
@@ -1010,6 +1019,26 @@ i8018x_pcb_dma_count_down(struct i8018x_pcb_t *dev, int slot)
    sets ST (iAPX 186 datasheet section "DMA Programming").  Channels that move
    data for a board device keep going through the dma controller interface
    below instead, which is why this one only takes memory-to-memory work. */
+
+/* The MMU card sits between the CPU's local bus and memory, so the on-chip
+   DMA channels see the same translation the CPU does; without it a block
+   lands at its linear address while the guest reads it through the page
+   table and finds nothing. */
+static uint32_t
+i8018x_dma_xlate(uint32_t addr, int rw)
+{
+    uint32_t phys;
+
+    if (mem_machine_translate == NULL)
+        return addr;
+
+    phys = mem_machine_translate(addr, rw);
+    if (phys == 0xffffffffu)
+        return addr;
+
+    return phys;
+}
+
 static int
 i8018x_pcb_dma_freerun(struct i8018x_pcb_t *dev, int slot)
 {
@@ -1026,9 +1055,9 @@ i8018x_pcb_dma_freerun(struct i8018x_pcb_t *dev, int slot)
         uint32_t dst = i8018x_pcb_dma_ptr(dev, slot, 1);
 
         if (dev->regs[I8018X_DMA_CTRL(slot) / 2] & I8018X_DMA_BW)
-            mem_writew_phys(dst, mem_readw_phys(src));
+            mem_writew_phys(i8018x_dma_xlate(dst, 1), mem_readw_phys(i8018x_dma_xlate(src, 0)));
         else
-            mem_writeb_phys(dst, mem_readb_phys(src));
+            mem_writeb_phys(i8018x_dma_xlate(dst, 1), mem_readb_phys(i8018x_dma_xlate(src, 0)));
 
         i8018x_pcb_dma_step_ptr(dev, slot, 0);
         i8018x_pcb_dma_step_ptr(dev, slot, 1);
@@ -1047,6 +1076,7 @@ i8018x_pcb_dma_freerun(struct i8018x_pcb_t *dev, int slot)
 /* The 80186 has no transfer mode register, so a channel that is ours is always
    able to move data in either direction; this answers both the readable and the
    writable query. */
+
 static int
 i8018x_pcb_dma_readable(int channel, void *priv)
 {
@@ -1064,7 +1094,7 @@ i8018x_pcb_dma_read_only(int channel, void *priv)
 
     dev->dma_adv_pend[slot] = 1;
 
-    return mem_readb_phys(i8018x_pcb_dma_ptr(dev, slot, 0));
+    return mem_readb_phys(i8018x_dma_xlate(i8018x_pcb_dma_ptr(dev, slot, 0), 0));
 }
 
 static int
@@ -1092,7 +1122,7 @@ i8018x_pcb_dma_read(int channel, void *priv)
     if ((slot < 0) || !i8018x_pcb_dma_armed(dev, slot))
         return DMA_NODATA;
 
-    ret = mem_readb_phys(i8018x_pcb_dma_ptr(dev, slot, 0));
+    ret = mem_readb_phys(i8018x_dma_xlate(i8018x_pcb_dma_ptr(dev, slot, 0), 0));
     i8018x_pcb_dma_step_ptr(dev, slot, 0);
 
     return ret | (i8018x_pcb_dma_count_down(dev, slot) ? DMA_OVER : 0);
@@ -1107,7 +1137,7 @@ i8018x_pcb_dma_write(int channel, uint16_t val, void *priv)
     if ((slot < 0) || !i8018x_pcb_dma_armed(dev, slot))
         return DMA_NODATA;
 
-    mem_writeb_phys(i8018x_pcb_dma_ptr(dev, slot, 1), (uint8_t) val);
+    mem_writeb_phys(i8018x_dma_xlate(i8018x_pcb_dma_ptr(dev, slot, 1), 1), (uint8_t) val);
     i8018x_pcb_dma_step_ptr(dev, slot, 1);
 
     return i8018x_pcb_dma_count_down(dev, slot) ? DMA_OVER : 0;

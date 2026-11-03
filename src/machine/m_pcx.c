@@ -141,16 +141,6 @@ pcx_usart2_read(uint16_t addr, void *priv)
 {
     uint8_t ret = scn26x1_read(addr, priv);
 
-    if ((addr & 0x0003) == 0x0000) {
-        pcx.kbd_out = 0;
-
-        if (pcx.kbd_qh != pcx.kbd_qt) {
-            serial_endpoint_receive(scn26x1_endpoint(priv),
-                                    pcx.kbd_q[pcx.kbd_qh & 7]);
-            pcx.kbd_qh++;
-            pcx.kbd_out = 1;
-        }
-    }
 
     if ((getenv("PCX_RXLOG") != NULL) && (CS == 0xfc00) &&
         (cpu_state.pc == 0x0c86))
@@ -313,23 +303,12 @@ pcx_kbd_usart_write(uint16_t addr, uint8_t val, void *priv)
 {
     scn26x1_write(addr, val, priv);
 
-    /* One byte out, one byte back: the keyboard answers on the same line, so
-       the POST's write/read self test (v3 0xc6e..0xc8f) sees its own pattern
-       and the loader's '&' question gets '<'.  The answer is queued, not
-       injected blind: the POST writes its pattern back to back, and the
-       receiver only holds one character, so an unconditional inject loses
-       every byte that arrives while rdr is still full. */
-    if ((addr & 0x0003) == 0x0000) {
-        pcx.kbd_q[pcx.kbd_qt & 7] = kbc_siemens_kbd_rx(val);
-        pcx.kbd_qt++;
+    /* The loader asks whether a keyboard is there with a lone '&' on this
+       line and only accepts '<'.  The POST's own self test is answered by the
+       chip, so only that one question is answered here. */
+    if (((addr & 0x0003) == 0x0000) && (val == 0x26) && (CS != 0xfc00))
+        serial_endpoint_receive(scn26x1_endpoint(priv), '<');
 
-        if (!pcx.kbd_out && (pcx.kbd_qh != pcx.kbd_qt)) {
-            serial_endpoint_receive(scn26x1_endpoint(priv),
-                                    pcx.kbd_q[pcx.kbd_qh & 7]);
-            pcx.kbd_qh++;
-            pcx.kbd_out = 1;
-        }
-    }
 }
 
 
@@ -466,6 +445,22 @@ static uint8_t
 pcx_stub_readb(UNUSED(uint16_t port), UNUSED(void *priv))
 {
     return 0xff;
+}
+
+/* The POST walks 0xf88e-0xf8bf, writing each port's own address byte and
+   reading it back (v3 0xfcdcc); the board answers with the port number, so a
+   port that falls through to an open bus fails the walk and sets
+   CRT-CONTR. DEFECT (bit 5 of 0x411). */
+static uint8_t
+pcx_vid_id_read(UNUSED(uint16_t port), UNUSED(void *priv))
+{
+    return (uint8_t) port;
+}
+
+static uint16_t
+pcx_stub_readw(UNUSED(uint16_t port), UNUSED(void *priv))
+{
+    return 0xffff;
 }
 
 static void
@@ -678,6 +673,13 @@ machine_pcx_init(const machine_t *model)
     io_sethandler(0x0000, 0x0010, pcx_stub_readb, NULL, NULL,
                   pcx_stub_writeb, NULL, NULL, NULL);
     io_sethandler(0x0080, 0x0008, pcx_stub_readb, NULL, NULL,
+                  pcx_stub_writeb, NULL, NULL, NULL);
+    /* 0xff50-0xff5f is empty on the PC-X as well.  The POST spins on bit 5 of
+       0xff56 (v3 0xfcc7b) and an open bus answers 0xff, which ends the wait at
+       once; whatever answered 0x04 here left it looping for ever. */
+    io_sethandler(0xf88e, 0x0032, pcx_vid_id_read, NULL, NULL,
+                  pcx_stub_writeb, NULL, NULL, NULL);
+    io_sethandler(0xff50, 0x0010, pcx_stub_readb, pcx_stub_readw, NULL,
                   pcx_stub_writeb, NULL, NULL, NULL);
 
     /* The video board owns 0xf980-0xf98f itself; registering it here as well

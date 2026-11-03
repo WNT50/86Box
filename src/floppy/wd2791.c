@@ -33,11 +33,13 @@
 #include <86box/pic.h>
 #include <86box/dma.h>
 #include <86box/fdd.h>
+#include "cpu.h"
 #include <86box/fdd_86f.h>
 #include <86box/fdc.h>
 #include <86box/io.h>
 #include <86box/log.h>
 #include <86box/wd2791.h>
+
 
 /* Status register, TABLE 4.  Bits 5/4/2/1 change meaning with the command
    type, which is what status_type_1 selects. */
@@ -68,6 +70,17 @@ static wd2791_t *wd2791_cur = NULL;
 
 static void wd2791_command(wd2791_t *dev, uint8_t val);
 static void wd2791_timer(void *priv);
+
+/* The real chip walks the rest of the track looking for the next ID before it
+   gives up.  A chained sector past the end of the track never shows up, and a
+   polled driver never asserts DMA terminal count either, so without this bound
+   the command would sit in READ with BUSY set for ever.  One revolution at
+   300 rpm is 200 ms. */
+#define WD_RECORD_SEARCH_US (200 * 1000)
+
+/* Shortest time a command stays BUSY.  Long enough for a polled driver to see
+   it, short enough not to slow anything down. */
+#define WD_INSTANT_CMD_US   (200)
 
 /* ------------------------------------------------------------------------- */
 /* helpers                                                                   */
@@ -206,7 +219,7 @@ wd_status(wd2791_t *dev)
            on every plain read. */
         ret = dev->status & (WD_S_CRC | WD_S_RNF | WD_S_LOST);
 
-        if (dev->state == WD_ST_WRITE)
+        if ((dev->state == WD_ST_WRITE) || dev->wp_latched)
             ret |= dev->status & WD_S_WP;
         if (dev->deleted)
             ret |= WD_S_RECTYPE;
@@ -270,6 +283,19 @@ wd_sector_read(wd2791_t *dev, int sector)
                    wd_sector_size_code(dev));
 }
 
+/* Chained sectors: the controller looks for the next record once this one is
+   over.  On the real chip that moment is the end of the data field, and the
+   host still has the last byte to take, so the search starts when the data
+   register is drained -- arming it earlier lets the whole chain race ahead of
+   the driver. */
+static void
+wd_chain_next(wd2791_t *dev)
+{
+    dev->sector_reg = (uint8_t) (dev->sector_reg + 1);
+    timer_set_delay_u64(&dev->timer, (uint64_t) WD_RECORD_SEARCH_US * TIMER_USEC);
+    wd_sector_read(dev, dev->sector_reg);
+}
+
 static int
 wd_buf_pop(wd2791_t *dev)
 {
@@ -288,8 +314,7 @@ wd_buf_pop(wd2791_t *dev)
             /* The host has taken the last byte of this record, so the next one
                can be searched for. */
             dev->chain_pending = 0;
-            dev->sector_reg    = (uint8_t) (dev->sector_reg + 1);
-            wd_sector_read(dev, dev->sector_reg);
+            wd_chain_next(dev);
         } else if (dev->done_pending) {
             wd_finish(dev);
         }
@@ -311,6 +336,8 @@ wd_data_in(void *priv, uint8_t data, int last)
     if ((dev->state != WD_ST_READ) && (dev->state != WD_ST_READID) &&
         (dev->state != WD_ST_READTRACK))
         return -1;
+
+    timer_disable(&dev->timer);
 
 
 
@@ -392,8 +419,14 @@ wd_data_in(void *priv, uint8_t data, int last)
                never searched for.  The command ends when the DMA channel
                reports terminal count. */
             if (!dev->tc_seen) {
-                dev->sector_reg = (uint8_t) (dev->sector_reg + 1);
-                wd_sector_read(dev, dev->sector_reg);
+                /* Data still queued for the host: the chain continues from
+                   wd_buf_pop() once it has taken the last byte.  Only when the
+                   queue is already empty (the host read ahead of the medium)
+                   does the next record start here. */
+                if (dev->buf_len > 0)
+                    dev->chain_pending = 1;
+                else
+                    wd_chain_next(dev);
                 return -1;
             }
 
@@ -545,7 +578,13 @@ wd_type1(wd2791_t *dev, uint8_t val)
 
     diff = target - fdd_current_track(drv);
     if (diff == 0) {
-        wd_seek_finish(dev);
+        /* Even when the head already sits on the target track the chip keeps
+           BUSY up while it executes: a driver that polls the status right
+           after writing the command byte has to see it, or it reads the
+           vanished BUSY as "command not accepted" and fails the request (DOS
+           3.1's disk helper does exactly that with its 25-pass loop). */
+        dev->state = WD_ST_SEEK;
+        timer_set_delay_u64(&dev->timer, (uint64_t) WD_INSTANT_CMD_US * TIMER_USEC);
         return;
     }
 
@@ -568,6 +607,17 @@ wd_start_read(wd2791_t *dev)
     dev->byte_count = 0;
     dev->state      = WD_ST_READ;
 
+    {
+        static int fl = -1;
+
+        if (fl < 0)
+            fl = (getenv("PCX_FDCLOG") != NULL);
+        if (fl)
+            pclog("[FDC] read C=%d H=%d R=%d drv_track=%d rate=%d cmd=%02X from %04X:%04X dst=%04X:%04X\n",
+                  dev->track_reg, dev->side, dev->sector_reg, fdd_current_track(drv),
+                  dev->fdc.rate, dev->command, CS, cpu_state.pc, ES, DI);
+    }
+
     d86f_set_track_pos(drv, 0);
     wd_sector_read(dev, dev->sector_reg);
 }
@@ -581,14 +631,17 @@ wd_start_write(wd2791_t *dev)
         return;
 
     if (drv->writeprot) {
-        dev->status |= WD_S_WP;
+        dev->status     |= WD_S_WP;
+        dev->wp_latched  = 1;
         wd_done(dev);
         return;
     }
 
     dev->byte_count = 0;
     dev->state      = WD_ST_WRITE;
-    dev->drq        = 0;
+    /* The 279x raises DRQ as soon as it wants the first data byte; a polled
+       driver waits for exactly that bit before it writes 0xf903. */
+    dev->drq        = 1;
     fdd_writesector(drv, dev->sector_reg, dev->track_reg, dev->side,
                     dev->fdc.rate, wd_size_code(dev));
 }
@@ -609,9 +662,12 @@ wd_rw_sector(wd2791_t *dev, uint8_t val)
 
     fdd_drive_t *drv = wd_drive(dev);
 
+    if (((val & 0xf0) >= 0xa0) && (getenv("PCX_FDCLOG") != NULL))
+        pclog("[WR] cmd=%02X C=%d H=%d R=%d N=%d from %04X:%04X\n", val,
+              dev->track_reg, dev->side, dev->sector_reg, wd_size_code(dev), CS, cpu_state.pc);
+
     dev->multi    = (val & 0x10) ? 1 : 0;
     dev->tc_seen  = 0;
-
     /* The side select on this board lives in the 0xf904 latch, not in the
        command byte: the BIOS issues a bare 0x94 for every read and flips the
        head through the latch.  Reading the command's bit 3 here would clear
@@ -858,7 +914,29 @@ wd2791_reg_write(uint16_t port, uint8_t val, UNUSED(void *priv))
 
         default:
             dev->data_reg = val;
-            dev->drq      = 0;
+
+            if (dev->state == WD_ST_WRITE) {
+                /* PIO write: take the byte and ask for the next one.  When the
+                   record is full, give the drive a moment to lay it down and
+                   then end the command. */
+                dev->byte_count++;
+
+                /* The record length comes from the sector's ID, not from the
+                   command's N: TDS writes 256-byte records while sending N=2.
+                   The guest feeds bytes only as long as DRQ is up, so a short
+                   gap with nothing arriving means the record is complete. */
+                timer_set_delay_u64(&dev->timer,
+                                    (uint64_t) 20000 * TIMER_USEC);
+
+                if (dev->byte_count >= dev->sector_size) {
+                    dev->drq   = 0;
+                    dev->state = WD_ST_WRITE_END;
+                    timer_set_delay_u64(&dev->timer,
+                                        (uint64_t) WD_INSTANT_CMD_US * TIMER_USEC);
+                }
+            } else {
+                dev->drq = 0;
+            }
             break;
     }
 }
@@ -874,6 +952,43 @@ wd2791_timer(void *priv)
 
     if (dev->state == WD_ST_SETTLE) {
         wd_transfer_start(dev);
+        return;
+    }
+
+    if (dev->state == WD_ST_SEEK) {
+        wd_seek_finish(dev);
+        return;
+    }
+
+    if (dev->state == WD_ST_WRITE_END) {
+        wd_done(dev);
+        return;
+    }
+
+    if (dev->state == WD_ST_WRITE) {
+        /* One millisecond without a data byte: the record the drive engine
+           wanted is complete, so drop BUSY and let the guest read the status. */
+        if (getenv("PCX_FDCLOG"))
+            pclog("[WRIDLE] bytes=%d\n", dev->byte_count);
+        dev->drq = 0;
+        wd_done(dev);
+        return;
+    }
+
+    if (dev->state == WD_ST_READ) {
+        /* The next record never turned up.  Only say so when nothing of that
+           record arrived at all: a host that has already taken the bytes it
+           asked for stops reading and lets the controller sit on the last
+           DRQ, exactly as the WD279x does (MAME keeps BUSY/DRQ there and
+           waits for Force Interrupt), so a queued byte means the search
+           succeeded and this bound must not turn it into an error. */
+        if ((dev->byte_count > 0) || (dev->buf_len > 0))
+            return;
+
+        if (getenv("PCX_FDCLOG") != NULL)
+            pclog("[TIMEOUT] sec=%d bc=%d buf=%d\n", dev->sector_reg, dev->byte_count, dev->buf_len);
+        dev->status |= WD_S_RNF;
+        wd_done(dev);
         return;
     }
 }
@@ -959,6 +1074,7 @@ wd2791_reset(void)
 
     dev->command    = 0x00;
     dev->status     = 0x00;
+    dev->wp_latched = 0;
     dev->track_reg  = 0x00;
     dev->sector_reg = 0x01; /* MR leaves the sector register at 1 (data book) */
     dev->data_reg   = 0x00;
@@ -995,6 +1111,7 @@ wd2791_set_dskctl(wd2791_t *dev, uint8_t val)
         return;
 
     dev->dskctl = val;
+
     dev->side_latched = 1;
     /* The drive select is one hot: the v3 boot loader writes 0x05 for drive A
        and 0x06 for drive B (0xfde1c: 1 << drive, or 0x04 for the motor), so
