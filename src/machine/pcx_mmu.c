@@ -361,7 +361,7 @@ pcx_mmu_translate(uint32_t addr, int rw)
         static int kl = -1, kn;
         if (kl < 0)
             kl = getenv("PCX_KLOG") ? 1 : 0;
-        if (kl && ((cpu_state.seg_cs.seg == 0x1000) || (cpu_state.seg_cs.seg == 0x8000)) && (kn < 60)) {
+        if (kl && (addr >= 0x10000) && (addr < 0x11000) && (kn < 60)) {
             kn++;
             pclog("[KL] %05X idx=%03X entry=%04X -> %05X rw=%d @%04X:%04X\n",
                   addr & 0xfffffu, pcx_mmu_page_index(addr), entry,
