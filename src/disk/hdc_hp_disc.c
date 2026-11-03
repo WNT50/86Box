@@ -69,7 +69,7 @@
 
 #define HP_DISC_PACKET_WORDS 10
 #define HP_DISC_PACKET_BYTES (HP_DISC_PACKET_WORDS * 2)
-#define HP_DISC_MAX_SECTORS  16
+#define HP_DISC_MAX_SECTORS  64   /* 实测 FORMAT 用 17 扇区(8704B) 和 41 扇区(20992B) 的请求 */
 
 enum {
     HP_DISC_CMD_RESET = 0x00,
@@ -104,7 +104,8 @@ typedef struct hp_disc_t {
     uint32_t wpos;
     uint8_t  phase;
     int      xfer_left;
-    int      req_len;   /* 命令块里声明的整笔字节数（只做日志/参考） */   /* 本笔请求还剩多少扇区 */
+    int      req_len;
+    int      block_ok;   /* 命令块里声明的整笔字节数（只做日志/参考） */   /* 本笔请求还剩多少扇区 */
 
     /* 短命令（2 字节，如 0xFF0D）：应答是 20 字节状态块，不走扇区通路 */
     int      short_len;
@@ -182,6 +183,23 @@ hp_disc_parse_packet(hp_disc_t *dev)
     /* 实测：驱动每一笔都是「一个扇区 + 一次命令」，长度字段只是整笔请求
        的字节数（FORMAT 会填 8192）。按长度去等 8192 字节会让驱动在第一个
        512 字节后就卡在等中断上（SYS0049）。所以每笔固定一扇区。 */
+    /* 合法命令块的三处常量（0x262D 的构造代码固定在 b1=0x10、b8=0x18），
+       再加长度/LBA 范围检查。实测格式化完成后的拷贝阶段，偶尔会把一段
+       8086 代码（b0=0x2B、b1=0x10…）当命令块送进来，若不拦，LBA 会跑到
+       0x81FBF7xx，把整块镜像写坏。 */
+    dev->block_ok = ((p[1] == 0x10) && (p[8] == 0x18) &&
+                     (len != 0) && ((len & 511) == 0) &&
+                     (len <= (uint32_t) (HP_DISC_MAX_SECTORS * 512)) &&
+                     (dev->hdd_id >= 0) &&
+                     (dev->lba < (uint32_t) (dev->spt * dev->hpc * dev->tracks)));
+    if (!dev->block_ok) {
+        if (dev->tracing)
+            pclog("hp_disc: invalid block (b1=%02x b8=%02x len=%u lba=%06x) -> ignored\n",
+                  p[1], p[8], len, dev->lba);
+        dev->count = 1;
+        return;
+    }
+
     dev->req_len = (int) len;   /* 仅日志用 */
     dev->count   = (int) (len / 512);
     if (dev->count == 0)
@@ -336,7 +354,8 @@ hp_disc_begin_out(hp_disc_t *dev)
 static void
 hp_disc_end_out(hp_disc_t *dev)
 {
-    if (dev->hdd_id >= 0)
+    if ((dev->hdd_id >= 0) &&
+        (dev->lba < (uint32_t) (dev->spt * dev->hpc * dev->tracks)))
         hdd_image_write((uint8_t) dev->hdd_id, dev->lba, 1, dev->wbuf);
 
     dev->writes++;
@@ -509,6 +528,7 @@ hp_disc_out(uint16_t addr, uint8_t val, void *priv)
 {
     hp_disc_t *dev = (hp_disc_t *) priv;
     int        len;
+    uint16_t   shmem_len = 0;
 
     if (dev->tracing && (dev->trace_all < 260)) {
         dev->trace_all++;
@@ -580,10 +600,11 @@ hp_disc_out(uint16_t addr, uint8_t val, void *priv)
                     }
                     if (dev->tracing) {
                         uint8_t *pb = (uint8_t *) dev->packet;
-                        pclog("hp_disc: BLKBYTES");
+                        /* 用 stderr：pclog 的重复行压缩会把不同字节的块合并掉 */
+                        fprintf(stderr, "hp_disc: BLK");
                         for (int i = 0; i < dev->packet_pos && i < 20; i++)
-                            pclog(" %02x", pb[i]);
-                        pclog(" | lba=%06x len=%i\n", dev->lba, dev->req_len);
+                            fprintf(stderr, " %02x", pb[i]);
+                        fprintf(stderr, "\n");
                     }
                     if (dev->tracing) {
                         pclog("hp_disc: PKT pos=%i:", dev->packet_pos);
@@ -591,18 +612,49 @@ hp_disc_out(uint16_t addr, uint8_t val, void *priv)
                             pclog(" %04x", dev->packet[i]);
                         pclog("\n");
                     }
+                    if (dev->tracing) {
+                        /* 同一时刻把驱动自己的命令块（DS:0x264，长度 [0x282]）打出来，
+                           与我们收到的字节逐字节对照：判断「b8=0xC3 的代码块」到底是
+                           驱动真送了它，还是我们暂存错位。 */
+                        uint32_t dseg = cpu_state.seg_ds.base;
+                        shmem_len = mem_readw_phys(dseg + 0x282);
+                        if (shmem_len > 32)
+                            shmem_len = 32;
+                        fprintf(stderr, "hp_disc: DRV %04x:", shmem_len);
+                        for (int i = 0; i < shmem_len; i++)
+                            fprintf(stderr, " %02x", mem_readb_phys(dseg + 0x264 + i));
+                        fprintf(stderr, "\n");
+                    }
                     hp_disc_parse_packet(dev);
                     dev->packet_pos = 0;
                     dev->packets++;
                     dev->status = 0x4c;
                     if (!getenv("HP_DISC_NOIRQ"))
                         picint(1 << dev->irq);
-                    hp_disc_arm(dev);      /* 状态仍是 0x4C，驱动 0x2727 能过 */
+                    if (dev->block_ok)
+                        hp_disc_arm(dev);  /* 状态仍是 0x4C，驱动 0x2727 能过 */
                     break;
 
                 case 0x02:
                 case HP_DISC_CMD_DATA:
-                    /* 数据阶段：只 arm，方向等第一个数据口访问 */
+                    /* 短命令（0xFF0D）的应答也走 cmd 03：这里必须把 bit7 立起来，
+                       否则驱动 0x2575 会空转几十次才硬读（日志里 *** 39 repeats ***）。 */
+                    if (dev->short_len > 0) {
+                        dev->phase      = HP_PHASE_ARMED;
+                        dev->buffer_pos = 0;
+                        dev->status     = 0xc0;
+                        if (!getenv("HP_DISC_NOIRQ"))
+                            picint(1 << dev->irq);
+                        break;
+                    }
+                    /* 数据阶段：只 arm，方向等第一个数据口访问。
+                       非法块（block_ok=0）不 arm，否则会拿垃圾 LBA 去写磁盘。 */
+                    if (!dev->block_ok) {
+                        dev->status = 0x4c;
+                        if (!getenv("HP_DISC_NOIRQ"))
+                            picint(1 << dev->irq);
+                        break;
+                    }
                     hp_disc_arm(dev);
                     dev->status = 0xc0;
                     if (!getenv("HP_DISC_NOIRQ"))
@@ -694,6 +746,7 @@ hp_disc_outw(uint16_t addr, uint16_t val, void *priv)
 {
     hp_disc_t *dev = (hp_disc_t *) priv;
     int        len;
+    uint16_t   shmem_len = 0;
 
     if (dev->tracing && (dev->trace_all < 4000)) {
         dev->trace_all++;
