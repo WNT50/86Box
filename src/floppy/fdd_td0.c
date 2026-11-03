@@ -823,6 +823,11 @@ td0_initialize(void *priv)
                 }
             }
 
+            if (getenv("TD0DUMP") != NULL)
+                pclog("[TD0SEC] c=%d h=%d r=%d n=%d off=%u size=%d\n",
+                      track, head, hs[2], hs[3],
+                      (unsigned) ((uintptr_t) (dbuf - dev->processed_buf)), size);
+
             dbuf += size;
             total_size += size;
 
@@ -910,6 +915,16 @@ td0_initialize(void *priv)
             dev->sides, dev->disk_flags,
             dev->current_side_flags[0], dev->current_side_flags[1],
             dev->gap3_len);
+
+    if (getenv("TD0RAWFILE") != NULL) {
+        FILE *rf = plat_fopen(getenv("TD0RAWFILE"), "wb");
+
+        if (rf != NULL) {
+            fwrite(dev->processed_buf, 1, total_size, rf);
+            fclose(rf);
+            td0_log("TD0: dumped %u bytes of sector data\n", total_size);
+        }
+    }
 
     return 1;
 }

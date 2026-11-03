@@ -70,6 +70,7 @@ typedef struct pcx_video_t {
     int           vram_sw;    /* 0xf9a0 bit 0: 1 = display RAM, 0 = chargen RAM */
     int           chargen_on; /* the host has uploaded a character generator */
     int           text_mode;  /* the display RAM holds character/attribute pairs */
+    int           inverse;    /* whole-screen negative display (8741 P2 bit 3) */
     uint8_t       chargen[0x2000];
     int           cmd;        /* last command written to 0xf982 */
     int           cmd_left;   /* operand bytes still owed by that command */
@@ -100,9 +101,16 @@ pcx_video_scan_bitmap(pcx_video_t *dev)
         for (x = 0; x < PCX_VIDEO_XSIZE; x += 8) {
             val = line[x >> 3];
 
-            for (bit = 0; bit < 8; bit++)
+            for (bit = 0; bit < 8; bit++) {
+                int on = (val & (0x80 >> bit)) ? 1 : 0;
+
+                /* The 8741 inverts the bitmap as well when P2 bit 3 is set
+                   (pcd_v.cpp display_pixels, the "lg" branch). */
+                if (dev->inverse)
+                    on = !on;
                 dev->fb[y * PCX_VIDEO_XSIZE + x + bit] =
-                    (val & (0x80 >> bit)) ? 0x00e8e8e8 : 0x00000000;
+                    on ? 0x00e8e8e8 : 0x00000000;
+            }
         }
     }
 
@@ -119,27 +127,57 @@ static void
 pcx_video_scan_text(pcx_video_t *dev)
 {
     int           row, col, line, bit, x, y;
-    uint8_t       ch, glyph;
+    uint8_t       ch, glyph, attr;
     const uint8_t *font;
-    uint32_t      fg = 0x00e8e8e8;
+    uint32_t      fg, bg, pix;
+    const uint32_t white = 0x00e8e8e8, black = 0x00000000, grey = 0x00808080;
 
     for (row = 0; row < PCX_TERM_ROWS; row++) {
         for (col = 0; col < PCX_TERM_COLS; col++) {
-            ch = dev->vram[(row * PCX_TERM_COLS + col) * 2];
+            ch   = dev->vram[(row * PCX_TERM_COLS + col) * 2];
+            attr = dev->vram[(row * PCX_TERM_COLS + col) * 2 + 1];
 
-            if (dev->chargen_on)
-                font = &dev->chargen[(ch * 32) & 0x1fff];
+            if (dev->chargen_on) {
+
+                /* The SCN2672 character generator holds 16 bytes per glyph and
+                   the attribute's bit 5 picks the second 4 KB bank; indexing
+                   with a 32 byte stride fetched the neighbouring glyph's
+                   second half and every character came out as noise. */
+                font = &dev->chargen[((ch * 16) + ((attr & 0x20) ? 4096 : 0)) & 0x1fff];
+            }
             else
                 font = &dev->term.font[(ch * 16) % PCX_TERM_FONT_SIZE];
+
+            /* Colour semantics are the ones MAME's pcd_v.cpp display_pixels
+               implements, since the 8741 firmware that drives the real board
+               is not dumped and cannot be emulated here: P2 bit 3 makes the
+               whole screen negative (foreground black, background white),
+               attribute bit 4 inverts a single cell, bit 3 gives that cell a
+               grey background. */
+            fg = dev->inverse ? black : white;
+            bg = dev->inverse ? white : black;
+            if (attr & 0x10) {
+                uint32_t t = fg;
+
+                fg = bg;
+                bg = t;
+            }
+            if (attr & 0x08)
+                bg = grey;
 
             for (line = 0; line < PCX_TERM_CELL_H; line++) {
                 glyph = font[line];
                 y     = row * PCX_TERM_CELL_H + line;
 
+                /* One glyph dot per pixel: the PC-D prints 80 characters of 8
+                   dots per line (Servicehandbuch: "80 Zeichen/Zeile,
+                   Zeichenfeld 14 x 8 Punkte"), so 80 columns fill the 640 dot
+                   line exactly.  MAME's pcd_v.cpp draws each dot twice for a
+                   40 column layout, which does not fit the manual. */
                 for (bit = 0; bit < PCX_TERM_CELL_W; bit++) {
-                    x = col * PCX_TERM_CELL_W + bit;
-                    dev->fb[y * PCX_VIDEO_XSIZE + x] =
-                        (glyph & (0x80 >> bit)) ? fg : 0x00000000;
+                    x   = col * PCX_TERM_CELL_W + bit;
+                    pix = (glyph & (0x80 >> bit)) ? fg : bg;
+                    dev->fb[y * PCX_VIDEO_XSIZE + x] = pix;
                 }
             }
         }
@@ -162,23 +200,25 @@ pcx_video_poll(void *priv)
         dev->vram_mapped = 1;
     }
 
-    /* Graphics: the bitmap is shown while it is the last thing the host wrote.
-       The BIOS turns the graphics mode on unconditionally -- and fills the
-       window with 0xaa while it tests it -- so the command alone cannot
-       decide; whichever channel was used last is what the host is talking to. */
-    /* Decide what the display RAM holds from its contents, every frame: text
-       pages store an attribute in every odd byte (00 or 07 on this board),
-       while a bitmap writes pixel data there.  The DOS loader does both -- it
-       prints text and then draws a logo into the same window -- so the answer
-       cannot be latched. */
-    if (dev->vram_active) {
-        int i, attr = 0;
+    /* The display RAM holds characters or bitmap words depending only on the
+       SCN267x LG bit: command group 0x20 with bit 1 set selects the path and
+       bit 0 turns it on (MAME scn2674.cpp handles 0x20/0x22 exactly this way),
+       and the PC-D draws the bitmap as 16 dot words per cell.  Contents say
+       nothing about the mode, so do not try to guess it from them. */
+    if (dev->vram_active)
+        dev->text_mode = !dev->gfx_on;
 
-        for (i = 0; i < 800; i++)
-            if ((dev->vram[i * 2 + 1] == 0x00) || (dev->vram[i * 2 + 1] == 0x07))
-                attr++;
+    {
+        static int last = -1;
+        static int logon = -1;
 
-        dev->text_mode = (attr > 600);
+        if (logon < 0)
+            logon = (getenv("PCX_VIDLOG") != NULL);
+        if (logon && last != dev->text_mode) {
+            last = dev->text_mode;
+            pclog("[VID] mode=%s gfx_on=%d vram_active=%d\n",
+                  dev->text_mode ? "text" : "bitmap", dev->gfx_on, dev->vram_active);
+        }
     }
 
     if (dev->text_mode) {
@@ -249,6 +289,7 @@ pcx_video_read(uint16_t addr, void *priv)
     }
 }
 
+
 static void
 pcx_video_write(uint16_t addr, uint8_t val, void *priv)
 {
@@ -290,7 +331,11 @@ pcx_video_write(uint16_t addr, uint8_t val, void *priv)
         /* SCN267x command group 0x20: bit1 selects the graphics path, bit0 is
            on/off.  0x23 is what the BIOS sends (v3 0xfd6fc). */
         if (((val & 0xe0) == 0x20) && (val & 0x02)) {
-            dev->gfx_on = (val & 0x01) ? 1 : 0;
+            int on = (val & 0x01) ? 1 : 0;
+
+            if ((getenv("PCX_VIDLOG") != NULL) && (on != dev->gfx_on))
+                pclog("[LG] cmd=%02X gfx_on %d -> %d\n", val, dev->gfx_on, on);
+            dev->gfx_on = on;
         }
 
     } else if (reg == 0x00) {
@@ -390,6 +435,11 @@ pcx_video_init(const device_t *info)
     snprintf(path, sizeof(path), "%s", "roms/machines/pcx/d12-graka.bin");
     if (!pcx_term_load_font(&dev->term, path))
         pclog("PC-X video: character generator not found, text will be blank\n");
+
+    /* The 8741 on the video board holds P2 bit 3 high out of reset, which is
+       the "negative" picture the real machine shows: black text on a white
+       background.  MAME's pcd_v.cpp does the same through m_p2 & 8. */
+    dev->inverse   = 1;
 
     memset(dev->regs, 0x00, sizeof(dev->regs));
     dev->parm_left = 0;

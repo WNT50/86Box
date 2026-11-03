@@ -214,6 +214,20 @@ pcx_mmu_index(uint32_t slot)
     return (int) (((pcx_mmu.ctl & 0x1fu) << 5) | (slot & 0x1fu));
 }
 
+/* Which table slot a linear address goes through.  The two releases split the
+   entry address differently (MAME pcd.cpp mem_r/mem_w):
+     SINIX 1.0: eight 256 KB banks from ctl bits 2..4, 128 slots of 2 KB
+     SINIX 1.2: four 512 KB banks from ctl bits 3..4, 256 slots of 2 KB */
+static int
+pcx_mmu_page_index(uint32_t addr)
+{
+    uint32_t page = (addr >> 11) & 0x3ffu;
+
+    if (pcx_mmu.type == PCX_MMU_SINIX12)
+        return (int) (((page & 0xffu) | ((pcx_mmu.ctl & 0x18u) << 5)) & (PCX_MMU_PAGES - 1));
+    return (int) (((page & 0x7fu) | ((pcx_mmu.ctl & 0x1cu) << 5)) & (PCX_MMU_PAGES - 1));
+}
+
 static int
 pcx_mmu_slot(uint16_t port)
 {
@@ -234,6 +248,7 @@ pcx_mmu_slot(uint16_t port)
        0 and 2) from destroying the map the loader itself built under 0-2. */
     return pcx_mmu_index((uint32_t) idx);
 }
+
 
 /* Returns the physical address.  Called from the memory access helpers
    (mem_machine_translate), so it must be cheap: one table read, no
@@ -266,7 +281,7 @@ pcx_mmu_translate(uint32_t addr, UNUSED(int rw))
         return addr;
 
     page  = addr >> 11;
-    entry = pcx_mmu.pg[pcx_mmu_index(page)];
+    entry = pcx_mmu.pg[pcx_mmu_page_index(addr)];
 
     if (entry == 0x0000)
         return addr;
@@ -305,7 +320,7 @@ pcx_mmu_translate(uint32_t addr, UNUSED(int rw))
             n++;
             pclog("[RL] ctl=%04X addr=%05X idx=%03X entry=%04X -> %05X rw=%d @%04X:%04X\n",
                   pcx_mmu.ctl, addr & 0xfffffu,
-                  pcx_mmu_index(addr >> 11), entry,
+                  pcx_mmu_page_index(addr), entry,
                   (((uint32_t) (((entry & 0x001fu) << 5) |
                                 ((entry >> 11) & 0x1fu)) << 11) |
                    (addr & (PCX_MMU_PGSIZE - 1))) & pcx_mmu_ram_mask, rw,
@@ -322,7 +337,39 @@ pcx_mmu_translate(uint32_t addr, UNUSED(int rw))
        possible if those five bits are the high half of the page number.  Ten
        bits of page at 2 KB each covers the 2 MB the POST walks; the board holds
        1 MB, so the address wraps there (0x1f7800 -> 0xf7800). */
+    /* Entry layout, straight out of the loader's own table writes
+       ([TLOG], 1106 writes): the page number sits in bits 15..7 and the
+       access flags in bits 5..0 --
+           0x0030 -> page 0x000,  0x0830 -> page 0x010,  0x1030 -> page 0x020
+           0xB020 -> page 0x160 (0xB0000),  0x5022 -> page 0x0A0 (0x50000)
+       2 KB per page, so the physical address is (entry >> 7) << 11. */
     frame = (uint32_t) (((entry & 0x001fu) << 5) | ((entry >> 11) & 0x1fu));
+
+    {
+        static int km = -1, kmn;
+        if (km < 0)
+            km = getenv("PCX_KMAP") ? 1 : 0;
+        if (km && (kmn < 200) && (addr >= 0x80000) && (addr < 0x90000)) {
+            kmn++;
+            pclog("[KM] v=%05X idx=%03X entry=%04X -> p=%05X @%04X:%04X\n",
+                  addr & 0xfffffu, pcx_mmu_page_index(addr), entry,
+                  ((frame << 11) | (addr & (PCX_MMU_PGSIZE - 1))) & pcx_mmu_ram_mask,
+                  cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
+        }
+    }
+
+    {
+        static int kl = -1, kn;
+        if (kl < 0)
+            kl = getenv("PCX_KLOG") ? 1 : 0;
+        if (kl && ((cpu_state.seg_cs.seg == 0x1000) || (cpu_state.seg_cs.seg == 0x8000)) && (kn < 60)) {
+            kn++;
+            pclog("[KL] %05X idx=%03X entry=%04X -> %05X rw=%d @%04X:%04X\n",
+                  addr & 0xfffffu, pcx_mmu_page_index(addr), entry,
+                  ((frame << 11) | (addr & (PCX_MMU_PGSIZE - 1))) & pcx_mmu_ram_mask,
+                  rw, cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
+        }
+    }
 
     return ((frame << 11) | (addr & (PCX_MMU_PGSIZE - 1))) & pcx_mmu_ram_mask;
 }
