@@ -394,14 +394,23 @@ cga_sample_luma(bitmap_t* target_buffer, uint32_t x, uint32_t y)
 static inline uint8_t
 cga_glyph_row(cga_t *cga, uint8_t chr, int row)
 {
+    const int rows16 = (cga->crtc[CGA_CRTC_MAX_SCANLINE_ADDR] & 0x1f) > 7;
+
     if (cga->font16 != NULL) {
         /* 16 row character cells (400 line modes) use the whole cell; 8 row
            cells use rows 1-8, which is where the HP glyph body sits. */
-        if ((cga->crtc[CGA_CRTC_MAX_SCANLINE_ADDR] & 0x1f) > 7)
+        if (rows16)
             return cga->font16[(chr << 4) + (row & 15)];
 
         return cga->font16[(chr << 4) + (row & 7) + 1];
     }
+
+    /* The built-in IBM font is an 8 row cell.  A 16 row cell keeps the glyph
+       body on rows 1-8 and leaves the rest blank, the same layout the card's
+       own character generator uses; masking the row with & 7 here repeats
+       every glyph twice inside one 16 row cell (visible as doubled text). */
+    if (rows16)
+        return ((row >= 1) && (row <= 8)) ? fontdat[chr + cga->fontbase][row - 1] : 0x00;
 
     return fontdat[chr + cga->fontbase][row & 7];
 }
@@ -823,6 +832,10 @@ cga_do_blit(int vid_xsize, int firstline, int lastline, int double_type)
                                  vid_xsize, (lastline - firstline) << 1,
                                  double_type);
     } else {
+        /* Start at row 0: the vertical offset in firstline is the CRTC's own
+           sync/overscan lead-in, already excluded from the height above.  Using
+           it as the destination row pushed the picture down and, once the height
+           matched the content, moved it off the bottom of the screen. */
         if (enable_overscan)
             video_blit_memtoscreen(0, firstline - 4,
                                    vid_xsize, (lastline - firstline) + 8);
@@ -977,7 +990,22 @@ cga_poll(void *priv)
                     cga->lastline++;
 
                     xs_temp = x;
-                    ys_temp = (cga->lastline - cga->firstline) << 1;
+                    /* Presentation height must match what the renderer actually
+                       writes: DOUBLE_NONE emits one row per CRTC row, so the
+                       shift below may only apply to the double scanned modes.
+                       Applying it unconditionally left a frame buffer twice the
+                       height of the content, which the Qt front end squeezed
+                       back down and every row showed up twice. */
+                    /* 只有真的做行复制的模式才把高度乘 2。DOUBLE_NONE（45981A
+                       的 400 线通路）每行只写一行，乘 2 会让前端把整幅图纵向拉伸
+                       一倍（实测窗口 640x800 而内容是 640x400）。 */
+                    ys_temp = (cga->lastline - cga->firstline) <<
+                              (cga->double_type ? 1 : 0);
+                    if (getenv("CGA_GEOM_TRACE"))
+                        fprintf(stderr, "[GEOM] first=%d last=%d dbl=%d gfx400=%d cmode=%02x R4=%02x R6=%02x R9=%02x ys=%d\n",
+                                cga->firstline, cga->lastline, cga->double_type, cga->gfx400,
+                                cga->cgamode, cga->crtc[CGA_CRTC_VTOTAL], cga->crtc[CGA_CRTC_VDISP],
+                                cga->crtc[CGA_CRTC_MAX_SCANLINE_ADDR], ys_temp);
 
                     if ((xs_temp > 0) && (ys_temp > 0)) {
                         if (xs_temp < 64)

@@ -11,9 +11,10 @@
  *          CGA compatible: it decodes the Motorola MC6845 CRTC at
  *          3D0-3D7 (index/data mirrored four times), plus the CGA mode,
  *          colour and status registers at 3D8-3DC, and adds an extended
- *          control register at 3DE.
+ *          control register at 3DD with the board ID at 3DF (table 7.8 of
+ *          the 45981A technical reference; 3DE is unused).
  *
- *          Extended control register (3DE, write only, 6 bits):
+ *          Extended control register (3DD, write only, 6 bits):
  *
  *              bit 0   0 = 200 lines, 1 = 400 lines
  *              bit 1   underline enable
@@ -29,9 +30,9 @@
  *
  *          Reading 3DF returns the board ID register (41h).  Line 7 of the
  *          technical reference (table 7.6) gives the full
- *          SPU/display access matrix; the 400 line timing is not modelled
- *          yet, this file only implements the port surface and the 32K
- *          memory map.
+ *          SPU/display access matrix.  The 25 kHz (400 line) timing runs
+ *          from the card's 22.44 MHz master oscillator and the documented
+ *          CRTC translations; see docs/hp-vectra/VIDEO-45981A.md.
  *
  * Authors: WNT50
  *
@@ -102,7 +103,9 @@ typedef struct hp45981a_t {
 
     uint8_t vram[HP45981A_VRAM_SIZE];
 
-    uint8_t ext_ctrl;  /* 3DE, write only */
+    uint8_t gc_index;     /* 3CE: VGA Graphics Controller index */
+    uint8_t gc_regs[9];   /* 3CF: 0=SetReset 1=EnableSR 3=DataRotate 5=Mode 8=BitMask */
+    uint8_t ext_ctrl;  /* 3DD, write only */
     uint8_t monitor25k; /* W2 jumper: 0 = 15 kHz monitor, 1 = 25 kHz */
     uint8_t font_rom[0x1000];
     int     font_loaded;
@@ -152,7 +155,13 @@ hp45981a_set_ext_ctrl(hp45981a_t *dev, uint8_t val)
         dev->cga.font16 = NULL;
 
     dev->cga.clk    = (dev->ext_ctrl & HP45981A_EXT_400LINE) ? hp45981a_clk400() : CGACONST;
-    dev->cga.gfx400 = (dev->ext_ctrl & HP45981A_EXT_400LINE) ? 1 : 0;
+    /* Two sources select the 400 line mode: the extended control bit and the
+       mode control bit 0 ("640x2" in Table 7.8's mode register description).
+       HP's MM.DLL writes 3D8=FF and never touches 3DD, so keying only off the
+       extended bit leaves the frame buffer banked as a 200 line screen while
+       the CRTC is programmed for 25 rows of 16 scanlines. */
+    dev->cga.gfx400 = ((dev->ext_ctrl & HP45981A_EXT_400LINE) ||
+                       (dev->cga.cgamode & CGA_MODE_FLAG_HIGHRES)) ? 1 : 0;
 
     /* Page select only applies to the 16K address space (bit 4 clear). */
     dev->cga.gfx_page  = ((dev->ext_ctrl & HP45981A_EXT_PAGE) &&
@@ -226,12 +235,20 @@ hp45981a_out(uint16_t addr, uint8_t val, void *priv)
         pclog("[HP45981A] out %03X = %02X\n", addr, val);
 
     switch (addr) {
-        case 0x03de:
+        case 0x03dd:
+            /* Table 7.8 of the 45981A manual: 3DD write is the Extended
+               Control Register.  HP's MM.DLL writes it on every mode set
+               (0x29C8: out 3DD,[0x43D]) right before reprogramming 3D8 and
+               the CRTC, so landing anywhere else silently breaks PM. */
             hp45981a_set_ext_ctrl(dev, val);
             return;
 
+        case 0x03de:
+            /* Unused on this board (Table 7.8). */
+            return;
+
         case 0x03df:
-            /* Not used by this card. */
+            /* Board ID is read only. */
             return;
 
         default:
@@ -246,9 +263,13 @@ hp45981a_out(uint16_t addr, uint8_t val, void *priv)
                 ((addr == 0x03d1) || (addr == 0x03d3) || (addr == 0x03d5) || (addr == 0x03d7)))
                 hp45981a_translate_crtc(dev);
 
-            if ((addr == 0x03d8) && (dev->ext_ctrl & HP45981A_EXT_400LINE) &&
-                (getenv("HP45981A_CRTC400") != NULL))
-                hp45981a_program_400(dev);
+            if (addr == 0x03d8) {
+                dev->cga.gfx400 = ((dev->ext_ctrl & HP45981A_EXT_400LINE) ||
+                                   (dev->cga.cgamode & CGA_MODE_FLAG_HIGHRES)) ? 1 : 0;
+
+                if ((dev->ext_ctrl & HP45981A_EXT_400LINE) && (getenv("HP45981A_CRTC400") != NULL))
+                    hp45981a_program_400(dev);
+            }
             return;
     }
 }
@@ -259,13 +280,32 @@ hp45981a_in(uint16_t addr, void *priv)
     hp45981a_t *dev = (hp45981a_t *) priv;
 
     switch (addr) {
-        case 0x03de:
-            /* Write only on real hardware; return the latched value. */
+        case 0x03dd:
+            /* Undefined on read; hand back the latched value so a driver
+               that reads back its own mode word sees what it wrote. */
             return dev->ext_ctrl;
 
-        case 0x03df:
+        case 0x03de:
+            /* Undefined (Table 7.8). */
+            return 0xff;
+
+        case 0x03df: {
             /* Board ID register (read only): 41h identifies a 45981A. */
+            static int vd = -1;
+            if (vd < 0)
+                vd = (getenv("HP45981A_VDUMP") != NULL) ? 1 : 0;
+            if (vd) {
+                vd = 0;   /* 只打一次，避免把日志刷爆 */
+                pclog("HPVRAM ext=%02x crtc=", dev->ext_ctrl);
+                for (int i = 0; i < 16; i++)
+                    pclog("%02x ", dev->cga.crtc[i]);
+                pclog("\nvram0:");
+                for (int i = 0; i < 32; i++)
+                    pclog(" %02x", dev->cga.vram[i]);
+                pclog("\n");
+            }
             return HP45981A_BOARD_ID;
+        }
 
         case 0x03da:
             /* Status: bit 4 reports the monitor type selected by the W2
@@ -285,8 +325,51 @@ hp45981a_write(uint32_t addr, uint8_t val, void *priv)
     if (dev->ext_ctrl & HP45981A_EXT_VRAMOFF)
         return;
 
+    /* VGA Graphics Controller bit mask (register 8).  POINTDD draws the mouse
+       cursor with Write Mode 0 + bit mask, so honouring it here is what lets
+       the pointer update instead of dropping every write on the floor. */
+    if (dev->gc_regs[8] != 0xFF) {
+        uint32_t off = addr & (HP45981A_VRAM_SIZE - 1);
+        uint8_t  o   = dev->vram[off];
+        val = (uint8_t) ((o & ~dev->gc_regs[8]) | (val & dev->gc_regs[8]));
+    }
+
+    {
+        static int xt = -1;
+        if (xt < 0)
+            xt = (getenv("HP45981A_XTRACE") != NULL) ? 1 : 0;
+        if (xt && ((addr == 0x3d8) || (addr == 0x3d9) || (addr == 0x3dd)))
+            pclog("HPCGA %04x <- %02x  cs:ip=%05x:%04x\n", addr, val,
+                  cpu_state.seg_cs.base, cpu_state.pc);
+    }
+
     /* The mask inside cga_write applies the 16K/32K wrap. */
     cga_write(addr, val, &dev->cga);
+}
+
+static uint8_t
+hp45981a_gc_in(uint16_t addr, void *priv)
+{
+    hp45981a_t *dev = (hp45981a_t *) priv;
+
+    if (addr == 0x03ce)
+        return dev->gc_index;
+
+    return dev->gc_regs[dev->gc_index & 7];
+}
+
+static void
+hp45981a_gc_out(uint16_t addr, uint8_t val, void *priv)
+{
+    hp45981a_t *dev = (hp45981a_t *) priv;
+
+    if (addr == 0x03ce) {
+        dev->gc_index = val & 0x0f;
+        return;
+    }
+
+    if (dev->gc_index < 9)
+        dev->gc_regs[dev->gc_index] = val;
 }
 
 static uint8_t
@@ -326,6 +409,12 @@ hp45981a_init(UNUSED(const device_t *info))
     /* 3D0-3DF: the CRTC index/data pair is mirrored at 3D0-3D7 and is
        decoded by cga_out()/cga_in(). */
     io_sethandler(0x03d0, 0x0010, hp45981a_in, NULL, NULL, hp45981a_out, NULL, NULL, dev);
+
+    /* VGA Graphics Controller, decoded here because the manual puts the whole
+       3C0-3CF range on the adapter.  Only the bit mask is acted upon for now;
+       it is the one POINTDD needs to draw the pointer. */
+    dev->gc_regs[8] = 0xff;
+    io_sethandler(0x03ce, 0x0002, hp45981a_gc_in, NULL, NULL, hp45981a_gc_out, NULL, NULL, dev);
 
     overscan_x = overscan_y = 16;
 
