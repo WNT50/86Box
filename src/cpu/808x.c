@@ -2060,6 +2060,34 @@ static struct {
 } pcx_ring[PCX_RING_SIZE];
 static unsigned pcx_ring_pos;
 
+/* PCX_AXHIT=1: when AX reaches the value in PCX_AXVAL, dump the code around
+   the current CS:IP through the MMU, so a logical address can be disassembled
+   without guessing its physical location. */
+void
+pcx_dump_code(uint32_t log, int len, const char *why)
+{
+    uint32_t phys, i;
+
+    if (mem_machine_translate != NULL)
+        phys = mem_machine_translate(log, 0);
+    else
+        phys = log;
+
+    pclog("[CODE] %s log=%05X phys=%05X len=%d\n", why, log, phys, len);
+    for (i = 0; i < (uint32_t) len; i += 4) {
+        uint32_t j;
+
+        pclog("[CODE] +%02X:", i);
+        for (j = 0; (j < 4u) && ((i + j) < (uint32_t) len); j++) {
+            uint32_t a = log + i + j;
+            if (mem_machine_translate != NULL)
+                a = mem_machine_translate(a, 0);
+            pclog(" %02X", readmembl(a));
+        }
+        pclog("\n");
+    }
+}
+
 void
 pcx_ring_dump(void)
 {
@@ -2095,6 +2123,30 @@ execx86_instruction(void)
         handled         = 0;
 
     completed = 1;
+
+    /* PCX_AXHIT=1: catch the moment AX holds PCX_AXVAL (default 352) and dump
+       the surrounding code through the MMU. */
+    {
+        static int a_on = -1, a_done;
+        static unsigned a_val;
+
+        if (a_on < 0) {
+            const char *e = getenv("PCX_AXHIT");
+            a_on = e ? 1 : 0;
+            a_val = 352;
+            if (e != NULL)
+                a_val = (unsigned) strtoul(e, NULL, 0);
+        }
+        if (a_on && !a_done && (plat_get_ticks() > 8000u) &&
+            (cpu_state.regs[0].w == a_val)) {
+            uint32_t log = ((uint32_t) CS << 4) + (uint16_t) cpu_state.pc;
+
+            a_done = 1;
+            pclog("[AXHIT] AX=%04X at %04X:%04X\n",
+                  (uint16_t) a_val, (uint16_t) CS, (uint16_t) cpu_state.pc);
+            pcx_dump_code(log - 48, 112, "ax-hit");
+        }
+    }
 
     /* PCX_RING=1: record it; pcx_ring_dump() is called from the video model. */
     {
