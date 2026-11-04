@@ -885,6 +885,20 @@ wd2791_reg_read(uint16_t port, UNUSED(void *priv))
             {
                 uint8_t ret = wd_status(dev);
 
+                {
+                    static int  fl = -1;
+                    static int  last = -1;
+                    static long n = 0;
+
+                    if (fl < 0)
+                        fl = (getenv("PCX_FDCLOG") != NULL);
+                    n++;
+                    if (fl && (ret != last)) {
+                        pclog("[STS] %02X n=%ld state=%d intrq=%d\n", ret, n, dev->state, dev->intrq);
+                        last = ret;
+                    }
+                }
+
                 wd_irq_lower(dev);
                 return ret;
             }
@@ -914,6 +928,9 @@ wd2791_reg_write(uint16_t port, uint8_t val, UNUSED(void *priv))
 
     switch (port & 3) {
         case 0x00:
+            if (getenv("PCX_FDCLOG") != NULL)
+                pclog("[CMD] %02X C=%d H=%d R=%d N=%d\n", val, dev->track_reg, dev->side,
+                      dev->sector_reg, wd_size_code(dev));
             wd2791_command(dev, val);
             break;
 

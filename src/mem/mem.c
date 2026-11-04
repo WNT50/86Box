@@ -1949,9 +1949,114 @@ mem_read_phys_block(void *dest, uint32_t addr, uint32_t len)
     return done;
 }
 
+static int pcx_mw2_on = -1;
+static int pcx_mw2_n;
+
+static int     pcx_watch_on = -1;
+static uint8_t pcx_w50 = 0xff, pcx_wd4 = 0xff;
+
+static int      pcx_ww_on = -1;
+static uint32_t pcx_ww_lo, pcx_ww_hi;
+static int      pcx_ww_n;
+
+static void
+pcx_wwatch(uint32_t addr, uint32_t val)
+{
+    if (pcx_ww_on < 0) {
+        const char *lo = getenv("PCX_WWATCH_LO");
+        const char *hi = getenv("PCX_WWATCH_HI");
+        if (!lo || !hi) {
+            pcx_ww_on = 0;
+            return;
+        }
+        pcx_ww_lo = (uint32_t) strtoul(lo, NULL, 16);
+        pcx_ww_hi = (uint32_t) strtoul(hi, NULL, 16);
+        pcx_ww_on = 1;
+        pclog("[WW] watch %05X-%05X\n", pcx_ww_lo, pcx_ww_hi);
+    }
+    if (!pcx_ww_on)
+        return;
+    if ((addr < pcx_ww_lo) || (addr > pcx_ww_hi))
+        return;
+    if (getenv("PCX_WMAP")) {
+        static uint8_t seen[8192];
+        uint32_t blk = (addr >> 4) & 0x1FFF;   /* 16 字节粒度 */
+        if (!seen[blk]) {
+            seen[blk] = 1;
+            pclog("[WM] 首次写 %05X  cs:ip=%04X:%04X\n", addr & ~0xF,
+                  cpu_state.seg_cs.base >> 4, cpu_state.pc);
+        }
+        return;
+    }
+    if (pcx_ww_n++ < 300)
+        pclog("[WW] %05X <- %04X   cs:ip=%04X:%04X\n", addr, val,
+              cpu_state.seg_cs.base >> 4, cpu_state.pc);
+}
+
+static void
+pcx_watch(uint32_t addr, uint32_t val)
+{
+    if (pcx_watch_on < 0)
+        pcx_watch_on = getenv("PCX_WATCH") ? 1 : 0;
+    if (!pcx_watch_on)
+        return;
+
+    if ((addr == 0x3af50) && ((uint8_t) val != pcx_w50)) {
+        pcx_w50 = (uint8_t) val;
+        pclog("[W] AF50=%02X\n", pcx_w50);
+    } else if ((addr == 0x3a5d4) && ((uint8_t) val != pcx_wd4)) {
+        pcx_wd4 = (uint8_t) val;
+        pclog("[W] A5D4=%02X\n", pcx_wd4);
+    }
+}
+
+static void
+pcx_mw2(uint32_t addr, uint32_t val)
+{
+    pcx_watch(addr, val);
+    pcx_wwatch(addr, val);
+
+    if (pcx_mw2_on < 0)
+        pcx_mw2_on = getenv("PCX_MW2") ? 1 : 0;
+    if (!pcx_mw2_on || (addr < 0xec00) || (addr >= 0xfc00) || (pcx_mw2_n > 20000))
+        return;
+    if (addr == 0xec00) {
+        static int once;
+        if (!once) {
+            FILE *f;
+            int q;
+            once = 1;
+            f = fopen("/tmp/stage.bin", "wb");
+            if (f) {
+                for (q = 0; q < 0x400; q++)
+                    fputc(mem_readb_phys(0x35500 + q), f);
+                fclose(f);
+            }
+            f = fopen("/tmp/stage_dst.bin", "wb");
+            if (f) {
+                for (q = 0; q < 0x400; q++)
+                    fputc(mem_readb_phys(0xec00 + q), f);
+                fclose(f);
+            }
+        }
+    }
+    pcx_mw2_n++;
+    pclog("[MW2] #%d %05X=%02X cs=%04X ip=%04X ds=%04X es=%04X si=%04X di=%04X\n",
+          pcx_mw2_n, addr, val & 0xff, cpu_state.seg_cs.seg, (uint16_t) cpu_state.oldpc,
+          cpu_state.seg_ds.seg, cpu_state.seg_es.seg,
+          cpu_state.regs[6].w, cpu_state.regs[7].w);
+}
+
+static int pcx_kshift_on = -1;
+
 void
 mem_writeb_phys(uint32_t addr, uint8_t val)
 {
+    if (pcx_kshift_on < 0)
+        pcx_kshift_on = getenv("PCX_KSHIFT") ? 1 : 0;
+    if (pcx_kshift_on && (addr >= 0x17b50) && (addr < 0x1e000))
+        addr++;
+    pcx_mw2(addr, val);
     mem_mapping_t *map = write_mapping_bus[addr >> MEM_GRANULARITY_BITS];
 
     mem_logical_addr = 0xffffffff;
@@ -1970,6 +2075,7 @@ mem_writeb_phys(uint32_t addr, uint8_t val)
 void
 mem_writew_phys(uint32_t addr, uint16_t val)
 {
+    pcx_mw2(addr, val);
     mem_mapping_t *map = write_mapping_bus[addr >> MEM_GRANULARITY_BITS];
     uint16_t      *p;
 
@@ -1990,6 +2096,7 @@ mem_writew_phys(uint32_t addr, uint16_t val)
 void
 mem_writel_phys(uint32_t addr, uint32_t val)
 {
+    pcx_mw2(addr, val);
     mem_mapping_t *map = write_mapping_bus[addr >> MEM_GRANULARITY_BITS];
     uint32_t      *p;
 
