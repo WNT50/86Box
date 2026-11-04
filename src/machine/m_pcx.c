@@ -409,6 +409,14 @@ pcx_rtc_tick(void *priv)
         pcx.rtc[0x09] = bin ? (uint8_t) (tm->tm_year % 100) : pcx_rtc_bcd(tm->tm_year % 100);
     }
 
+    /* MC146818: a one-second update-end sets UF in register C and, when the
+       guest has enabled UIE (register B bit 4), pulls IRQ7.  MAME wires the
+       part's IRQ to PIC1 IR7 (pcd.cpp:575); reading C acknowledges it. */
+    if ((pcx.rtc[0x0b] & 0x10) && (getenv("PCX_NORTCTICK") == NULL)) {
+        pcx.rtc[0x0c] |= 0x10;
+        picint(1 << 7);
+    }
+
     timer_on_auto(&pcx.rtc_timer, 1000000.0);
 }
 
@@ -425,6 +433,14 @@ pcx_rtc_read(uint16_t port, UNUSED(void *priv))
        reads the 50 battery-backed bytes above it. */
     if (reg == 0x0a)
         return (uint8_t) ((pcx.rtc[0x0a] & 0x8f) | 0x20);
+
+    if (reg == 0x0c) {
+        uint8_t v = pcx.rtc[0x0c];
+
+        pcx.rtc[0x0c] = 0x00;
+        picintc(1 << 7);
+        return v;
+    }
 
     return pcx.rtc[reg];
 }
@@ -590,6 +606,14 @@ machine_pcx_init_ex(const machine_t *model)
         uint32_t ram_top   = (uint32_t) mem_size << 10;
         uint32_t ram_limit = (ram_top < PCX_RAM_CEIL) ? ram_top : PCX_RAM_CEIL;
 
+        /* MAME's pcd_map decodes only 0x00000-0x7FFFF as memory: every other
+           address above it falls through to nmi_io_r/w, so a 1 MB machine
+           still shows the 80186 a 512 KB window.  Match that here -- the
+           0x80000-0xEFFFF span then ends up in hole_map, which raises NMI.
+           PCX_MEM512=0 restores the full 0xF0000 RAM map for comparison. */
+        if ((getenv("PCX_MEM512") == NULL) && (ram_limit > 0x00080000))
+            ram_limit = 0x00080000;
+
         /* The 640K..1M window is decoded by this machine, not by the generic
            RAM mapping: its state has to allow internal mappings or nothing
            placed here (the holes, the video window) is ever consulted. */
@@ -622,13 +646,21 @@ machine_pcx_init_ex(const machine_t *model)
                             NULL, MEM_MAPPING_INTERNAL | MEM_MAPPING_CPU_ONLY, NULL);
         }
 
-        /* Between the video window and the BIOS. */
-        if ((PCX_VRAM_BASE + PCX_VRAM_SIZE) < PCX_GRAPH_TOP) {
-            mem_mapping_add(&pcx.hole_map2, PCX_VRAM_BASE + PCX_VRAM_SIZE,
-                            PCX_GRAPH_TOP - (PCX_VRAM_BASE + PCX_VRAM_SIZE),
+        /* Between the video window and the BIOS.  PCX_NOVRAM=1 takes the
+           video window away as well (MAME's PC-X has none: the character and
+           attribute RAM live inside the 8031's own space), so the whole
+           0xF0000-0xFBFFF span then answers with NMI, the way MAME's
+           fall-through handler does. */
+        {
+        uint32_t h2_lo = (getenv("PCX_NOVRAM") != NULL) ? PCX_VRAM_BASE
+                                                        : (PCX_VRAM_BASE + PCX_VRAM_SIZE);
+        if (h2_lo < PCX_GRAPH_TOP) {
+            mem_mapping_add(&pcx.hole_map2, h2_lo,
+                            PCX_GRAPH_TOP - h2_lo,
                             pcx_nmi_readb, pcx_nmi_readw, pcx_nmi_readl,
                             pcx_nmi_writeb, pcx_nmi_writew, pcx_nmi_writel,
                             NULL, MEM_MAPPING_INTERNAL | MEM_MAPPING_CPU_ONLY, NULL);
+        }
         }
     }
 

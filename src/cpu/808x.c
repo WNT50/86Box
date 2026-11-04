@@ -2791,6 +2791,19 @@ execx86_instruction(void)
             case 0xa4 ... 0xa5:    /* MOVS */
             case 0xac ... 0xad:    /* LODS */
                 bits = 8 << (opcode & 1);
+                /* Large block moves are what a per-task copy of the module
+                   would use; log every one of them with its operands. */
+                if ((opcode & 8) == 0 && in_rep != 0 && cpu_state.regs[1].w > 0x400) {
+                    static uint16_t lcs, lip;
+                    if ((cpu_state.seg_cs.seg != lcs) || ((uint16_t) cpu_state.pc != lip)) {
+                        lcs = cpu_state.seg_cs.seg;
+                        lip = (uint16_t) cpu_state.pc;
+                        pclog("[REP] movs cx=%04X ds=%04X si=%04X es=%04X di=%04X @%04X:%04X\n",
+                              cpu_state.regs[1].w, cpu_state.seg_ds.seg,
+                              cpu_state.regs[6].w, cpu_state.seg_es.seg,
+                              cpu_state.regs[7].w, lcs, lip);
+                    }
+                }
                 if (!repeating) {
                     wait_cycs(1, 0);
                     if ((opcode & 8) == 0 && in_rep != 0)
@@ -3897,6 +3910,50 @@ execx86(int cycs)
     }
 }
 {
+    /* PCX_PTE=1: 第一次进 44E0:1F98 时，把覆盖 0x40000-0x47FFF 的页表项
+       连同它指向的物理页头 8 字节一起打出来。 */
+    static int pte_on = -1, pte_done;
+    if (pte_on < 0)
+        pte_on = getenv("PCX_PTE") ? 1 : 0;
+    if (pte_on && !pte_done && ((uint16_t) cpu_state.temp_CS == 0x44E0) &&
+        (((uint16_t) cpu_state.temp_pc & 0xFFF0) == 0x1F90)) {
+        uint16_t ctl = inw(0x8000);
+        uint32_t lin;
+
+        pte_done = 1;
+        pclog("[PTE] ctl=%04X\n", ctl);
+        for (lin = 0x40000; lin < 0x48000; lin += 0x800) {
+            uint32_t slot = (lin >> 11) & 0xFF;
+            uint32_t idx  = ((uint32_t) (ctl & 0x18) << 5) | slot;
+            uint16_t raw  = pcx_mmu_pg_get((int) idx);
+            uint16_t dec  = (uint16_t) ((raw >> 4) | (raw << 12));
+            uint32_t ph   = dec & 0xF800;
+            uint32_t q;
+            char     hex[40];
+            int      k = 0;
+
+            for (q = 0; (q < 8) && (k < 30); q++)
+                k += snprintf(hex + k, sizeof(hex) - k, "%02X ", mem_readb_phys(ph + q));
+            pclog("[PTE] lin=%05X slot=%02X idx=%03X raw=%04X phys=%05X  %s\n",
+                  lin, slot, idx, raw, ph, hex);
+        }
+    }
+
+    /* PCX_SPIN=1: 每隔 4096 条指令打印一次 44E0 段的 PC，用来定位挂死点。 */
+    static int spin_on = -1;
+    static uint32_t spin_n;
+    if (spin_on < 0)
+        spin_on = getenv("PCX_SPIN") ? 1 : 0;
+    if (spin_on && ((uint16_t) cpu_state.temp_CS == 0x44E0) && !(spin_n++ & 0xFFF)) {
+        uint32_t lin = ((uint32_t) cpu_state.temp_CS << 4) + (uint16_t) cpu_state.temp_pc;
+        uint32_t ph  = mem_machine_translate ? mem_machine_translate(lin, 0) : lin;
+        pclog("[SP] %04X:%04X phys=%05X ax=%04X bx=%04X cx=%04X dx=%04X si=%04X di=%04X bp=%04X sp=%04X ds=%04X\n",
+              (uint16_t) cpu_state.temp_CS, (uint16_t) cpu_state.temp_pc, ph,
+              cpu_state.regs[0].w, cpu_state.regs[3].w, cpu_state.regs[1].w,
+              cpu_state.regs[2].w, cpu_state.regs[6].w, cpu_state.regs[7].w,
+              cpu_state.regs[5].w, cpu_state.regs[4].w, cpu_state.seg_ds);
+    }
+
     /* PCX_CSTRACE=1: 每次 CS 变化记一行，外加进入新段后的头 40 条指令 */
     static int cs_on = -1;
     static uint16_t cs_last, cs_new, p_cs, p_pc;
@@ -3915,6 +3972,61 @@ execx86(int cycs)
                 uint32_t ph  = mem_machine_translate ? mem_machine_translate(lin, 0) : lin;
                 pclog("[CS] %04X:%04X enter  (from %04X:%04X) lin=%05X phys=%05X ctl=%04X\n",
                       c, p, p_cs, p_pc, lin, ph, inw(0x8000));
+                /* The three task segments the kernel dispatches to are what
+                   the run dies on; print the register set at the transfer so
+                   the arithmetic behind 2930/3708/44E0 can be read off. */
+                if (c == 0x3000) {
+                    static int ln;
+                    if (ln < 20) {
+                        ln++;
+                        pclog("[LD] %04X:%04X from %04X:%04X ax=%04X bx=%04X cx=%04X dx=%04X si=%04X di=%04X ds=%04X es=%04X stk=%04X %04X %04X\n",
+                              c, p, p_cs, p_pc,
+                              cpu_state.regs[0].w, cpu_state.regs[3].w, cpu_state.regs[1].w,
+                              cpu_state.regs[2].w, cpu_state.regs[6].w, cpu_state.regs[7].w,
+                              cpu_state.seg_ds.seg, cpu_state.seg_es.seg,
+                              pcx_mmu_peek8(((uint32_t) cpu_state.seg_ss.seg << 4) + cpu_state.regs[4].w) |
+                              (pcx_mmu_peek8(((uint32_t) cpu_state.seg_ss.seg << 4) + cpu_state.regs[4].w + 1) << 8),
+                              pcx_mmu_peek8(((uint32_t) cpu_state.seg_ss.seg << 4) + cpu_state.regs[4].w + 2) |
+                              (pcx_mmu_peek8(((uint32_t) cpu_state.seg_ss.seg << 4) + cpu_state.regs[4].w + 3) << 8),
+                              pcx_mmu_peek8(((uint32_t) cpu_state.seg_ss.seg << 4) + cpu_state.regs[4].w + 4) |
+                              (pcx_mmu_peek8(((uint32_t) cpu_state.seg_ss.seg << 4) + cpu_state.regs[4].w + 5) << 8));
+                    }
+                }
+                if ((c == 0x2930) || (c == 0x3708) || (c == 0x44E0)) {
+                    uint32_t ssb = ((uint32_t) cpu_state.seg_ss.seg) << 4;
+                    uint16_t sp0 = cpu_state.regs[4].w;
+                    char     stk[64];
+                    int      k = 0, w;
+                    uint32_t prev_lin = (((uint32_t) p_cs) << 4) + p_pc;
+                    char     ins[24];
+                    int      q;
+
+                    /* Frame the transfer consumed sits just above SP: six
+                       words cover an iret frame, four a retf frame. */
+                    for (w = -2; w < 6; w++) {
+                        uint16_t v = (uint16_t) (pcx_mmu_peek8(ssb + ((sp0 + w * 2) & 0xffff)) |
+                                                 (pcx_mmu_peek8(ssb + ((sp0 + w * 2 + 1) & 0xffff)) << 8));
+                        k += snprintf(stk + k, sizeof(stk) - k, "%04X ", v);
+                    }
+                    for (q = 0; q < 6; q++)
+                        ins[q * 3] = ' ';
+                    for (q = 0; q < 5; q++) {
+                        char t[4];
+                        snprintf(t, sizeof(t), "%02X", pcx_mmu_peek8(prev_lin + q));
+                        ins[q * 3 + 1] = t[0];
+                        ins[q * 3 + 2] = t[1];
+                    }
+                    ins[16] = 0;
+
+                    pclog("[TSK] %04X:%04X from %04X:%04X  bytes:%s stk[sp-4..]%s ss=%04X sp=%04X ds=%04X es=%04X dx=%04X\n",
+                          c, p, p_cs, p_pc, ins, stk, cpu_state.seg_ss.seg, sp0,
+                          cpu_state.seg_ds, cpu_state.seg_es, cpu_state.regs[2].w);
+                    pclog("[TSK] [105C]=%04X [105E]=%04X [1060]=%04X [1062]=%04X\n",
+                          pcx_mmu_peek8(0x105C) | (pcx_mmu_peek8(0x105D) << 8),
+                          pcx_mmu_peek8(0x105E) | (pcx_mmu_peek8(0x105F) << 8),
+                          pcx_mmu_peek8(0x1060) | (pcx_mmu_peek8(0x1061) << 8),
+                          pcx_mmu_peek8(0x1062) | (pcx_mmu_peek8(0x1063) << 8));
+                }
             }
         } else if (cs_cnt < 40) {
             cs_cnt++;
