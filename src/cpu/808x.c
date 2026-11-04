@@ -2064,6 +2064,44 @@ execx86_instruction(void)
         handled         = 0;
 
     completed = 1;
+
+    /* PCX_TR=1: instruction-level control-flow trace, from the module's lcall
+       at 1DD8:1BFA to the dispatch at 1DD8:22A0 (max 600 instructions). */
+    {
+        static int tr_on = -1, tr_active, tr_n;
+        uint16_t  tcs = (uint16_t) CS;
+        uint16_t  tip = (uint16_t) cpu_state.pc;
+
+        if (tr_on < 0)
+            tr_on = getenv("PCX_TR") ? 1 : 0;
+        if (tr_on) {
+            if (!tr_active && (tcs == 0x1dd8) && (tip >= 0x1bf0) && (tip <= 0x1c04))
+                tr_active = 1;
+            if (tr_active && (tr_n < 600)) {
+                tr_n++;
+                {
+                    uint32_t lin = ((uint32_t) tcs << 4) + (uint32_t) tip;
+                    uint8_t  b[6];
+                    int      q;
+
+                    for (q = 0; q < 6; q++)
+                        b[q] = pcx_mmu_peek8(lin + (uint32_t) q);
+                    pclog("[TR] %04X:%04X op=%02X bytes=%02X %02X %02X %02X %02X %02X ax=%04X ds=%04X sp=%04X tsc=%llu\n",
+                          tcs, tip, opcode, b[0], b[1], b[2], b[3], b[4], b[5],
+                          cpu_state.regs[0].w, cpu_state.seg_ds.seg, cpu_state.regs[4].w,
+                          (unsigned long long) tsc);                    if ((tr_n % 20) == 1)
+                        pclog("[TRP] lin=%05X phys=%05X ctl=%04X\n", lin,
+                              mem_machine_translate ? mem_machine_translate(lin, 0) : lin,
+                              inw(0x8000));
+
+                }
+                if ((tcs == 0x1dd8) && (tip == 0x22a0)) {
+                    pclog("[TR] reached dispatch after %d instructions\n", tr_n);
+                    tr_active = 0;
+                }
+            }
+        }
+    }
     // pclog("[%04X:%04X] Opcode: %02X\n", CS, cpu_state.pc, opcode);
 
     if (is186) {
@@ -3952,6 +3990,48 @@ execx86(int cycs)
               cpu_state.regs[0].w, cpu_state.regs[3].w, cpu_state.regs[1].w,
               cpu_state.regs[2].w, cpu_state.regs[6].w, cpu_state.regs[7].w,
               cpu_state.regs[5].w, cpu_state.regs[4].w, cpu_state.seg_ds);
+    }
+
+    /* PCX_ENT=1: the module routine starts with "pop ds" at 1DD8:1B80; log the
+       frame it consumes so the caller's DS can be traced. */
+    static int ent_on = -1;
+    if (ent_on < 0)
+        ent_on = getenv("PCX_ENT") ? 1 : 0;
+    if (ent_on && ((uint16_t) cpu_state.temp_CS == 0x1DD8) &&
+        ((uint16_t) cpu_state.temp_pc >= 0x1b7c) && ((uint16_t) cpu_state.temp_pc <= 0x1b84)) {
+        uint32_t ssb = ((uint32_t) cpu_state.seg_ss.seg) << 4;
+        uint16_t sp0 = cpu_state.regs[4].w;
+        uint16_t w[6];
+        int      k;
+
+        for (k = 0; k < 6; k++) {
+            w[k] = (uint16_t) (pcx_mmu_peek8(ssb + ((sp0 + k * 2) & 0xffff)) |
+                               (pcx_mmu_peek8(ssb + ((sp0 + k * 2 + 1) & 0xffff)) << 8));
+        }
+        pclog("[ENT] ip=%04X sp=%04X ss=%04X ds=%04X es=%04X stk=%04X %04X %04X %04X %04X %04X\n",
+              (uint16_t) cpu_state.temp_pc, sp0, cpu_state.seg_ss.seg,
+              cpu_state.seg_ds.seg, cpu_state.seg_es.seg,
+              w[0], w[1], w[2], w[3], w[4], w[5]);
+    }
+
+    /* PCX_TAB=1: the device-table scan at 1DD8:1BBD-1BF9 chooses between the
+       console path (MAME) and the task dispatch (ours).  Log what it sees. */
+    static int tab_on = -1;
+    if (tab_on < 0)
+        tab_on = getenv("PCX_TAB") ? 1 : 0;
+    if (tab_on && ((uint16_t) cpu_state.temp_CS == 0x1DD8) &&
+        ((uint16_t) cpu_state.temp_pc >= 0x1BBD) && ((uint16_t) cpu_state.temp_pc <= 0x1BC5)) {
+        uint32_t dsb = ((uint32_t) cpu_state.seg_ds.seg) << 4;
+        uint16_t bx  = cpu_state.regs[3].w;
+        uint16_t di  = cpu_state.regs[7].w;
+        uint16_t a, b;
+
+        a = (uint16_t) (pcx_mmu_peek8(dsb + ((bx + 0x2dbc) & 0xffff)) |
+                        (pcx_mmu_peek8(dsb + ((bx + 0x2dbd) & 0xffff)) << 8));
+        b = (uint16_t) (pcx_mmu_peek8(dsb + ((bx + 0x2dc2) & 0xffff)) |
+                        (pcx_mmu_peek8(dsb + ((bx + 0x2dc3) & 0xffff)) << 8));
+        pclog("[TAB] ip=%04X di=%04X bx=%04X ds=%04X f0=%04X f6=%04X\n",
+              (uint16_t) cpu_state.temp_pc, di, bx, cpu_state.seg_ds.seg, a, b);
     }
 
     /* PCX_CSTRACE=1: 每次 CS 变化记一行，外加进入新段后的头 40 条指令 */

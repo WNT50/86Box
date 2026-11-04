@@ -453,6 +453,9 @@ pcx_rtc_write(uint16_t port, uint8_t val, UNUSED(void *priv))
     if (reg >= PCX_RTC_SIZE)
         return;
 
+    if (((reg == 0x0a) || (reg == 0x0b)) && (getenv("PCX_RTCW") != NULL))
+        pclog("[RTCW] reg=%02X val=%02X @%04X:%04X\n", reg, val, CS, cpu_state.pc);
+
     pcx.rtc[reg] = val;
 }
 
@@ -532,6 +535,49 @@ pcx_icu_int1(void *priv, int level)
    around it -- the video/keyboard board and whether the MMU card is fitted --
    so the two get their own init and must never share a video or keyboard
    model.  See vid_pcx.c (8031 terminal board) vs vid_pcd.c (SCN2674). */
+/* Temporary probe: does the guest programme the 80186 internal peripherals
+   (timer / interrupt controller) which our CPU core does not model? */
+static int pcx_i186_log_on = -1;
+
+static void
+pcx_i186_logw(uint16_t addr, uint8_t val, void *priv)
+{
+    if (pcx_i186_log_on < 0)
+        pcx_i186_log_on = (getenv("PCX_I186") != NULL);
+    if (pcx_i186_log_on)
+        pclog("[I186] w %04X=%02X @%04X:%04X\n", addr, val, CS, cpu_state.pc);
+}
+
+static uint8_t
+pcx_i186_logr(uint16_t addr, void *priv)
+{
+    if (pcx_i186_log_on < 0)
+        pcx_i186_log_on = (getenv("PCX_I186") != NULL);
+    if (pcx_i186_log_on)
+        pclog("[I186] r %04X @%04X:%04X\n", addr, CS, cpu_state.pc);
+    return 0xff;
+}
+
+
+static uint8_t
+pcx_i186_logr16(uint16_t addr, void *priv)
+{
+    if (pcx_i186_log_on < 0)
+        pcx_i186_log_on = (getenv("PCX_I186") != NULL);
+    if (pcx_i186_log_on)
+        pclog("[I186] r16 %04X @%04X:%04X\n", addr, CS, cpu_state.pc);
+    return 0xffff;
+}
+
+static void
+pcx_i186_logw16(uint16_t addr, uint16_t val, void *priv)
+{
+    if (pcx_i186_log_on < 0)
+        pcx_i186_log_on = (getenv("PCX_I186") != NULL);
+    if (pcx_i186_log_on)
+        pclog("[I186] w16 %04X=%04X @%04X:%04X\n", addr, val, CS, cpu_state.pc);
+}
+
 static int pcx_is_pcd = 0;
 
 static int machine_pcx_init_ex(const machine_t *model);
@@ -706,6 +752,10 @@ machine_pcx_init_ex(const machine_t *model)
                   NULL);
     io_sethandler(0xfbbe, 0x0001, pcx_io_hole_read8, pcx_io_hole_read16, NULL,
                   pcx_io_hole_write8, pcx_io_hole_write16, NULL, NULL);
+
+    /* probe: 80186 on-chip peripherals */
+    io_sethandler(0xff00, 0x0020, pcx_i186_logr, pcx_i186_logr16, NULL,
+                  pcx_i186_logw, pcx_i186_logw16, NULL, NULL);
 
     io_sethandler(PCX_STAT_PORT, 0x0001, pcx_stat_read, NULL, NULL,
                   pcx_stat_write, NULL, NULL, NULL);

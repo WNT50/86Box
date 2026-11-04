@@ -247,6 +247,21 @@ pcx_mmu_translate(uint32_t addr, int rw)
                   cpu_state.regs[6].w, cpu_state.regs[7].w);
         }
     }
+    /* PCX_MODW=1: the far-call operand at 1DD8:1BF5 is patched at run time;
+       find the writer. */
+    if (rw && (addr >= 0x1f960u) && (addr < 0x1f990u) && (getenv("PCX_MODW") != NULL) &&
+        (cpu_state.seg_cs.seg != 0xfc00)) {
+        static int n;
+        if (n < 200) {
+            n++;
+            pclog("[MODW] w %05X @%04X:%04X ds=%04X es=%04X ax=%04X bx=%04X cx=%04X dx=%04X si=%04X di=%04X\n",
+                  addr & 0xfffffu, cpu_state.seg_cs.seg, (uint16_t) cpu_state.oldpc,
+                  cpu_state.seg_ds.seg, cpu_state.seg_es.seg,
+                  cpu_state.regs[0].w, cpu_state.regs[3].w, cpu_state.regs[1].w,
+                  cpu_state.regs[2].w, cpu_state.regs[6].w, cpu_state.regs[7].w);
+        }
+    }
+
     uint16_t entry;
     uint32_t phys;
 
@@ -445,7 +460,48 @@ pcx_mmu_translate(uint32_t addr, int rw)
                               ((addr >> 1) & 0x3ffu));
                 phys = (w << 1) | (addr & 1u);
             } else {
-                phys = ((uint32_t) (val & 0xff00u)) | (addr & 0x7ffu);
+                /* PCX_PGDEC=1: decode the entry as "physical page base in bits
+                   15..10, flags in the low bits" instead of the rotated form.
+                   Identity entries read back as 0x0070, 0x0830, 0x1030, ... so
+                   the page base sits directly in the entry. */
+                /* Default: 32-bit rotate with the full 19-bit physical mask.
+                   The old 8-bit form (PCX_PGDEC=0) could only express pages
+                   below 64 KB, which folded every module/task page down into
+                   low memory and made the CPU execute zeros. */
+                static int pdec = -1;
+                if (pdec < 0)
+                    pdec = getenv("PCX_PGDEC") ? atoi(getenv("PCX_PGDEC")) : 5;
+                if (pdec == 1) {
+                    /* PCX_PGDEC=1: 16-bit rotate then mask 0x7FC00. */
+                    uint32_t v32 = ((uint32_t) ((uint16_t) ((pcx_mmu.pg[pcx_mmu_page_index(addr)] << 4) |
+                                                           (pcx_mmu.pg[pcx_mmu_page_index(addr)] >> 12)))) & 0x7fc00u;
+                    phys = v32 | (addr & 0x7ffu);
+                } else if (pdec == 2) {
+                    /* PCX_PGDEC=2: 32-bit rotate, keep bits 18..10 (1 MB space). */
+                    uint16_t en = pcx_mmu.pg[pcx_mmu_page_index(addr)];
+                    uint32_t v32 = (((uint32_t) en << 4) | ((uint32_t) en >> 12)) & 0x7fc00u;
+                    phys = v32 | (addr & 0x7ffu);
+                } else if (pdec == 5) {
+                    /* MAME's lookup formula in byte units, applied to the entry
+                       exactly as the guest wrote it:
+                       phys = ((reg << 4) & 0xff800) | (byte & 0x7ff).
+                       Calibration: the loader's identity entry 0x0830 for page 1
+                       decodes to 0x800, which is the whole point. */
+                    phys = (((uint32_t) pcx_mmu.pg[pcx_mmu_page_index(addr)] << 4) & 0xff800u) |
+                           (addr & 0x7ffu);
+                } else if (pdec == 4) {
+                    /* MAME verbatim (pcd.cpp:279 store, :431 lookup):
+                       stored = (data >> 4) | (data << 12)
+                       word offset = ((stored << 3) & 0x7fc00) | (offset & 0x3ff)
+                       -> byte address = (stored << 4) & 0xff800, plus the low bits. */
+                    uint16_t en = pcx_mmu.pg[pcx_mmu_page_index(addr)];
+                    uint16_t st = (uint16_t) ((en >> 4) | (en << 12));
+                    phys = (((uint32_t) st << 4) & 0xff800u) | (addr & 0x7ffu);
+                } else if (pdec == 3)
+                    phys = ((uint32_t) (pcx_mmu.pg[pcx_mmu_page_index(addr)] & 0xfc00u)) |
+                           (addr & 0x7ffu);
+                else
+                    phys = ((uint32_t) (val & 0xff00u)) | (addr & 0x7ffu);
             }
         } else {
             phys = ((uint32_t) (entry << 3) & 0x7fc00u) | (addr & (PCX_MMU_PGSIZE - 1));
@@ -475,6 +531,20 @@ pcx_mmu_translate(uint32_t addr, int rw)
                   addr & 0xfffffu, pcx_mmu_page_index(addr), entry,
                   phys & pcx_mmu_ram_mask,
                   rw, cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
+        }
+    }
+
+    /* PCX_MAPT=1: ground truth from the model itself for the addresses the
+       module's device-table scan and dispatch run through. */
+    if (getenv("PCX_MAPT") && ((addr == 0x02dbcu) || (addr == 0x01060u) || (addr == 0x1f97eu))) {
+        static int n;
+        if (n < 60) {
+            n++;
+            int ix = pcx_mmu_page_index(addr);
+            pclog("[MAPT] %s %05X entry=%04X phys=%05X ctl=%04X cs=%04X:%04X ds=%04X\n",
+                  rw ? "w" : "r", addr, pcx_mmu.pg[ix], phys & pcx_mmu_ram_mask,
+                  pcx_mmu.ctl, cpu_state.seg_cs.seg, (uint16_t) cpu_state.oldpc,
+                  cpu_state.seg_ds.seg);
         }
     }
 
