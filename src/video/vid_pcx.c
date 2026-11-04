@@ -89,108 +89,13 @@ static video_timings_t timing_pcx = { VIDEO_ISA, 8, 16, 32, 8, 16, 32 };
 static int pcx_vid_log;
 static int pcx_vid_log_n;
 
-static uint8_t pcx_vram_read(uint32_t addr, void *priv);
-static void    pcx_vram_write(uint32_t addr, uint8_t val, void *priv);
 
 /* 640 pixels of 8 bits per line, 350 lines, most significant bit leftmost. */
-static void
-pcx_video_scan_bitmap(pcx_video_t *dev)
-{
-    int           x, y, bit;
-    uint8_t       val;
-    const uint8_t *line;
-
-    for (y = 0; y < PCX_VIDEO_YSIZE; y++) {
-        line = &dev->vram[y * (PCX_VIDEO_XSIZE / 8)];
-
-        for (x = 0; x < PCX_VIDEO_XSIZE; x += 8) {
-            val = line[x >> 3];
-
-            for (bit = 0; bit < 8; bit++) {
-                int on = (val & (0x80 >> bit)) ? 1 : 0;
-
-                /* The 8741 inverts the bitmap as well when P2 bit 3 is set
-                   (pcd_v.cpp display_pixels, the "lg" branch). */
-                if (dev->inverse)
-                    on = !on;
-                dev->fb[y * PCX_VIDEO_XSIZE + x + bit] =
-                    on ? 0x00e8e8e8 : 0x00000000;
-            }
-        }
-    }
-
-    dev->vram_dirty = 0;
-}
-
-
 /* Character mode: the display RAM holds one character and one attribute byte
    per cell (MAME pcd_v.cpp display_pixels reads m_vram[address] as the code and
    m_vram[address+1] as the attribute).  The glyph comes from the character
    generator the host downloaded with 0xf9a0 = 0 -- 32 bytes per character, the
    loader writes 14 of them and then skips 4 (0x5494-0x5498). */
-static void
-pcx_video_scan_text(pcx_video_t *dev)
-{
-    int           row, col, line, bit, x, y;
-    uint8_t       ch, glyph, attr;
-    const uint8_t *font;
-    uint32_t      fg, bg, pix;
-    const uint32_t white = 0x00e8e8e8, black = 0x00000000, grey = 0x00808080;
-
-    for (row = 0; row < PCX_TERM_ROWS; row++) {
-        for (col = 0; col < PCX_TERM_COLS; col++) {
-            ch   = dev->vram[(row * PCX_TERM_COLS + col) * 2];
-            attr = dev->vram[(row * PCX_TERM_COLS + col) * 2 + 1];
-
-            if (dev->chargen_on) {
-
-                /* The SCN2672 character generator holds 16 bytes per glyph and
-                   the attribute's bit 5 picks the second 4 KB bank; indexing
-                   with a 32 byte stride fetched the neighbouring glyph's
-                   second half and every character came out as noise. */
-                font = &dev->chargen[((ch * 16) + ((attr & 0x20) ? 4096 : 0)) & 0x1fff];
-            }
-            else
-                font = &dev->term.font[(ch * 16) % PCX_TERM_FONT_SIZE];
-
-            /* Colour semantics are the ones MAME's pcd_v.cpp display_pixels
-               implements, since the 8741 firmware that drives the real board
-               is not dumped and cannot be emulated here: P2 bit 3 makes the
-               whole screen negative (foreground black, background white),
-               attribute bit 4 inverts a single cell, bit 3 gives that cell a
-               grey background. */
-            fg = dev->inverse ? black : white;
-            bg = dev->inverse ? white : black;
-            if (attr & 0x10) {
-                uint32_t t = fg;
-
-                fg = bg;
-                bg = t;
-            }
-            if (attr & 0x08)
-                bg = grey;
-
-            for (line = 0; line < PCX_TERM_CELL_H; line++) {
-                glyph = font[line];
-                y     = row * PCX_TERM_CELL_H + line;
-
-                /* One glyph dot per pixel: the PC-D prints 80 characters of 8
-                   dots per line (Servicehandbuch: "80 Zeichen/Zeile,
-                   Zeichenfeld 14 x 8 Punkte"), so 80 columns fill the 640 dot
-                   line exactly.  MAME's pcd_v.cpp draws each dot twice for a
-                   40 column layout, which does not fit the manual. */
-                for (bit = 0; bit < PCX_TERM_CELL_W; bit++) {
-                    x   = col * PCX_TERM_CELL_W + bit;
-                    pix = (glyph & (0x80 >> bit)) ? fg : bg;
-                    dev->fb[y * PCX_VIDEO_XSIZE + x] = pix;
-                }
-            }
-        }
-    }
-
-    dev->vram_dirty = 0;
-}
-
 static void
 pcx_video_poll(void *priv)
 {
@@ -198,20 +103,11 @@ pcx_video_poll(void *priv)
     int          y;
 
     if (!dev->vram_mapped) {
-        /* The 32 KB bitmap window at 0xf0000 belongs to the PC-D's SCN2674
-           board; the PC-X's SCN2672 is character-only and has no such window
-           (MAME pcd_map leaves 0x80000-0xfbfff unmapped, and only
-           pcd_video_device::device_start installs the 0xf0000 handler).
-           PCX_PCDVRAM=1 brings it back for experiments. */
-        /* The window stays: the BIOS downloads the character generator into
-           it (0xf9a0 bit 0 = 0), even though the board itself is character
-           only.  What the PC-X does not have is the PC-D's bitmap page, which
-           is why the display below never switches to it. */
-        if (getenv("PCX_NOVRAM") == NULL)
-        mem_mapping_add(&dev->vram_mapping, 0x000f0000, 0x00008000,
-                        pcx_vram_read, NULL, NULL,
-                        pcx_vram_write, NULL, NULL,
-                        NULL, MEM_MAPPING_INTERNAL, dev);
+        /* The PC-X has no host-side video buffer: MAME's pcd_map leaves
+           0xf0000-0xfbfff to plain RAM and only the PC-D's SCN2674 board
+           installs a 0xf0000 handler.  The character page lives in the
+           terminal board's own RAM (pcx_term_t) and the glyphs come from the
+           board ROM loaded at init, so nothing here needs the window. */
         dev->vram_mapped = 1;
     }
 
@@ -251,19 +147,6 @@ pcx_video_poll(void *priv)
                             PCX_VIDEO_YSIZE, fg, bg);
             dev->term.dirty = 0;
         }
-
-        for (y = 0; y < PCX_VIDEO_YSIZE; y++)
-            memcpy(buffer32->line[y], &dev->fb[y * PCX_VIDEO_XSIZE],
-                   PCX_VIDEO_XSIZE * 4);
-        video_blit_memtoscreen(0, 0, PCX_VIDEO_XSIZE, PCX_VIDEO_YSIZE);
-
-        timer_advance_u64(&dev->timer, TIMER_USEC * (1000000ULL / PCX_VIDEO_FREQ));
-        return;
-    }
-
-    if (dev->vram_active) {
-        if (dev->vram_dirty)
-            pcx_video_scan_bitmap(dev);
 
         for (y = 0; y < PCX_VIDEO_YSIZE; y++)
             memcpy(buffer32->line[y], &dev->fb[y * PCX_VIDEO_XSIZE],
@@ -550,34 +433,6 @@ pcx_vram_sw_write(UNUSED(uint16_t addr), uint8_t val, void *priv)
        generator RAM (one byte per word, the loader's font download at 0x5485),
        1 the display RAM the CRTC scans out. */
     dev->vram_sw = val & 1;
-}
-
-static uint8_t
-pcx_vram_read(uint32_t addr, UNUSED(void *priv))
-{
-    pcx_video_t *dev = (pcx_video_t *) priv;
-
-    return dev->vram[addr & 0x7fff];
-}
-
-static void
-pcx_vram_write(uint32_t addr, uint8_t val, void *priv)
-{
-    pcx_video_t *dev = (pcx_video_t *) priv;
-
-    if (!dev->vram_sw) {
-        if (!(addr & 1)) {
-            dev->chargen[(addr >> 1) & 0x1fff] = val;
-            dev->chargen_on                    = 1;
-            dev->vram_dirty                    = 1;
-        }
-        return;
-    }
-
-    dev->vram[addr & 0x7fff] = val;
-    dev->vram_dirty          = 1;
-    dev->vram_active         = 1;
-    dev->src                 = 2;
 }
 
 /* The machine creates the controller and hands it to the board, which owns the
