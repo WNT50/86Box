@@ -74,7 +74,7 @@
    MACHINE_NOT_WORKING and only models the 512 KB machine.) */
 #define PCX_VRAM_BASE     0x000f0000
 #define PCX_VRAM_SIZE     0x00008000
-#define PCX_RAM_CEIL      PCX_VRAM_BASE
+#define PCX_RAM_CEIL      PCX_GRAPH_TOP
 #define PCX_GRAPH_TOP     0x000fc000
 
 /* I/O */
@@ -763,6 +763,11 @@ machine_pcx_init_ex(const machine_t *model)
         {
         uint32_t h2_lo = (getenv("PCX_NOVRAM") != NULL) ? PCX_VRAM_BASE
                                                         : (PCX_VRAM_BASE + PCX_VRAM_SIZE);
+        /* Fitted RAM wins: with a full 1 MB the 16 KB above the video window
+           is memory, and making it an NMI hole cut the top off the machine
+           (SINIX touched 0xF8000 and took a bus timeout). */
+        if (h2_lo < ram_limit)
+            h2_lo = ram_limit;
         if (h2_lo < PCX_GRAPH_TOP) {
             mem_mapping_add(&pcx.hole_map2, h2_lo,
                             PCX_GRAPH_TOP - h2_lo,
