@@ -718,13 +718,10 @@ machine_pcx_init_ex(const machine_t *model)
         uint32_t ram_top   = (uint32_t) mem_size << 10;
         uint32_t ram_limit = (ram_top < PCX_RAM_CEIL) ? ram_top : PCX_RAM_CEIL;
 
-        /* MAME's pcd_map decodes only 0x00000-0x7FFFF as memory: every other
-           address above it falls through to nmi_io_r/w, so a 1 MB machine
-           still shows the 80186 a 512 KB window.  Match that here -- the
-           0x80000-0xEFFFF span then ends up in hole_map, which raises NMI.
-           PCX_MEM512=0 restores the full 0xF0000 RAM map for comparison. */
-        if ((getenv("PCX_MEM512") == NULL) && (ram_limit > 0x00080000))
-            ram_limit = 0x00080000;
+        /* MAME's pcd_map decodes 0x00000-0x7FFFF, but its offsets are 16-bit
+           words (the 80186 bus), so that range covers the whole 1 MB and the
+           guest sees all of it: SINIX reports 810 KB free here, 830 KB under
+           MAME, and only 352 KB when the map stopped at 512 KB. */
 
         /* The 640K..1M window is decoded by this machine, not by the generic
            RAM mapping: its state has to allow internal mappings or nothing
