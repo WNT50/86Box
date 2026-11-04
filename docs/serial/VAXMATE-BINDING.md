@@ -97,9 +97,11 @@ if (!dev->modem_set && ((dev->be == NULL) || (dev->be->status == NULL)))
 | 项 | 证据 |
 |---|---|
 | 构建 | `[810/810] Linking CXX executable src/86Box`，零警告 |
-| `mtest` 引导块（`run-vaxmate/mtest.asm`） | 屏显 `BDA 330:53 FF 00 F0` / `MOUSE RX: C4 00 00`，与重构前逐字节一致 |
-| 芯片日志 | `[0C40] write 00 <- 50` → `Tx 50` → `Rx C4` / `Rx 00` / `Rx 00` |
+| `mtest` 引导块（`run-vaxmate/mtest.asm`） | 屏显 `BDA 330:53 FF 00 F0` / `MOUSE RX: 90 00 00 90 0A 00 …`（帧格式修正后；早期版本是 `C4 …` 一族，两者含义不同，见 `NOTES-VAXMATE-MOUSE.md`） |
+| `irqtest` 引导块（`run-vaxmate/irqtest.asm`） | 每份三字节报告触发 **3 次 IRQ12**（`INT 0x74` 计数），四步合计 12 |
+| 芯片日志 | `[0C40] write 00 <- 50` → `Tx 50` → `Rx 90` / `Rx 00` / `Rx 00` |
 | 整机 | VAXmate Information System 主菜单（MS-Windows / VT220 / VT240 / VAXmate Network 齐全）|
+| Windows 1.0 | 指针四方向 1:1 跟随、左键可弹菜单（`NOTES-VAXMATE-MOUSE.md` §4） |
 
 ## 6. 迁移备忘
 

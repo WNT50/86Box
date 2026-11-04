@@ -3804,7 +3804,7 @@ const machine_t machines[] = {
         .fdc_device               = NULL,
         .vid_device               = NULL,
         .snd_device               = NULL,
-        .net_device               = &vaxmate_lance_device,
+        .net_device               = &lance_vaxmate_device,
         .aliases                  = { "", "" }
     },
 
