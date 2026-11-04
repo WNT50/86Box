@@ -28,6 +28,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <86box/86box.h>
+#include <86box/plat.h>
 #include <86box/plat_unused.h>
 #include <86box/timer.h>
 #include <86box/pic.h>
@@ -138,9 +139,20 @@ wd2791_update_rate(wd2791_t *dev)
                               (dev->dden ? 2 : 1);
 }
 
+static uint8_t wd_status(wd2791_t *dev);
+
 static void
 wd_irq_raise(wd2791_t *dev)
 {
+    if (getenv("PCX_FDCIQ") != NULL) {
+        static int n;
+        if (n < 400) {
+            n++;
+            pclog("[FDCIQ] t=%u cmd=%02X st=%02X state=%d busy=%d intrq=%d bc=%d @%04X:%04X\n", plat_get_ticks(),
+                  dev->command, wd_status(dev), dev->state, dev->busy, dev->intrq, dev->byte_count,
+                  cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
+        }
+    }
     dev->intrq = 1;
     picint(1 << WD2791_IRQ);
 }
@@ -929,7 +941,7 @@ wd2791_reg_write(uint16_t port, uint8_t val, UNUSED(void *priv))
     switch (port & 3) {
         case 0x00:
             if (getenv("PCX_FDCLOG") != NULL)
-                pclog("[CMD] %02X C=%d H=%d R=%d N=%d\n", val, dev->track_reg, dev->side,
+                pclog("[CMD] t=%u %02X C=%d H=%d R=%d N=%d\n", plat_get_ticks(), val, dev->track_reg, dev->side,
                       dev->sector_reg, wd_size_code(dev));
             wd2791_command(dev, val);
             break;

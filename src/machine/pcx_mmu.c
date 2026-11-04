@@ -67,6 +67,7 @@
 #include <86box/86box.h>
 #include <86box/io.h>
 #include <86box/mem.h>
+#include <86box/plat.h>
 #include <86box/pic.h>
 #include <86box/nmi.h>
 #include <86box/plat_unused.h>
@@ -333,10 +334,10 @@ pcx_mmu_translate(uint32_t addr, int rw)
         if (!np && !(entry & (rw ? 0x0001u : 0x0002u))) {
             static int nn;
 
-            if (nn < 12) {
+            if (nn < 400) {
                 nn++;
-                pclog("[NUL] addr=%05X idx=%03X entry=%04X rw=%d ctl=%02X ds=%04X @%04X:%04X\n",
-                      addr & 0xfffffu, pcx_mmu_page_index(addr), entry, rw,
+                pclog("[NUL] t=%u addr=%05X idx=%03X entry=%04X rw=%d ctl=%02X ds=%04X @%04X:%04X\n",
+                      plat_get_ticks(), addr & 0xfffffu, pcx_mmu_page_index(addr), entry, rw,
                       pcx_mmu.ctl, cpu_state.seg_ds, cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
             }
             pcx_mmu.fault = addr;

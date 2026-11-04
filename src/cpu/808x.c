@@ -25,6 +25,7 @@
 #define HAVE_STDARG_H
 #include <86box/pcx_mmu.h>
 #include <86box/86box.h>
+#include <86box/plat.h>
 #include <86box/device.h>
 #include "cpu.h"
 #include "x86.h"
@@ -2064,6 +2065,40 @@ execx86_instruction(void)
         handled         = 0;
 
     completed = 1;
+
+    /* PCX_TR2=1: ring buffer of the last instructions executed before the
+       kernel's floppy driver falls into its HLT loop at 1000:03A4. */
+    {
+        static int t2 = -1;
+        static unsigned rpos, dumped;
+        static struct { uint16_t scs, sip, sax, sdx, ssi; uint8_t sop; } ring[256];
+        uint16_t tcs2 = (uint16_t) CS;
+        uint16_t tip2 = (uint16_t) cpu_state.pc;
+
+        if (t2 < 0)
+            t2 = getenv("PCX_TR2") ? 1 : 0;
+        if (t2) {
+            ring[rpos & 255].scs = tcs2;
+            ring[rpos & 255].sip = tip2;
+            ring[rpos & 255].sop = (uint8_t) opcode;
+            ring[rpos & 255].sax = cpu_state.regs[0].w;
+            ring[rpos & 255].sdx = cpu_state.regs[2].w;
+            ring[rpos & 255].ssi = cpu_state.regs[6].w;
+            rpos++;
+
+            if (!dumped && (tcs2 == 0x1000u) && (tip2 == 0x03a4u)) {
+                unsigned k;
+
+                dumped = 1;
+                pclog("[TR2] === 停机点前 120 条 ===\n");
+                for (k = (rpos > 120u) ? (rpos - 120u) : 0u; k < rpos; k++) {
+                    pclog("[TR2] %04X:%04X op=%02X ax=%04X dx=%04X si=%04X\n",
+                          ring[k & 255].scs, ring[k & 255].sip, ring[k & 255].sop,
+                          ring[k & 255].sax, ring[k & 255].sdx, ring[k & 255].ssi);
+                }
+            }
+        }
+    }
 
     /* PCX_TR=1: instruction-level control-flow trace, from the module's lcall
        at 1DD8:1BFA to the dispatch at 1DD8:22A0 (max 600 instructions). */

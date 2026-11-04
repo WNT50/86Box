@@ -25,6 +25,7 @@
 
 #define HAVE_STDARG_H
 #include <86box/86box.h>
+#include <86box/plat.h>
 #include "cpu.h"
 #include <86box/machine.h>
 #include <86box/io.h>
@@ -1341,6 +1342,12 @@ picint_common(uint16_t num, int level, int set, uint8_t *irq_state)
                     if ((++n0 % 2000) == 0)
                         pclog("[IRQ] irq0 #%d @%04X:%04X\n", n0,
                               cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
+                } else if (b == 1) {
+                    pclog("[IRQ1] t=%u @%04X:%04X\n", plat_get_ticks(),
+                          cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
+                } else if (b == 6) {
+                    pclog("[IRQ6] t=%u @%04X:%04X\n", plat_get_ticks(),
+                          cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
                 } else if (nn < 15) {
                     nn++;
                     pclog("[IRQ] irq%d assert @%04X:%04X\n", b,
