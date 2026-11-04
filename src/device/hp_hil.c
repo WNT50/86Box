@@ -36,6 +36,7 @@
  */
 #include <stdarg.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -46,6 +47,7 @@
 #include <86box/io.h>
 #include <86box/keyboard.h>
 #include <86box/device.h>
+#include <86box/mouse.h>
 #include <86box/pic.h>
 #include <86box/mem.h>
 #include <86box/timer.h>
@@ -108,6 +110,8 @@ typedef struct hp_hil_t {
     uint32_t ready_ctx;   /* context already told the link is up */
     int8_t   dx;
     int8_t   dy;
+    pc_timer_t pointer_timer; /* host pointer -> link displacement reports */
+    uint32_t  reports;        /* displacement reports handed to the link */
 
 } hp_hil_t;
 
@@ -201,6 +205,60 @@ hp_hil_driver_ctx(void)
 
 /* The System asks the 8041 to poll the link (port 68h, 7Dh); the 8041 walks
    it and hands the report records back through the adapter. */
+/* The link is interrupt driven: a device with something to report raises the
+   line and the System reads the report out of the FIFO.  The System does not
+   poll us for motion, so sample the host pointer here and raise the line when
+   the mouse has moved. */
+static void
+hp_hil_pointer_tick(void *priv)
+{
+    hp_hil_t *dev = (hp_hil_t *) priv;
+    int       dx  = 0;
+    int       dy  = 0;
+    int       ox  = 0;
+    int       oy  = 0;
+    int       nx, ny;
+
+    /* Take the host delta every tick, held back until the link can carry it.
+       HP-HIL reports +Y upwards while the host moves +Y downwards, so the
+       delta is negated here (MAME's hp_46060b does the same:
+       mouse_y_delta += -delta). */
+    mouse_subtract_coords(&dx, &dy, &ox, &oy, -128, 127, 0, 0);
+    dy = -dy;
+    if (dx || dy) {
+        nx = (int) dev->dx + dx;
+        ny = (int) dev->dy + dy;
+        dev->dx = (int8_t) ((nx > 127) ? 127 : ((nx < -128) ? -128 : nx));
+        dev->dy = (int8_t) ((ny > 127) ? 127 : ((ny < -128) ? -128 : ny));
+        dev->reports++;
+    }
+
+    /* MOUSEHP1.SYS never issues EPT: it configures the device (op 01/03)
+       and then expects the link to raise INT when the mouse has something
+       to report.  So the gate is "device addressed and link out of loop",
+       not the pass-through mode. */
+    if ((dev->kbd_addr != 0) && !dev->loop) {
+        /* Keep feeding the FIFO; the System reads it in its interrupt
+           handler, so as long as we have room the newest delta goes out. */
+        if ((dev->dx || dev->dy) && ((dev->fifo_count + 3) <= HIL_FIFO_SIZE)) {
+            hp_hil_trace("HIL: host pointer %d,%d -> report\n", dev->dx, dev->dy);
+            hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, HIL_POL_AXES_XY));
+            hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, (uint8_t) dev->dx));
+            hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, (uint8_t) dev->dy));
+            dev->dx = 0;
+            dev->dy = 0;
+        }
+        /* The IRR is edge latched: re-assert while a frame is waiting so a
+           request raised while the PIC was masked is not lost. */
+        if (dev->fifo_count) {
+            dev->r3 |= HIL_R3_INT;
+            pic3_int(HIL_IRQ_LINE, 1);
+        }
+    }
+
+    timer_advance_u64(&dev->pointer_timer, (10000ULL * TIMER_USEC));
+}
+
 void
 hp_hil_poll_link(void)
 {
@@ -209,6 +267,8 @@ hp_hil_poll_link(void)
     if ((dev == NULL) || !dev->kbd_passthru)
         return;
 
+    /* Displacement reports are raised by hp_hil_pointer_tick(); a poll only
+       hands back whatever is still queued here. */
     if (dev->dx || dev->dy) {
         hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, HIL_POL_AXES_XY));
         hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, (uint8_t) dev->dx));
@@ -346,7 +406,9 @@ hp_hil_kbd_frame(uint16_t frame)
 
     switch (data) {
         case HIL_IFC:
-            dev->kbd_addr = 0;
+            /* Interface Clear clears the link, not the device's configured
+               address: only DSR (0x04) resets an address assignment
+               (MAME: hlebase.cpp, HPHIL_IFC only clears m_powerup). */
             break;
 
         case HIL_EPT:
@@ -404,8 +466,12 @@ hp_hil_kbd_frame(uint16_t frame)
             return;
 
         case HIL_DHR:
-            /* Link-wide: every device acts on it and none hands it back. */
-            dev->kbd_addr      = 0;
+            /* Link-wide: every device acts on it and none hands it back.
+               A hard reset restarts the device but KEEPS its address: the
+               System does not re-run ACF afterwards, and MOUSEHP1.SYS in the
+               PM phase issues a bare DHR, so clearing the address here makes
+               the mouse permanently unaddressed (MAME: hlebase.cpp keeps
+               m_device_id across HPHIL_DHR; only HPHIL_DSR clears it). */
             dev->kbd_passthru = 0;
             dev->ready_ctx     = 0;
             /* The 8041 reports the link to the driver shortly after the
@@ -585,6 +651,8 @@ hp_hil_init(const device_t *info)
 
     io_sethandler(0x006c, 4, hp_hil_read, NULL, NULL, hp_hil_write, NULL, NULL, dev);
 
+    timer_add(&dev->pointer_timer, hp_hil_pointer_tick, dev, 1);
+
     return dev;
 }
 
@@ -605,9 +673,24 @@ hp_hil_reset(void *priv)
 {
     hp_hil_t *dev = (hp_hil_t *) priv;
 
-    memset(dev, 0x00, sizeof(*dev));
-    dev->loop   = 1; /* the adapter starts in loop-back, like the MLC */
-    dev->kbd_id = HIL_MOUSE_ID;
+    /* Never memset() the whole struct: pointer_timer is a live pc_timer_t
+       linked into the timer queue, and copying it around corrupts the queue
+       (the sampler then silently stops firing after a reset). */
+    dev->fifo_head    = 0;
+    dev->fifo_count   = 0;
+    dev->w1           = 0;
+    dev->w2           = 0;
+    dev->w3           = 0;
+    dev->r2           = 0;
+    dev->r3           = 0;
+    dev->loop         = 1; /* the adapter starts in loop-back, like the MLC */
+    dev->kbd_addr     = 0;
+    dev->kbd_id       = HIL_MOUSE_ID;
+    dev->kbd_passthru = 0;
+    dev->scan_reported = 0;
+    dev->ready_ctx    = 0;
+    dev->dx           = 0;
+    dev->dy           = 0;
 }
 
 const device_t hp_hil_device = {
