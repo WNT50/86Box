@@ -49,6 +49,7 @@
 #include <86box/scsi_sm912.h>
 #include <86box/serial.h>
 #include <86box/kbc_siemens.h>
+#include <86box/pcd_vid.h>
 #include <86box/pcx_vid.h>
 #include <86box/plat_unused.h>
 #include "cpu.h"
@@ -510,8 +511,33 @@ pcx_icu_int1(void *priv, int level)
 /* Machine                                                                   */
 /* ------------------------------------------------------------------------- */
 
+/* The PC-D and the PC-X are two machines built on the same mainboard: the
+   same BIOS, the same 80186, the same WD2791.  What differs is the equipment
+   around it -- the video/keyboard board and whether the MMU card is fitted --
+   so the two get their own init and must never share a video or keyboard
+   model.  See vid_pcx.c (8031 terminal board) vs vid_pcd.c (SCN2674). */
+static int pcx_is_pcd = 0;
+
+static int machine_pcx_init_ex(const machine_t *model);
+
 int
 machine_pcx_init(const machine_t *model)
+{
+    pcx_is_pcd = 0;
+
+    return machine_pcx_init_ex(model);
+}
+
+int
+machine_pcd_init(const machine_t *model)
+{
+    pcx_is_pcd = 1;
+
+    return machine_pcx_init_ex(model);
+}
+
+static int
+machine_pcx_init_ex(const machine_t *model)
 {
     int ret;
 
@@ -684,12 +710,15 @@ machine_pcx_init(const machine_t *model)
 
     /* The video board owns 0xf980-0xf98f itself; registering it here as well
        would shadow the device (io.c: later registration wins). */
-    void *video = device_add(&pcx_video_device);
+    void *video = device_add(pcx_is_pcd ? &pcd_video_device : &pcx_video_device);
 
     /* The keyboard and the terminal share one channel on the video board; the
-       controller answers what the POST asks it and will carry key strokes. */
+       controller answers what the POST asks it and will carry key strokes.
+       The PC-D's board has no terminal, so its 8741 is the only keyboard
+       interface and there is nobody to hand the controller to. */
     pcx.kbc = kbc_siemens_init();
-    pcx_video_set_kbc(video, pcx.kbc);
+    if (!pcx_is_pcd)
+        pcx_video_set_kbc(video, pcx.kbc);
     /* The 8741A keyboard interface sits next to the terminal channel
        (0xf9b0-0xf9b3); the controller registers those ports itself. */
     kbc_siemens_ports(pcx.kbc);
@@ -726,8 +755,15 @@ machine_pcx_init(const machine_t *model)
 
     pcx.usart[1] = device_add_inst_params(&scn2661b_device, 2, (void *) (intptr_t) SERIAL_PORT_NONE); /* no connector */
     scn26x1_set_irq(pcx.usart[1], 1 << 2);
-    io_sethandler(PCX_USART2_PORT, 0x0004, pcx_usart2_read, NULL, NULL,
-                  pcx_kbd_usart_write, NULL, NULL, pcx.usart[1]);
+    /* On the PC-X the second USART is the line the keyboard hangs off; on the
+       PC-D that job belongs to the 8741 on the video board, so the part is a
+       plain hidden USART there. */
+    if (pcx_is_pcd)
+        io_sethandler(PCX_USART2_PORT, 0x0004, pcx_usart2_read, NULL, NULL,
+                      scn26x1_write, NULL, NULL, pcx.usart[1]);
+    else
+        io_sethandler(PCX_USART2_PORT, 0x0004, pcx_usart2_read, NULL, NULL,
+                      pcx_kbd_usart_write, NULL, NULL, pcx.usart[1]);
 
     pcx.usart[2] = device_add_inst_params(&scn2661b_device, 3, (void *) (intptr_t) 1);              /* reserve -> COM2 */
     scn26x1_set_irq(pcx.usart[2], 1 << 4);
@@ -804,6 +840,41 @@ const device_t pcx_device = {
     .speed_changed = NULL,
     .force_redraw  = NULL,
     .config        = pcx_config
+};
+
+
+/* The PC-D has no MMU card by default: the strap on S9 bit 0 tells the POST
+   so, and DOS does not need one.  The option stays available for SINIX. */
+static const device_config_t pcd_config[] = {
+    // clang-format off
+    {
+        .name        = "mmu",
+        .description = "MMU Type",
+        .type        = CONFIG_SELECTION,
+        .default_int = PCX_MMU_NONE,
+        .selection   = {
+            { .description = "None",      .value = PCX_MMU_NONE    },
+            { .description = "SINIX 1.0", .value = PCX_MMU_SINIX10 },
+            { .description = "SINIX 1.2", .value = PCX_MMU_SINIX12 },
+            { .description = "" }
+        }
+    },
+    { .name = "", .description = "", .type = CONFIG_END }
+    // clang-format on
+};
+
+const device_t pcd_device = {
+    .name          = "Siemens PC-D",
+    .internal_name = "pcd",
+    .flags         = 0,
+    .local         = 0,
+    .init          = NULL,
+    .close         = NULL,
+    .reset         = pcx_reset,
+    .available     = NULL,
+    .speed_changed = NULL,
+    .force_redraw  = NULL,
+    .config        = pcd_config
 };
 
 /*

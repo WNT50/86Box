@@ -94,7 +94,22 @@ struct kbc_siemens_t {
        wired up at all (0x6a92..0x6aa1 in the loader's print path). */
     int identity_done;
     int present_sent;
+
+    /* The 8031 on the video board takes the byte out of the latch on its own
+       clock; until it does, 0xf981 bit 1 reads back set.  KBC_BUSY_US sets how
+       long that takes (default 40 us). */
+    int     busy;
+    int     busy_us;
+    timer_t busy_timer;
 };
+
+static void
+kbc_busy_clear(void *priv)
+{
+    kbc_siemens_t *dev = (kbc_siemens_t *) priv;
+
+    dev->busy = 0;
+}
 
 static int
 kbc_fifo_empty(kbc_siemens_t *dev)
@@ -136,6 +151,11 @@ kbc_siemens_rx(kbc_siemens_t *dev, uint8_t byte)
 {
     if (dev == NULL)
         return;
+
+    /* The byte lands in the 8031's input latch and the busy bit stays up until
+       the firmware has picked it up. */
+    dev->busy = 1;
+    timer_set_delay_u64(&dev->busy_timer, (uint64_t) dev->busy_us * TIMER_USEC);
 
     switch (dev->state) {
         case KBC_ST_IDLE:
@@ -224,6 +244,9 @@ kbc_siemens_read_status(kbc_siemens_t *dev)
     if (!kbc_fifo_empty(dev))
         ret |= 0x01;
 
+    if (dev->busy)
+        ret |= 0x02;
+
     return ret;
 }
 
@@ -291,6 +314,14 @@ kbc_siemens_init(void)
         return NULL;
 
     dev->log = log_open("KBCSIEMENS");
+
+    dev->busy_us = 40;
+    {
+        const char *e = getenv("KBC_BUSY_US");
+        if (e != NULL)
+            dev->busy_us = atoi(e);
+    }
+    timer_add(&dev->busy_timer, kbc_busy_clear, dev, 0);
 
     return dev;
 }
