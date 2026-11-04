@@ -193,6 +193,15 @@ pcx_video_poll(void *priv)
     int          y;
 
     if (!dev->vram_mapped) {
+        /* The 32 KB bitmap window at 0xf0000 belongs to the PC-D's SCN2674
+           board; the PC-X's SCN2672 is character-only and has no such window
+           (MAME pcd_map leaves 0x80000-0xfbfff unmapped, and only
+           pcd_video_device::device_start installs the 0xf0000 handler).
+           PCX_PCDVRAM=1 brings it back for experiments. */
+        /* The window stays: the BIOS downloads the character generator into
+           it (0xf9a0 bit 0 = 0), even though the board itself is character
+           only.  What the PC-X does not have is the PC-D's bitmap page, which
+           is why the display below never switches to it. */
         mem_mapping_add(&dev->vram_mapping, 0x000f0000, 0x00008000,
                         pcx_vram_read, NULL, NULL,
                         pcx_vram_write, NULL, NULL,
@@ -200,13 +209,16 @@ pcx_video_poll(void *priv)
         dev->vram_mapped = 1;
     }
 
-    /* The display RAM holds characters or bitmap words depending only on the
-       SCN267x LG bit: command group 0x20 with bit 1 set selects the path and
-       bit 0 turns it on (MAME scn2674.cpp handles 0x20/0x22 exactly this way),
-       and the PC-D draws the bitmap as 16 dot words per cell.  Contents say
-       nothing about the mode, so do not try to guess it from them. */
-    if (dev->vram_active)
-        dev->text_mode = !dev->gfx_on;
+    /* The 2672 scans the character page out.  The "gfx" bit of command group
+       0x20 exists on the 2674 in the PC-D and does not turn this board into a
+       bitmap, so the page stays the display; PCX_PCDVRAM=1 restores the old
+       PC-D style switch for comparison. */
+    {
+        static int pcdv2 = -1;
+        if (pcdv2 < 0)
+            pcdv2 = getenv("PCX_PCDVRAM") ? 1 : 0;
+        dev->text_mode = pcdv2 ? (dev->vram_active ? !dev->gfx_on : 0) : 1;
+    }
 
     {
         static int last = -1;
@@ -222,8 +234,17 @@ pcx_video_poll(void *priv)
     }
 
     if (dev->text_mode) {
-        if (dev->vram_dirty)
-            pcx_video_scan_text(dev);
+        /* The characters the host sends end up in the terminal page, which is
+           what the 2672 scans out; dev->vram only holds the character
+           generator the BIOS downloads. */
+        if (dev->term.dirty) {
+            uint32_t fg = dev->inverse ? 0x00000000 : 0x00e8e8e8;
+            uint32_t bg = dev->inverse ? 0x00e8e8e8 : 0x00000000;
+
+            pcx_term_render(&dev->term, dev->fb, PCX_VIDEO_XSIZE,
+                            PCX_VIDEO_YSIZE, fg, bg);
+            dev->term.dirty = 0;
+        }
 
         for (y = 0; y < PCX_VIDEO_YSIZE; y++)
             memcpy(buffer32->line[y], &dev->fb[y * PCX_VIDEO_XSIZE],
@@ -350,6 +371,7 @@ pcx_video_write(uint16_t addr, uint8_t val, void *priv)
             dev->cmd_left--;
         } else {
             pcx_term_write(&dev->term, val);
+            dev->vram_dirty = 1;   /* the page changed, rescan it */
             dev->src = 1;
             /* The 8031 sees the same stream and answers queries that need one. */
             kbc_siemens_rx(dev->kbc, val);
@@ -385,6 +407,7 @@ pcx_vram_write(uint32_t addr, uint8_t val, void *priv)
         if (!(addr & 1)) {
             dev->chargen[(addr >> 1) & 0x1fff] = val;
             dev->chargen_on                    = 1;
+            dev->vram_dirty                    = 1;
         }
         return;
     }
@@ -439,7 +462,7 @@ pcx_video_init(const device_t *info)
     /* The 8741 on the video board holds P2 bit 3 high out of reset, which is
        the "negative" picture the real machine shows: black text on a white
        background.  MAME's pcd_v.cpp does the same through m_p2 & 8. */
-    dev->inverse   = 1;
+    dev->inverse   = 0;   /* PC-X inverts through P1 bit 5, and only if set */
 
     memset(dev->regs, 0x00, sizeof(dev->regs));
     dev->parm_left = 0;

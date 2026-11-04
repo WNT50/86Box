@@ -72,3 +72,6 @@ CMakeLists.txt.user
 *.patch
 *.*.orig
 *.*.rej
+
+# machine ROMs are not redistributed
+roms/

@@ -293,8 +293,14 @@ pcx_mmu_translate(uint32_t addr, int rw)
         (addr >= PCX_MMU_WINDOW))
         return addr;
 
-    if (pcx_mmu.defer)
-        return addr;
+    /* PCX_NODEFER=1: 立即生效（MAME 的模型），用来对照 defer 的影响。 */
+    {
+        static int nd = -1;
+        if (nd < 0)
+            nd = getenv("PCX_NODEFER") ? 1 : 0;
+        if (!nd && pcx_mmu.defer)
+            return addr;
+    }
 
     /* PCX_MAP42=<phys>: 把逻辑页 0x42（0x10800-0x10BFF）改映射到指定物理页。
        实测模块在这一页上只执行 0B2E/0B31/0B34/0B35/0B37/0B39/0B3D/0B40
