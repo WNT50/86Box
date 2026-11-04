@@ -67,6 +67,8 @@
 #include <86box/86box.h>
 #include <86box/io.h>
 #include <86box/mem.h>
+
+extern void pcx_ring_dump(void);
 #include <86box/plat.h>
 #include <86box/pic.h>
 #include <86box/nmi.h>
@@ -350,6 +352,13 @@ pcx_mmu_translate(uint32_t addr, int rw)
                         pclog(" [%03X]=%04X", q, pcx_mmu.pg[q]);
                 }
                 pclog("\n");
+            }
+            {
+                static int rd;
+                if (!rd) {
+                    rd = 1;
+                    pcx_ring_dump();
+                }
             }
             pcx_mmu.fault = addr;
             pcx_mmu.fpend = 1;
