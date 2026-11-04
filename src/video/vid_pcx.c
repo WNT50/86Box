@@ -36,6 +36,8 @@
 #include <86box/rom.h>
 #include <86box/video.h>
 #include <86box/plat.h>
+
+extern void pcx_ring_dump(void);
 #include <86box/pcx_term.h>
 #include <86box/pcx_vid.h>
 #include <86box/kbc_siemens.h>
@@ -66,6 +68,7 @@ typedef struct pcx_video_t {
                                    1 the character channel, 2 the bitmap */
     int           parm_left; /* bytes left of the 15-byte setup block */
     int           cmd_prev;  /* previous 0xf982 value, for the double write */
+    uint8_t       prev_char; /* last byte of the host -> board stream */
     int           mon;
     int           vram_sw;    /* 0xf9a0 bit 0: 1 = display RAM, 0 = chargen RAM */
     int           chargen_on; /* the host has uploaded a character generator */
@@ -400,6 +403,15 @@ pcx_video_write(uint16_t addr, uint8_t val, void *priv)
         } else if (dev->cmd_left > 0) {
             dev->cmd_left--;
         } else {
+            if ((val == 'G') && (dev->prev_char == '\n') && (getenv("PCX_RING") != NULL)) {
+                static int gn;
+                if (gn < 3) {
+                    gn++;
+                    pclog("[RING] request %d at t=%u\n", gn, plat_get_ticks());
+                    pcx_ring_dump();
+                }
+            }
+            dev->prev_char = val;
             pcx_term_write(&dev->term, val);
             pcx_term_dump(dev);
             dev->vram_dirty = 1;   /* the page changed, rescan it */

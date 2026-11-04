@@ -2051,6 +2051,36 @@ cpu_outw(uint16_t port, uint16_t val)
     resub_cycles(old_cycles);
 }
 
+/* PCX_RING=1: instruction ring the video model can dump on demand, used to
+   see which code path leads up to a particular character written to the
+   terminal board. */
+#define PCX_RING_SIZE 512
+static struct {
+    uint16_t rcs, rip;
+} pcx_ring[PCX_RING_SIZE];
+static unsigned pcx_ring_pos;
+
+void
+pcx_ring_dump(void)
+{
+    unsigned n, i;
+
+    n = (pcx_ring_pos < PCX_RING_SIZE) ? pcx_ring_pos : PCX_RING_SIZE;
+    pclog("[RING] === last %u instructions ===\n", n);
+    pclog("[RING] regs AX=%04X BX=%04X CX=%04X DX=%04X SI=%04X DI=%04X BP=%04X SP=%04X"
+          " CS=%04X DS=%04X ES=%04X SS=%04X\n",
+          (uint16_t) cpu_state.regs[0].w, (uint16_t) cpu_state.regs[3].w,
+          (uint16_t) cpu_state.regs[1].w, (uint16_t) cpu_state.regs[2].w,
+          (uint16_t) cpu_state.regs[6].w, (uint16_t) cpu_state.regs[7].w,
+          (uint16_t) cpu_state.regs[5].w, (uint16_t) cpu_state.regs[4].w,
+          (uint16_t) cpu_state.seg_cs.seg, (uint16_t) cpu_state.seg_ds.seg,
+          (uint16_t) cpu_state.seg_es.seg, (uint16_t) cpu_state.seg_ss.seg);
+    for (i = 0; i < n; i++) {
+        unsigned k = (pcx_ring_pos - n + i) % PCX_RING_SIZE;
+        pclog("[RING] %04X:%04X\n", pcx_ring[k].rcs, pcx_ring[k].rip);
+    }
+}
+
 void
 execx86_instruction(void)
 {
@@ -2065,6 +2095,21 @@ execx86_instruction(void)
         handled         = 0;
 
     completed = 1;
+
+    /* PCX_RING=1: record it; pcx_ring_dump() is called from the video model. */
+    {
+        static int r_on = -1;
+
+        if (r_on < 0)
+            r_on = getenv("PCX_RING") ? 1 : 0;
+        if (r_on) {
+            static int hit;
+
+            pcx_ring[pcx_ring_pos % PCX_RING_SIZE].rcs = (uint16_t) CS;
+            pcx_ring[pcx_ring_pos % PCX_RING_SIZE].rip = (uint16_t) cpu_state.pc;
+            pcx_ring_pos++;
+        }
+    }
 
     /* PCX_TR2=1: ring buffer of the last instructions executed before the
        kernel's floppy driver falls into its HLT loop at 1000:03A4. */
