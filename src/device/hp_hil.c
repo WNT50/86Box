@@ -74,6 +74,9 @@
 #define HIL_R3_NMI  0x02
 #define HIL_R3_LERR 0x04
 
+#define HIL_W2_IPF 0x04 /* suppress the answer when the FIFO is empty */
+#define HIL_W3_APE 0x02 /* Auto Poll Enable: an AP strobe issues a POL */
+
 #define HIL_FIFO_SIZE 16
 
 /* HP-HIL IRQ 20 is the third 8259's line 4 (vector 6Ch). */
@@ -119,6 +122,7 @@ static hp_hil_t *hp_hil_dev;
 
 static void     hp_hil_link_ready(void *priv);
 static uint16_t hp_hil_reply(uint8_t addr, uint8_t data);
+static void     hp_hil_transmit(uint8_t data);
 
 #ifdef ENABLE_HP_HIL_LOG
 int hp_hil_do_log = ENABLE_HP_HIL_LOG;
@@ -238,8 +242,20 @@ hp_hil_pointer_tick(void *priv)
        to report.  So the gate is "device addressed and link out of loop",
        not the pass-through mode. */
     if ((dev->kbd_addr != 0) && !dev->loop) {
-        /* Keep feeding the FIFO; the System reads it in its interrupt
-           handler, so as long as we have room the newest delta goes out. */
+        /* Auto Poll (W3.APE): every AP strobe makes the MLC issue a POL and
+           the answer carries whatever the device has.  The model has no AP
+           source, so the pointer sampler doubles as the strobe.  Without
+           this the driver -- which masks the link interrupt and waits for
+           auto-polled answers -- only ever sees the first report. */
+        static int ap_div;
+
+        if ((dev->w3 & HIL_W3_APE) && (dev->fifo_count == 0) &&
+            ((ap_div++ % 6) == 0)) {
+            dev->w1 = 0x08;             /* command frame, broadcast address */
+            hp_hil_transmit(HIL_POL);
+        }
+        /* Fallback for a driver that never enables AP: hand the report over
+           directly, the System reads it in its interrupt handler. */
         if ((dev->dx || dev->dy) && ((dev->fifo_count + 3) <= HIL_FIFO_SIZE)) {
             hp_hil_trace("HIL: host pointer %d,%d -> report\n", dev->dx, dev->dy);
             hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, HIL_POL_AXES_XY));
@@ -581,15 +597,20 @@ hp_hil_write(uint16_t port, uint8_t val, void *priv)
             hp_hil_transmit(val);
             break;
 
-        case 0x006e:
-            /* R2 is read-only on the MLC; the System ROM writes 0xFE here to
-               reset the adapter, so drop the queued frames and the error
-               flags instead of storing the opcode. */
+        case 0x006e: /* W2: test / interrupt-poll flags (MAME: HPMLC_W2_*).
+                       The HP ROM also writes 0xFE here to drop the queued
+                       frames, so keep that side effect. */
+            dev->w2 = val;
             dev->fifo_head  = 0;
             dev->fifo_count = 0;
             dev->r2         = 0x00;
-            hp_hil_trace("HIL: mode 0x%02X -> loop=%d\n", val, dev->loop);
+            hp_hil_trace("HIL: W2 = %02X (fifo cleared)\n", val);
             hp_hil_irq();
+            break;
+
+        case 0x006f: /* W3: APE (Auto Poll Enable) lives in bit 1 */
+            dev->w3 = val;
+            hp_hil_trace("HIL: W3 = %02X\n", val);
             break;
 
         default:
