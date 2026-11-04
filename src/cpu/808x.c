@@ -2170,11 +2170,20 @@ execx86_instruction(void)
                     peak = 0;
                 else if (v > peak)
                     peak = v;
-                if ((w_last > 0) && (v > 0) && (v < w_last) && !fell) {
-                    fell = 1;
-                    pclog("[W6424] peak %d, first drop to %d at %04X:%04X\n",
-                          peak, v, (uint16_t) CS, (uint16_t) cpu_state.pc);
-                    pcx_ring_dump();
+                if ((w_last > 0) && (v > 0) && (v < w_last)) {
+                    if (!fell) {
+                        fell = 1;
+                        pclog("[W6424] peak %d, first drop to %d at %04X:%04X\n",
+                              peak, v, (uint16_t) CS, (uint16_t) cpu_state.pc);
+                        pcx_dump_code((((uint32_t) CS) << 4) +
+                                      (uint16_t) cpu_state.pc - 80, 176, "alloc");
+                    }
+                    if (w_hits < 40) {
+                        pclog("[W6424] %d -> %d (%d pages) at %04X:%04X\n",
+                              w_last, v, w_last - v, (uint16_t) CS,
+                              (uint16_t) cpu_state.pc);
+                        w_hits++;
+                    }
                 }
                 w_last = v;
             }
