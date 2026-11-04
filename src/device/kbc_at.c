@@ -2795,7 +2795,12 @@ kbc_vectra_ext_write(uint16_t port, uint8_t val, void *priv)
                         dev->vectra_answered = 1;
                         dev->vectra_svc = VECTRA_SVC_HAVE_DATA |
                                           VECTRA_SVC_DEVICE_READY;
+                        /* Volume 1 separates the two 8041 events: IRQ 16 is the
+                           SVC request, IRQ 17 is OBF (output buffer full, the
+                           answer waiting to be collected).  Raise both, each
+                           driver only unmasks the one it services. */
                         pic3_int(0, 1);
+                        pic3_int(1, 1);
                     } else {
                         dev->vectra_svc = 0x00;
                     }
@@ -2804,6 +2809,7 @@ kbc_vectra_ext_write(uint16_t port, uint8_t val, void *priv)
                 case 0x45:
                     dev->vectra_svc = VECTRA_SVC_COMMAND_DONE;
                     pic3_int(0, 1);
+                    pic3_int(1, 1);
                     break;
                 default:
                     break;
