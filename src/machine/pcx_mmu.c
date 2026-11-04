@@ -702,6 +702,21 @@ pcx_mmu_outw(uint16_t port, uint16_t val, UNUSED(void *priv))
                   cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
         }
 
+        /* PCX_PTE3F=1: the page that holds linear 0x1F800 (slot 0x3F) is the
+           window the loader writes the module through; it stops pointing at
+           the module after 36 s.  Log every write that touches it. */
+        {
+            static int p3 = -1, n3;
+            if (p3 < 0)
+                p3 = getenv("PCX_PTE3F") ? 1 : 0;
+            if (p3 && ((idx & 0x7f) == 0x3f) && (n3 < 300)) {
+                n3++;
+                pclog("[PTE3F] idx=%03X old=%04X val=%04X ctl=%04X @%04X:%04X\n",
+                      idx, pcx_mmu.pg[idx], val, pcx_mmu.ctl,
+                      cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
+            }
+        }
+
         /* Bits 0..5 hold the flags and 11..15 the page; 6..10 are the status
            lines the handler reads back, not storage (the POST at 0xfe29a
            compares through the mask 0x3f:0xf800). */
