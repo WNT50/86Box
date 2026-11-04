@@ -37,6 +37,7 @@
 extern void (*pcx_mmu_nmi_status)(uint8_t bits);
 
 extern void pcx_mmu_init(int type);
+extern uint16_t pcx_mmu_pg_get(int idx);
 /* Undecoded address range (hi exclusive) that raises NMI on access; hi <= lo
    disables it.  Alternative to a CPU-only catch-all mapping -- use one, not
    both. */

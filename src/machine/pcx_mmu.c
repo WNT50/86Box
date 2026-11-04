@@ -221,7 +221,23 @@ pcx_mmu_index(uint32_t slot)
 static int
 pcx_mmu_page_index(uint32_t addr)
 {
-    uint32_t page = (addr >> 10) & 0x3ffu;
+    static int slotoff = 0x7fffffff;
+    uint32_t   page;
+
+    /* PCX_MMUSLOT=<n>: 查表时把页号减 n。实测硬件是 n=5：
+       虚拟页 0x42 必须读到槽 0x3D（页 0x38 = 0xE32E 的端口桩），
+       而槽 0x40 里放的页 0x3B 是 +0x1400 错位的那一条。 */
+    if (slotoff == 0x7fffffff)
+        slotoff = getenv("PCX_MMUSLOT") ? atoi(getenv("PCX_MMUSLOT")) : 0;
+
+    /* 页大小 2 KB：内核在 1B58:4025 用 >>11 算条目数（0xDB7F>>11 = 27，
+       27 x 2 KB 正好覆盖 0x0000-0xD7FF），模块在 0x0E1C 也拿 0x800 做自检。
+       PCX_PG1K=1 可切回旧的 1 KB 行为做对照。 */
+    static int pg2k = -1;
+    if (pg2k < 0)
+        pg2k = getenv("PCX_PG1K") ? 0 : 1;
+
+    page = (((addr >> (pg2k ? 11 : 10)) - (uint32_t) slotoff)) & 0x3ffu;
 
     if (pcx_mmu.type == PCX_MMU_SINIX12)
         return (int) (((page & 0xffu) | ((pcx_mmu.ctl & 0x18u) << 5)) & (PCX_MMU_PAGES - 1));
@@ -280,7 +296,34 @@ pcx_mmu_translate(uint32_t addr, int rw)
     if (pcx_mmu.defer)
         return addr;
 
+    /* PCX_MAP42=<phys>: 把逻辑页 0x42（0x10800-0x10BFF）改映射到指定物理页。
+       实测模块在这一页上只执行 0B2E/0B31/0B34/0B35/0B37/0B39/0B3D/0B40
+       八个地址，即三处端口桩的调用点；而桩表本体在物理 0xE000 页内。
+       用它验证“不改代码、改 MMU”这条路线。 */
+    {
+        static long m42 = -2;
+        if (m42 == -2) {
+            const char *e = getenv("PCX_MAP42");
+            m42 = e ? strtol(e, NULL, 16) : -1;
+        }
+        if ((m42 >= 0) && ((addr >> 10) == 0x42u))
+            return (((uint32_t) m42) & 0x7FC00u) | (addr & (PCX_MMU_PGSIZE - 1));
+    }
+
     entry = pcx_mmu.pg[pcx_mmu_page_index(addr)];
+
+    {
+        static int t1 = -1, done;
+        if (t1 < 0)
+            t1 = getenv("PCX_CTL") ? 1 : 0;
+        if (t1 && !done && (addr >= 0x10000) && (addr < 0x10100)) {
+            done = 1;
+            pclog("[T1] addr=%05X idx=%03X entry=%04X defer=%04X ctl=%02X "
+                  "at %04X:%04X\n", addr, pcx_mmu_page_index(addr), entry,
+                  pcx_mmu.defer, pcx_mmu.ctl,
+                  cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
+        }
+    }
 
     if (entry == 0x0000)
         return addr;
@@ -342,7 +385,35 @@ pcx_mmu_translate(uint32_t addr, int rw)
            0x0030 -> page 0x000,  0x0830 -> page 0x010,  0x1030 -> page 0x020
            0xB020 -> page 0x160 (0xB0000),  0x5022 -> page 0x0A0 (0x50000)
        2 KB per page, so the physical address is (entry >> 7) << 11. */
-    phys = ((uint32_t) (entry << 3) & 0x7fc00u) | (addr & (PCX_MMU_PGSIZE - 1));
+    {
+        static int pg2k3 = -1;
+        uint32_t poff;
+
+        if (pg2k3 < 0)
+            pg2k3 = getenv("PCX_PG1K") ? 0 : 1;
+
+        if (pg2k3) {
+            /* PCX_MAP20=<phys>: 2 KB 页下把逻辑槽 0x20（0x10000-0x107FF）
+               改指到指定物理基址。装载器把这一槽写成 0xD800（库基址），
+               而模块入口 1000:002C 需要它指向 0xEC00（模块代码）。 */
+            static long m20 = -2;
+            if (m20 == -2) {
+                const char *e = getenv("PCX_MAP20");
+                m20 = e ? strtol(e, NULL, 16) : -1;
+            }
+            if ((m20 >= 0) && ((addr >> 11) == 0x20u))
+                return (((uint32_t) m20) & 0x7FC00u) | (addr & 0x7ffu);
+
+            /* 2 KB 页：条目按“表里存的形式”解，物理基址 = 回转后的 bits 15..8。
+               依据：装载器写的恒等条目是 0x0030,0x0830,0x1030,…（步长 0x800），
+               即 bits 15..8 = 物理地址 bits 15..8，低 6 位是标志（0x30 = 存在+可写）。*/
+            uint16_t val  = (uint16_t) ((pcx_mmu.pg[pcx_mmu_page_index(addr)] << 4) |
+                                        (pcx_mmu.pg[pcx_mmu_page_index(addr)] >> 12));
+            phys = ((uint32_t) (val & 0xff00u)) | (addr & 0x7ffu);
+        } else {
+            phys = ((uint32_t) (entry << 3) & 0x7fc00u) | (addr & (PCX_MMU_PGSIZE - 1));
+        }
+    }
 
     {
         static int km = -1, kmn;
@@ -450,6 +521,18 @@ pcx_mmu_inw(uint16_t port, UNUSED(void *priv))
                 return data | 0x80;   /* the 0x8a00 trap, not a fault */
         }
 
+        {
+            static int e84 = -1, n;
+            if (e84 < 0)
+                e84 = getenv("PCX_E84") ? 1 : 0;
+            if (e84 && (n < 40) && (off == 0x04f8u)) {
+                n++;
+                pclog("[E84R] port=%04X idx=%03X pg=%04X -> %04X ctl=%02X @%04X:%04X\n",
+                      port, idx, pcx_mmu.pg[idx], data, pcx_mmu.ctl,
+                      cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
+            }
+        }
+
         return data;
     }
 }
@@ -478,13 +561,23 @@ pcx_mmu_outw(uint16_t port, uint16_t val, UNUSED(void *priv))
         /* Only the low six bits are storage: the POST writes 0x0a and 0x15 and
            agrees with the read back value after masking with 0x3f (v3 BIOS
            0xfe266-0xfe27e). */
+        {
+            static int cl = -1;
+            if (cl < 0)
+                cl = getenv("PCX_CTL") ? 1 : 0;
+            if (cl)
+                pclog("[CTL] %02X -> %02X defer=%04X at %04X:%04X\n",
+                      pcx_mmu.ctl, val & 0x003f, pcx_mmu.defer,
+                      cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
+        }
         pcx_mmu.ctl = val & 0x003f;
         /* The mapping the register installs applies from the next instruction
            stream on: the routine that flips the bit keeps running out of the
            prefetch queue, which is why it can patch its own return frame and
            lret into the paged view. */
-        if (val & 0x0020)
+        if (val & 0x0020) {
             pcx_mmu.defer = pcx_mmu_def_cs();
+        }
         return;
     }
 
@@ -517,7 +610,27 @@ pcx_mmu_outw(uint16_t port, uint16_t val, UNUSED(void *priv))
            lines the handler reads back, not storage (the POST at 0xfe29a
            compares through the mask 0x3f:0xf800). */
         pcx_mmu.pg[idx] = (uint16_t) ((val >> 4) | (val << 12));
+
+        {
+            static int e84w = -1, n;
+            if (e84w < 0)
+                e84w = getenv("PCX_E84") ? 1 : 0;
+            if (e84w && (n < 40) && (off == 0x04f8u)) {
+                n++;
+                pclog("[E84W] port=%04X idx=%03X val=%04X store=%04X ctl=%02X @%04X:%04X\n",
+                      port, idx, val, pcx_mmu.pg[idx], pcx_mmu.ctl,
+                      cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
+            }
+        }
     }
+}
+
+uint16_t
+pcx_mmu_pg_get(int idx)
+{
+    if ((idx < 0) || (idx >= PCX_MMU_PAGES))
+        return 0xFFFF;
+    return pcx_mmu.pg[idx];
 }
 
 void

@@ -23,6 +23,7 @@
 #include <string.h>
 #include <wchar.h>
 #define HAVE_STDARG_H
+#include <86box/pcx_mmu.h>
 #include <86box/86box.h>
 #include <86box/device.h>
 #include "cpu.h"
@@ -678,6 +679,23 @@ pfq_clear(void)
         pfq_pos     = 0;
         prefetching = 0;
     }
+}
+
+/* Byte as the CPU sees it, page table included. */
+static uint8_t
+pcx_peek(uint32_t lin)
+{
+    uint32_t ph = mem_machine_translate ? mem_machine_translate(lin, 0) : lin;
+
+    if (ph == 0xffffffffu)
+        return 0xff;
+    return mem_readb_phys(ph);
+}
+
+static uint16_t
+pcx_peekw(uint32_t lin)
+{
+    return (uint16_t) (pcx_peek(lin) | (((uint16_t) pcx_peek(lin + 1)) << 8));
 }
 
 static void
@@ -3317,6 +3335,9 @@ execx86_instruction(void)
                     wait_cycs(cycles & 1, 0);
                     check_interrupts(is_nec);
                 } else {
+                    static int hn;
+                    if (!(hn++ % 200))
+                        pclog("[HLT] %04X:%04X n=%d\n", CS, cpu_state.pc, hn);
                     repeating = 1;
                     completed = 0;
                     clock_end();
@@ -3548,6 +3569,491 @@ execx86(int cycs)
         }
 
         execx86_instruction();
+{
+    /* PCX_HELPER=1: 把 1000:0B2E / 1000:0B37 当作装载器应当提供的
+       端口读写助手（调用者：push 端口 / push 值,端口；返回值在 AX）。
+       仿真器直接完成这次 I/O 并按 retf 返回，绕开模块里那段被覆盖成
+       例程尾部的代码。 */
+    static int hp = -1;
+
+    if (hp < 0)
+        hp = getenv("PCX_HELPER") ? 1 : 0;
+    if (hp && (CS == 0x1000) && (cpu_state.pc == 0x0b2e)) {
+        static int mp = -1, mpdone = 0;
+
+        if (mp < 0)
+            mp = getenv("PCX_MMUPROBE") ? 1 : 0;
+        if (mp && !mpdone) {
+            static const uint32_t q[] = { 0x00000, 0x00B2E, 0x0A5D4, 0x10000, 0x10400,
+                                          0x10800, 0x10B2E, 0x10C00, 0x10D3F, 0x11000,
+                                          0x11800, 0x11F00, 0x18000, 0x1C000 };
+            mpdone = 1;
+            for (int qq = 0; qq < (int) (sizeof(q) / sizeof(q[0])); qq++) {
+                uint32_t phh = mem_machine_translate ? mem_machine_translate(q[qq], 0) : q[qq];
+                pclog("[MMUP] lin %05X -> phys %05X   byte=%02X\n", q[qq], phh,
+                      (phh == 0xffffffffu) ? 0xff : mem_readb_phys(phh));
+            }
+        }
+    }
+    if (hp && (CS == 0x1000) && ((cpu_state.pc == 0x0b2e) || (cpu_state.pc == 0x0b37))) {
+        uint32_t sb   = ((uint32_t) SS << 4) + SP;
+        uint16_t hport = pcx_peekw(sb + 4);
+        uint16_t hrip  = pcx_peekw(sb);
+        uint16_t hrcs  = pcx_peekw(sb + 2);
+
+        if (cpu_state.pc == 0x0b2e) {
+            AX = inb(hport);
+        } else {
+            outb(hport, (uint8_t) pcx_peekw(sb + 6));
+        }
+
+        /* retf 只弹返回地址（IP+CS）；参数由调用方的 add sp,N 清理。 */
+        SP += 4;
+        load_cs(hrcs);
+        set_ip(hrip);
+        biu_queue_flush();
+        continue;
+    }
+}
+{
+    /* PCX_TRLOG=1: 内核/引导代码跳到段 0 的助手地址时，记录 MMU 把逻辑
+       0x0B2E/0B37/0B41 翻译成了哪个物理地址，以及那几处到底是什么字节。 */
+    static int tl = -1, tr_done = 0;
+
+    if (tl < 0)
+        tl = getenv("PCX_TRLOG") ? 1 : 0;
+    if (tl && !tr_done && (CS == 0x0000) &&
+        ((cpu_state.pc == 0x0b2e) || (cpu_state.pc == 0x0b37) || (cpu_state.pc == 0x0b41))) {
+        uint32_t t2 = mem_machine_translate ? mem_machine_translate(0x0B2Eu, 0) : 0x0B2Eu;
+        uint32_t t3 = mem_machine_translate ? mem_machine_translate(0x0B37u, 0) : 0x0B37u;
+        uint32_t t4 = mem_machine_translate ? mem_machine_translate(0x0B41u, 0) : 0x0B41u;
+
+        tr_done = 1;
+        pclog("[TR0] 进入 0:%04X  lin 0B2E->%05X  0B37->%05X  0B41->%05X\n",
+              cpu_state.pc, t2, t3, t4);
+        pclog("[TR0] 0B2E 处: %02X %02X %02X %02X %02X %02X %02X %02X\n",
+              pcx_peek(0x0B2E), pcx_peek(0x0B2F), pcx_peek(0x0B30), pcx_peek(0x0B31),
+              pcx_peek(0x0B32), pcx_peek(0x0B33), pcx_peek(0x0B34), pcx_peek(0x0B35));
+        pclog("[TR0] 0B41 处: %02X %02X %02X %02X %02X %02X %02X %02X\n",
+              pcx_peek(0x0B41), pcx_peek(0x0B42), pcx_peek(0x0B43), pcx_peek(0x0B44),
+              pcx_peek(0x0B45), pcx_peek(0x0B46), pcx_peek(0x0B47), pcx_peek(0x0B48));
+    }
+}
+{
+    /* PCX_PGTAB=1: 模块入口时刻转储完整 MMU 页表（每 1 KB 一页） */
+    static int pg = -1, pgdone;
+    if (pg < 0)
+        pg = getenv("PCX_PGTAB") ? 1 : 0;
+    if (pg && !pgdone && (cpu_state.temp_CS == 0x1000)) {
+        FILE *f = fopen("/tmp/pgtab.txt", "w");
+        if (f) {
+            uint32_t a;
+            for (a = 0; a < 0x40000; a += 0x400) {
+                uint32_t p = mem_machine_translate ? mem_machine_translate(a, 0) : a;
+                fprintf(f, "%05X %05X\n", a, p & 0xFFFFF);
+            }
+            fclose(f);
+        }
+        {
+            /* 大映像全体（0x103E0 起 74 KB），供离线静态反汇编 */
+            {
+                FILE *b = fopen("/tmp/bigimg.bin", "wb");
+                if (b) {
+                    uint32_t q;
+                    for (q = 0; q < 0x12400u; q++)
+                        fputc(mem_readb_phys(0x103E0u + q), b);
+                    fclose(b);
+                }
+            }
+            /* 全部 1024 条原始页表（32 银行 x 32 槽） */
+            FILE *g = fopen("/tmp/pgtab_all.txt", "w");
+            if (g) {
+                int q;
+                for (q = 0; q < 1024; q++)
+                    fprintf(g, "%03X %04X\n", q, pcx_mmu_pg_get(q));
+                fclose(g);
+            }
+        }
+        {
+            FILE *c = fopen("/tmp/cfg.txt", "w");
+            if (c) {
+                int q;
+                fprintf(c, "1ACC=%02X\n", pcx_peek(0x1ACC));
+                for (q = 0x1A80; q < 0x1B00; q++)
+                    fprintf(c, "%02X%s", pcx_peek(q), ((q & 15) == 15) ? "\n" : " ");
+                fprintf(c, "4570:\n");
+                for (q = 0x4570; q < 0x45C0; q++)
+                    fprintf(c, "%02X%s", pcx_peek(q), ((q & 15) == 15) ? "\n" : " ");
+                fclose(c);
+            }
+        }
+        {
+            {
+                FILE *h = fopen("/tmp/blk_dbe0_phys.bin", "wb");
+                if (h) {
+                    int q;
+                    for (q = 0; q < 0x2400; q++)
+                        fputc(mem_readb_phys(0xDBE0u + q), h);
+                    fclose(h);
+                }
+                h = fopen("/tmp/blk_103e0_phys.bin", "wb");
+                if (h) {
+                    int q;
+                    for (q = 0; q < 0x2400; q++)
+                        fputc(mem_readb_phys(0x103E0u + q), h);
+                    fclose(h);
+                }
+            }
+            {
+                FILE *h = fopen("/tmp/seg_d800.bin", "wb");
+                if (h) {
+                    int q;
+                    for (q = 0; q < 0x400; q++)
+                        fputc(pcx_peek(0xD800u + q), h);
+                    fclose(h);
+                }
+            }
+            FILE *g = fopen("/tmp/low_b00.txt", "w");
+            if (g) {
+                int q;
+                for (q = 0; q < 0xA0; q++)
+                    fprintf(g, "%02X%s", pcx_peek(0xB00 + q), ((q & 15) == 15) ? "\n" : " ");
+                fclose(g);
+            }
+        }
+        pclog("[PG] page table dumped at module entry\n");
+        pgdone = 1;
+    }
+}
+{
+    /* PCX_POKE29=1: 模块入口处，把 29 字节“远调用版”端口桩表写进模块段 0xB2E
+       （9+10+10，正好对上模块调用的 0B2E/0B37/0B41 间距） */
+    static int pk = -1, done;
+    if (pk < 0)
+        pk = getenv("PCX_POKE29") ? 1 : 0;
+    if (pk && !done && (cpu_state.temp_CS == 0x1000)) {
+        static const uint8_t t29[29] = {
+            0x8b, 0xdc, 0x8b, 0x57, 0x04, 0xec, 0x2a, 0xe4, 0xcb,              /* 读 8 位 */
+            0x8b, 0xdc, 0x8b, 0x57, 0x04, 0x8b, 0x47, 0x06, 0xef, 0xcb,        /* 写 16 位 */
+            0x8b, 0xdc, 0x8b, 0x57, 0x04, 0x8b, 0x47, 0x06, 0xee, 0xcb         /* 写 8 位 */
+        };
+        int i;
+        for (i = 0; i < 29; i++)
+            mem_writeb_phys(0xf72e + i, t29[i]);
+        pclog("[PK29] patched 0B2E/0B37/0B41 at module entry\n");
+        done = 1;
+    }
+}
+{
+    /* PCX_STUB=1: 在第一次执行到 1000:0B2E 时，把该处替换成一个真正的
+       端口读例程（dx = [bp+6]; in al,dx; retf），用来验证 0B2E 是否为唯一阻塞点。 */
+    static int st = -1;
+    if (st < 0)
+        st = getenv("PCX_STUB") ? 1 : 0;
+    if (st && (cpu_state.temp_CS == 0x1000) && (cpu_state.temp_pc == 0x0b2e)) {
+        static const uint8_t stub[] = { 0x55, 0x8b, 0xec, 0x8b, 0x56, 0x06, 0xec, 0x8b, 0xe5, 0x5d, 0xcb };
+        int i;
+
+        for (i = 0; i < (int) sizeof(stub); i++)
+            mem_writeb_phys(0xf72e + i, stub[i]);
+        pclog("[STUB] patched 0B2E at first hit\n");
+        st = 0;
+    }
+}
+{
+    static int      ph = -1;
+    static uint32_t ph_n;
+    static uint32_t ph_cnt[8][0x10000];
+    static const uint16_t ph_seg[8] = { 0x3000, 0x1000, 0x110e, 0x151e, 0x17b5, 0x1795, 0xfc00, 0x0000 };
+
+    if (ph < 0)
+        ph = getenv("PCX_PCHIST") ? 1 : 0;
+    if (ph) {
+        if (!(ph_n & 15)) {
+            int sg;
+            for (sg = 0; sg < 8; sg++) {
+                if (ph_seg[sg] == cpu_state.temp_CS) {
+                    ph_cnt[sg][cpu_state.temp_pc]++;
+                    break;
+                }
+            }
+        }
+        ph_n++;
+        if (!(ph_n & 0x3fffff)) {
+            FILE *f = fopen("/tmp/pchist.txt", "w");
+            int i, sg;
+            if (f) {
+                for (sg = 0; sg < 8; sg++) {
+                    for (i = 0; i < 0x10000; i++) {
+                        if (ph_cnt[sg][i])
+                            fprintf(f, "%04X:%04X %u\n", ph_seg[sg], i, ph_cnt[sg][i]);
+                    }
+                }
+                fclose(f);
+            }
+            f = fopen("/tmp/logdump.bin", "wb");
+            if (f) {
+                for (i = 0; i < 0x300; i++)
+                    fputc(pcx_peek(0x18400u + i), f);
+                fclose(f);
+            }
+            {
+                static const uint32_t q2[] = { 0x00000, 0x00B2E, 0x0A5D4, 0x10000, 0x10400,
+                                               0x10800, 0x10B2E, 0x10C00, 0x10D3F, 0x11000,
+                                               0x110E0, 0x11EFE, 0x18000, 0x1C000 };
+                for (int qq = 0; qq < (int) (sizeof(q2) / sizeof(q2[0])); qq++) {
+                    uint32_t phh = mem_machine_translate ? mem_machine_translate(q2[qq], 0) : q2[qq];
+                    pclog("[MMUP] lin %05X -> phys %05X   byte=%02X\n", q2[qq], phh,
+                          (phh == 0xffffffffu) ? 0xff : mem_readb_phys(phh));
+                }
+            }
+            f = fopen("/tmp/logdump_low.bin", "wb");
+            if (f) {
+                for (i = 0; i < 0x400; i++)
+                    fputc(pcx_peek(0x0A00u + i), f);
+                fclose(f);
+            }
+            memset(ph_cnt, 0, sizeof(ph_cnt));
+        }
+    }
+}
+{
+    /* PCX_MIP=1: 记录段 1000 里 0x0800-0x0BFF 这一页上执行到的 IP */
+    static int mo = -1;
+    static uint8_t seen[0x400];
+    if (mo < 0)
+        mo = getenv("PCX_MIP") ? 1 : 0;
+    if (mo && ((uint16_t) cpu_state.temp_CS == 0x1000)) {
+        uint16_t ip = (uint16_t) cpu_state.temp_pc;
+        if ((ip >= 0x0C00) && (ip < 0x1000) && !seen[ip - 0x0C00]) {
+            seen[ip - 0x0C00] = 1;
+            pclog("[MIP] %04X\n", ip);
+        }
+    }
+}
+{
+    /* PCX_DMAARG=1: 装载器调用 DMA 例程（3000:223E / 2313）前的四个参数 */
+    static int ar = -1;
+    if (ar < 0)
+        ar = getenv("PCX_DMAARG") ? 1 : 0;
+    if (ar && (((uint16_t) cpu_state.temp_pc >= 0x26E8) &&
+               ((uint16_t) cpu_state.temp_pc <= 0x26EB))) {
+        uint16_t sp = (uint16_t) SP;
+        uint16_t off = pcx_peekw(ss + ((sp + 2) & 0xFFFF));
+        uint16_t seg = pcx_peekw(ss + ((sp + 4) & 0xFFFF));
+        uint16_t cnt = pcx_peekw(ss + ((sp + 6) & 0xFFFF));
+        uint16_t dir = pcx_peekw(ss + ((sp + 8) & 0xFFFF));
+        uint16_t rc  = pcx_peekw(ss + ((sp + 10) & 0xFFFF));
+        pclog("[ARG] cs=%04X from=%04X off=%04X seg=%04X -> dst=%05X cnt=%04X dir=%04X\n",
+              (uint16_t) cpu_state.temp_CS, rc, off, seg,
+              (((uint32_t) seg << 4) + off) & 0xFFFFF, cnt, dir);
+    }
+}
+{
+    /* PCX_DMAREQ=1: 3000:0093 的 16 位写端口原语写 DMA 区时，
+       记录请求块 DS:0xA628..0xA62D、写入的端口/值、以及调用者返回地址 */
+    static int rq = -1;
+    if (rq < 0)
+        rq = getenv("PCX_DMAREQ") ? 1 : 0;
+    if (rq && ((uint16_t) cpu_state.temp_CS == 0x3000) &&
+        ((uint16_t) cpu_state.temp_pc >= 0x0091) &&
+        ((uint16_t) cpu_state.temp_pc <= 0x0094)) {
+        uint16_t port = (uint16_t) cpu_state.regs[2].w;
+        if ((port >= 0xFFC0) && (port <= 0xFFDF)) {
+            uint16_t sp = (uint16_t) SP;
+            uint16_t rip = pcx_peekw(ss + sp);
+            uint16_t rcs = pcx_peekw(ss + ((sp + 2) & 0xFFFF));
+            pclog("[REQ] port=%04X val=%04X ret=%04X:%04X blk=%02X %02X %02X %02X %02X %02X\n",
+                  port, (uint16_t) cpu_state.regs[0].w, rcs, rip,
+                  pcx_peek(0x3A628), pcx_peek(0x3A629), pcx_peek(0x3A62A),
+                  pcx_peek(0x3A62B), pcx_peek(0x3A62C), pcx_peek(0x3A62D));
+        }
+    }
+}
+{
+    /* PCX_DST=1: 装载器算 DMA 目标地址的那一刻（CS=3000, IP=2FCA） */
+    static int dst_on = -1;
+    if (dst_on < 0)
+        dst_on = getenv("PCX_DST") ? 1 : 0;
+    if (dst_on && (((uint16_t) cpu_state.temp_CS == 0x3000) ||
+                   ((uint16_t) cpu_state.temp_CS == 0x0000)) &&
+        ((((uint16_t) cpu_state.temp_pc >= 0x2FA0) &&
+          ((uint16_t) cpu_state.temp_pc <= 0x2FA8)) ||
+         (((uint16_t) cpu_state.temp_pc >= 0x3093) &&
+          ((uint16_t) cpu_state.temp_pc <= 0x3097)))) {
+        static uint32_t last_raw, last_sum;
+        uint16_t lo  = pcx_peekw(ss + (((uint16_t) BP - 0x10) & 0xFFFF));
+        uint16_t hi  = pcx_peekw(ss + (((uint16_t) BP - 0x12) & 0xFFFF));
+        uint16_t add = pcx_peekw(ds + 0xA648);
+        uint32_t raw = (uint32_t) pcx_peekw(ds + 0x3622);
+        uint32_t sum = ((uint32_t) hi << 16) | lo;
+        if (raw != last_raw || sum != last_sum) {
+            last_raw = raw;
+            last_sum = sum;
+            pclog("[DST] ip=%04X seg3622=%04X addA648=%04X dstSet=%04X:%04X type=%02X\n",
+                  (uint16_t) cpu_state.temp_pc, (uint16_t) raw, add,
+                  hi, lo, pcx_peekw(ss + (((uint16_t) BP + 4) & 0xFFFF)));
+        }
+    }
+}
+{
+    /* PCX_CSTRACE=1: 每次 CS 变化记一行，外加进入新段后的头 40 条指令 */
+    static int cs_on = -1;
+    static uint16_t cs_last, cs_new, p_cs, p_pc;
+    static int cs_cnt;
+    if (cs_on < 0)
+        cs_on = getenv("PCX_CSTRACE") ? 1 : 0;
+    if (cs_on) {
+        uint16_t c = (uint16_t) cpu_state.temp_CS;
+        uint16_t p = (uint16_t) cpu_state.temp_pc;
+        if (c != cs_last) {
+            cs_last = c;
+            cs_new = c;
+            cs_cnt = 0;
+            {
+                uint32_t lin = ((uint32_t) c << 4) + p;
+                uint32_t ph  = mem_machine_translate ? mem_machine_translate(lin, 0) : lin;
+                pclog("[CS] %04X:%04X enter  (from %04X:%04X) lin=%05X phys=%05X ctl=%04X\n",
+                      c, p, p_cs, p_pc, lin, ph, inw(0x8000));
+            }
+        } else if (cs_cnt < 40) {
+            cs_cnt++;
+            pclog("[CP] %04X:%04X\n", c, p);
+        }
+        p_cs = c;
+        p_pc = p;
+    }
+}
+{
+    static int tl = -1, armed, n;
+    if (tl < 0)
+        tl = getenv("PCX_TRACE") ? 1 : 0;
+    if (tl) {
+        if (!armed && (cpu_state.temp_CS == 0x1000) && (inw(0x8000) & 0x0020)) {
+            FILE *f;
+            int q;
+            armed = 1;
+            f = fopen("/tmp/trace_seg.bin", "wb");
+            if (f) {
+                for (q = 0; q < 0x1000; q++)
+                    fputc(pcx_peek(0x10000u + q), f);
+                fclose(f);
+            }
+            f = fopen("/tmp/res110e.bin", "wb");
+            if (f) {
+                for (q = 0; q < 0x1000; q++)
+                    fputc(pcx_peek(0x11000u + q), f);
+                fclose(f);
+            }
+            f = fopen("/tmp/res151e.bin", "wb");
+            if (f) {
+                for (q = 0; q < 0x1000; q++)
+                    fputc(pcx_peek(0x15000u + q), f);
+                fclose(f);
+            }
+            pclog("[TR] armed, segment dumped\n");
+        }
+        if (armed && (n < 60000) && (cpu_state.temp_CS == 0x1000)) {
+            uint16_t o = (uint16_t) cpu_state.temp_pc;
+            int      len = (int) (((uint16_t) cpu_state.pc - o) & 0xffff);
+            if ((len > 0) && (len < 16)) {
+                uint32_t lin = 0x10000u + o;
+                n++;
+                pclog("[TR] %04X len=%d %02X %02X %02X %02X %02X %02X\n", o, len,
+                      pcx_peek(lin), pcx_peek(lin + 1), pcx_peek(lin + 2),
+                      pcx_peek(lin + 3), pcx_peek(lin + 4), pcx_peek(lin + 5));
+            }
+        }
+    }
+}
+{
+    /* PCX_RTAB: 转储装载器内存中的重定位表（CS=3000, IP=0x0626 处，表头固定 DS:0x65BC） */
+    static int rt = -1, cnt;
+    if (rt < 0)
+        rt = getenv("PCX_RTAB") ? 1 : 0;
+    if (rt && (CS == 0x3000) && ((uint16_t) cpu_state.pc == 0x0626) && (cnt < 20)) {
+        FILE *f;
+        char  path[64];
+        int   q;
+        cnt++;
+        sprintf(path, "/tmp/reltab_%02d.bin", cnt);
+        f = fopen(path, "wb");
+        if (f) {
+            for (q = 0; q < 0x400; q++)
+                fputc(pcx_peek(ds + 0x65BC + q), f);
+            fclose(f);
+        }
+        pclog("[RT] dump %d -> %s\n", cnt, path);
+    }
+}
+{
+    /* PCX_RELTAB: 循环头 0x0648 —— 检测到新表起点就整表转储 */
+    static int rl = -1, n, tables;
+    static uint16_t last_ptr = 0xFFFF;
+    if (rl < 0)
+        rl = getenv("PCX_RELTAB") ? 1 : 0;
+    if (rl && (CS == 0x3000) && ((uint16_t) cpu_state.pc == 0x0648) && (n < 4000)) {
+        uint16_t ptr = pcx_peekw(ds + (uint16_t) (BP - 0x4A));
+        uint16_t endp = pcx_peekw(ds + (uint16_t) (BP - 0x4C));
+        int      fresh = (last_ptr == 0xFFFF) || (ptr != (uint16_t) (last_ptr + 4));
+        if (fresh)
+            pclog("[RL] NEWTABLE ptr=%04X end=%04X len=%d baseA=%04X baseB=%04X\n", ptr, endp, (int) (endp - ptr), pcx_peekw(ds + (uint16_t) (BP - 0x6A)), pcx_peekw(ds + (uint16_t) (BP - 0x6C)));
+        if (fresh && (tables < 20) && (endp > ptr) && ((endp - ptr) <= 0x3000)) {
+            FILE *f;
+            char  path[64];
+            int   q, len = (int) (endp - ptr);
+            tables++;
+            sprintf(path, "/tmp/reltab_t%02d.bin", tables);
+            f = fopen(path, "wb");
+            if (f) {
+                for (q = 0; q < len; q++)
+                    fputc(pcx_peek(ds + ptr + q), f);
+                fclose(f);
+            }
+            pclog("[RT] table %d ptr=%04X len=%d -> %s\n", tables, ptr, len, path);
+        }
+        last_ptr = ptr;
+        n++;
+    }
+}
+{
+    static int bl = -1, done;
+    static uint16_t rc[16], ri[16];
+    static int rn;
+    if (bl < 0)
+        bl = getenv("PCX_BLOG") ? 1 : 0;
+    if (bl && !done && (inw(0x8000) & 0x0020) && (CS == 0x1000) &&
+        ((uint16_t) cpu_state.pc >= 0x0b00) &&
+        ((uint16_t) cpu_state.pc <= 0x0e00) && rn &&
+        !((rc[(rn - 1) & 15] == 0x1000) &&
+          (ri[(rn - 1) & 15] >= 0x0b00) && (ri[(rn - 1) & 15] <= 0x0e00))) {
+        uint16_t pcs = rc[(rn - 1) & 15], pis = ri[(rn - 1) & 15];
+        int k;
+        done = 1;
+        {
+            uint32_t lin = ((uint32_t) 0x1000 << 4) | ((uint16_t) cpu_state.pc & 0xffff);
+            uint32_t ph  = mem_machine_translate ? mem_machine_translate(lin, 0) : lin;
+
+            pclog("[B2E] pc lin=%05X phys=%05X bytes %02X %02X %02X %02X %02X %02X\n",
+                  lin, ph, mem_readb_phys(ph), mem_readb_phys(ph + 1),
+                  mem_readb_phys(ph + 2), mem_readb_phys(ph + 3),
+                  mem_readb_phys(ph + 4), mem_readb_phys(ph + 5));
+        }
+        pclog("[B2E] caller %04X:%04X bytes %02X %02X %02X %02X %02X %02X "
+              "sp=%04X bp=%04X ax=%04X bx=%04X cx=%04X dx=%04X si=%04X di=%04X\n",
+              pcs, pis, readmemb(pcs, pis), readmemb(pcs, pis + 1),
+              readmemb(pcs, pis + 2), readmemb(pcs, pis + 3),
+              readmemb(pcs, pis + 4), readmemb(pcs, pis + 5),
+              (uint16_t) SP, (uint16_t) BP, AX, BX, CX, DX, SI, DI);
+        for (k = 8; k > 0; k--)
+            pclog("[B2E]   %04X:%04X\n", rc[(rn - k) & 15], ri[(rn - k) & 15]);
+    }
+    if (bl) {
+        rc[rn & 15] = CS;
+        ri[rn & 15] = (uint16_t) cpu_state.pc;
+        rn++;
+    }
+}
 {
     static uint16_t rc[16], ri[16];
     static uint16_t lcs = 0xffff;

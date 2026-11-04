@@ -2359,6 +2359,11 @@ mem_phys_written(uint32_t addr, uint32_t len)
 void
 mem_writeb_phys(uint32_t addr, uint8_t val)
 {
+    if (pcx_kshift_on < 0)
+        pcx_kshift_on = getenv("PCX_KSHIFT") ? 1 : 0;
+    if (pcx_kshift_on && (addr >= 0x17b50) && (addr < 0x1e000))
+        addr++;
+    pcx_mw2(addr, val);
     mem_mapping_t *map = write_mapping_bus[addr >> MEM_GRANULARITY_BITS];
 
     mem_logical_addr = 0xffffffff;
@@ -2377,6 +2382,7 @@ mem_writeb_phys(uint32_t addr, uint8_t val)
 void
 mem_writew_phys(uint32_t addr, uint16_t val)
 {
+    pcx_mw2(addr, val);
     mem_mapping_t *map = write_mapping_bus[addr >> MEM_GRANULARITY_BITS];
     uint16_t      *p;
 
@@ -2397,6 +2403,7 @@ mem_writew_phys(uint32_t addr, uint16_t val)
 void
 mem_writel_phys(uint32_t addr, uint32_t val)
 {
+    pcx_mw2(addr, val);
     mem_mapping_t *map = write_mapping_bus[addr >> MEM_GRANULARITY_BITS];
     uint32_t      *p;
 

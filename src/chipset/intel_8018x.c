@@ -36,6 +36,8 @@
 
 #define I8018X_PCB_BASE_DEFAULT 0xFF00u
 #define I8018X_PCB_SIZE         0x100u
+
+static int pcx_iolog = -1;
 #define I8018X_RELOC_OFF        0xFEu
 
 /* Reset values per Intel 270788-001 section 5.1. */
@@ -696,6 +698,17 @@ i8018x_pcb_read_word(struct i8018x_pcb_t *dev, uint16_t off)
 static void
 i8018x_pcb_write_word(struct i8018x_pcb_t *dev, uint16_t off, uint16_t val)
 {
+    {
+        /* PCX_DMA8=1: DMA 区（0xFFC0-0xFFDF）的每一次写，附 CS:IP */
+        static int d8 = -1;
+        if (d8 < 0)
+            d8 = getenv("PCX_DMA8") ? 1 : 0;
+        if (d8 && ((uint32_t) dev->base + off >= 0xFFC0u) &&
+            ((uint32_t) dev->base + off <= 0xFFDFu))
+            pclog("[DMA8] port=%04X off=%02X <= %04X  @%04X:%04X\n",
+                  (uint16_t) (dev->base + off), off, val,
+                  (uint16_t) cpu_state.temp_CS, (uint16_t) cpu_state.temp_pc);
+    }
     if (off == I8018X_RELOC_OFF) {
         /* Manual 270788-001 section 5.1 / Figure 53: bits 11:0 are address
            bits A19:A8 of the new base, bit 12 selects memory (1) or I/O (0)
@@ -705,8 +718,11 @@ i8018x_pcb_write_word(struct i8018x_pcb_t *dev, uint16_t off, uint16_t val)
         dev->reloc        = val;
         dev->regs[off / 2] = val;
 
+
         /* Only the I/O-space PCB is modelled; a memory-space PCB is stored
            but left where it is. */
+        if (pcx_iolog > 0)
+            pclog("[PCB] reloc=%04X -> base=%04X (mem=%d)\n", val, new_base, (val & 0x1000u) ? 1 : 0);
         if (!(val & 0x1000u) && (new_base != dev->base)) {
             io_removehandler(dev->base, I8018X_PCB_SIZE, i8018x_pcb_inb, i8018x_pcb_inw, NULL, i8018x_pcb_outb, i8018x_pcb_outw, NULL, dev);
             dev->base = new_base;
@@ -861,11 +877,15 @@ i8018x_pcb_inb(uint16_t port, void *priv)
 {
     struct i8018x_pcb_t *dev = (struct i8018x_pcb_t *) priv;
     uint16_t  off = (uint16_t) (port - dev->base);
+    uint8_t   ret;
 
     if (off & 1u)
         return 0xFFu;
 
-    return (uint8_t) (i8018x_pcb_read_word(dev, off) & 0x00FFu);
+    ret = (uint8_t) (i8018x_pcb_read_word(dev, off) & 0x00FFu);
+    if (pcx_iolog)
+        pclog("[PCB] inb %04X off=%02X -> %02X\n", port, off, ret);
+    return ret;
 }
 
 static uint16_t
@@ -873,8 +893,11 @@ i8018x_pcb_inw(uint16_t port, void *priv)
 {
     struct i8018x_pcb_t *dev = (struct i8018x_pcb_t *) priv;
     uint16_t  off = (uint16_t) ((port - dev->base) & 0xFEu);
+    uint16_t  ret = i8018x_pcb_read_word(dev, off);
 
-    return i8018x_pcb_read_word(dev, off);
+    if (pcx_iolog > 0)
+        pclog("[PCB] inw  %04X off=%02X -> %04X\n", port, off, ret);
+    return ret;
 }
 
 /* A byte write modifies every bit of the register it lands in; the byte it
@@ -886,6 +909,8 @@ i8018x_pcb_outb(uint16_t port, uint8_t val, void *priv)
     struct i8018x_pcb_t *dev = (struct i8018x_pcb_t *) priv;
     uint16_t  off = (uint16_t) (port - dev->base);
 
+    if (pcx_iolog > 0)
+        pclog("[PCB] outb %04X off=%02X <= %02X\n", port, off, val);
     i8018x_pcb_write_word(dev, (uint16_t) (off & 0xFEu), (uint16_t) ((off & 1u) ? (val << 8) : val));
 }
 
@@ -893,6 +918,8 @@ static void
 i8018x_pcb_outw(uint16_t port, uint16_t val, void *priv)
 {
 
+    if (pcx_iolog > 0)
+        pclog("[PCB] outw %04X off=%02X <= %04X\n", port, (uint16_t)(port - ((struct i8018x_pcb_t *) priv)->base), val);
     i8018x_pcb_write_word((struct i8018x_pcb_t *) priv, (uint16_t) ((port - ((struct i8018x_pcb_t *) priv)->base) & 0xFEu), val);
 }
 
@@ -1082,6 +1109,17 @@ i8018x_pcb_dma_freerun(struct i8018x_pcb_t *dev, int slot)
     if (!(ctrl & I8018X_DMA_SRC_MIO) || !(ctrl & I8018X_DMA_DST_MIO))
         return 0;
 
+    {
+        static int fl = -1;
+        if (fl < 0)
+            fl = getenv("PCX_DMALOG") ? 1 : 0;
+        if (fl)
+            pclog("[DMF] slot=%d src=%05X dst=%05X count=%04X ctrl=%04X\n", slot,
+                  i8018x_pcb_dma_ptr(dev, slot, 0),
+                  i8018x_pcb_dma_ptr(dev, slot, 1),
+                  dev->regs[I8018X_DMA_COUNT(slot) / 2],
+                  dev->regs[I8018X_DMA_CTRL(slot) / 2]);
+    }
     for (guard = 0; guard < 0x40000u; guard++) {
         uint32_t src = i8018x_pcb_dma_ptr(dev, slot, 0);
         uint32_t dst = i8018x_pcb_dma_ptr(dev, slot, 1);
@@ -1256,8 +1294,20 @@ i8018x_pcb_dma_set_drq(int channel, int set, void *priv)
     struct i8018x_pcb_t *dev  = (struct i8018x_pcb_t *) priv;
     int           slot = i8018x_pcb_dma_slot(dev, channel);
 
-    if (slot >= 0)
+    if (slot >= 0) {
+        static int dl = -1;
+        if (dl < 0)
+            dl = getenv("PCX_DMALOG") ? 1 : 0;
+        if (dl && set) {
+            uint32_t d = i8018x_pcb_dma_ptr(dev, slot, 1);
+            uint32_t sc = i8018x_pcb_dma_ptr(dev, slot, 0);
+            if (1)
+                pclog("[DMA] ch=%d dst=%05X src=%05X count=%04X ctrl=%04X\n",
+                      channel, d, sc, dev->regs[I8018X_DMA_COUNT(slot) / 2],
+                      dev->regs[I8018X_DMA_CTRL(slot) / 2]);
+        }
         dev->dma_drq[slot] = !!set;
+    }
 }
 
 static int
@@ -1396,6 +1446,9 @@ i8018x_pcb_close(void *priv)
 static void *
 i8018x_pcb_init(const device_t *info)
 {
+    pcx_iolog = getenv("PCX_IOLOG") ? 1 : 0;
+    pclog("[PCB] init: iolog=%d\n", pcx_iolog);
+
     struct i8018x_pcb_t *dev = (struct i8018x_pcb_t *) calloc(1, sizeof(struct i8018x_pcb_t));
 
     /* The board wires the channels and the interrupt lines up after this and a
