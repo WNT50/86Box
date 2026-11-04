@@ -312,6 +312,35 @@ pcx_video_read(uint16_t addr, void *priv)
 }
 
 
+/* PCX_TERMDUMP=1: print the terminal page as plain text.  The console text
+   only exists here -- the board draws it itself and keeps no copy in the host's
+   memory space. */
+static void
+pcx_term_dump(pcx_video_t *dev)
+{
+    static int      n;
+    static uint32_t last;
+    int             row, col;
+    char            line[PCX_TERM_COLS + 1];
+    uint32_t        now = plat_get_ticks();
+
+    if ((n >= 6) || (getenv("PCX_TERMDUMP") == NULL) || (now < 4600u) ||
+        ((now - last) < 250u))
+        return;
+    last = now;
+
+    n++;
+    pclog("[TERM] --- page %d, t=%u ---\n", n, now);
+    for (row = 0; row < PCX_TERM_ROWS; row++) {
+        for (col = 0; col < PCX_TERM_COLS; col++) {
+            char c = (char) (dev->term.cells[row][col] & 0x7f);
+            line[col] = ((c < 0x20) || (c == 0x7f)) ? ' ' : c;
+        }
+        line[PCX_TERM_COLS] = 0;
+        pclog("[TERM] %s\n", line);
+    }
+}
+
 static void
 pcx_video_write(uint16_t addr, uint8_t val, void *priv)
 {
@@ -372,6 +401,7 @@ pcx_video_write(uint16_t addr, uint8_t val, void *priv)
             dev->cmd_left--;
         } else {
             pcx_term_write(&dev->term, val);
+            pcx_term_dump(dev);
             dev->vram_dirty = 1;   /* the page changed, rescan it */
             dev->src = 1;
             /* The 8031 sees the same stream and answers queries that need one. */
