@@ -110,8 +110,7 @@
 
 typedef struct pcx_t {
     mem_mapping_t ram_map;   /* RAM from 640 KB up, when that much is fitted */
-    mem_mapping_t hole_map;  /* undecoded space below the video window */
-    mem_mapping_t hole_map2; /* undecoded space between the video window and the BIOS */
+    mem_mapping_t hole_map;  /* undecoded space above the fitted RAM */
     rom_t         bios;
 
     uint8_t stat;    /* 0xf840: error/latch byte, write-1-to-clear */
@@ -741,41 +740,20 @@ machine_pcx_init_ex(const machine_t *model)
                             NULL, MEM_MAPPING_INTERNAL, NULL);
         }
 
-        /* RAM above the fitted size, up to the video window.  Its state has to
+        /* RAM above the fitted size, up to the BIOS.  Its state has to
            be opened here too: the POST sizes the memory by writing to each
            64 KB block and waiting for the bus timeout, so a block that is not
            marked internal swallows the write instead of raising the NMI, the
            walk runs on to A0000h and every board reports 640 KB. */
-        if (ram_limit < PCX_VRAM_BASE) {
-            mem_set_mem_state_both(ram_limit, PCX_VRAM_BASE - ram_limit,
+        if (ram_limit < PCX_GRAPH_TOP) {
+            mem_set_mem_state_both(ram_limit, PCX_GRAPH_TOP - ram_limit,
                                    MEM_READ_INTERNAL | MEM_WRITE_INTERNAL);
-            mem_mapping_add(&pcx.hole_map, ram_limit, PCX_VRAM_BASE - ram_limit,
+            mem_mapping_add(&pcx.hole_map, ram_limit, PCX_GRAPH_TOP - ram_limit,
                             pcx_nmi_readb, pcx_nmi_readw, pcx_nmi_readl,
                             pcx_nmi_writeb, pcx_nmi_writew, pcx_nmi_writel,
                             NULL, MEM_MAPPING_INTERNAL | MEM_MAPPING_CPU_ONLY, NULL);
         }
 
-        /* Between the video window and the BIOS.  PCX_NOVRAM=1 takes the
-           video window away as well (MAME's PC-X has none: the character and
-           attribute RAM live inside the 8031's own space), so the whole
-           0xF0000-0xFBFFF span then answers with NMI, the way MAME's
-           fall-through handler does. */
-        {
-        uint32_t h2_lo = (getenv("PCX_NOVRAM") != NULL) ? PCX_VRAM_BASE
-                                                        : (PCX_VRAM_BASE + PCX_VRAM_SIZE);
-        /* Fitted RAM wins: with a full 1 MB the 16 KB above the video window
-           is memory, and making it an NMI hole cut the top off the machine
-           (SINIX touched 0xF8000 and took a bus timeout). */
-        if (h2_lo < ram_limit)
-            h2_lo = ram_limit;
-        if (h2_lo < PCX_GRAPH_TOP) {
-            mem_mapping_add(&pcx.hole_map2, h2_lo,
-                            PCX_GRAPH_TOP - h2_lo,
-                            pcx_nmi_readb, pcx_nmi_readw, pcx_nmi_readl,
-                            pcx_nmi_writeb, pcx_nmi_writew, pcx_nmi_writel,
-                            NULL, MEM_MAPPING_INTERNAL | MEM_MAPPING_CPU_ONLY, NULL);
-        }
-        }
     }
 
     /* Two 8259s on separate 80186 interrupt inputs (pic.c helper). */
