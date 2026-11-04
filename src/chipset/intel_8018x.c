@@ -38,6 +38,13 @@
 #define I8018X_PCB_SIZE         0x100u
 
 static int pcx_iolog = -1;
+
+static void
+pcx_iolog_init(void)
+{
+    if (pcx_iolog <= 0)
+        pcx_iolog = getenv("PCX_PCBLOG") ? 1 : 0;
+}
 #define I8018X_RELOC_OFF        0xFEu
 
 /* Reset values per Intel 270788-001 section 5.1. */
@@ -917,6 +924,7 @@ i8018x_pcb_outb(uint16_t port, uint8_t val, void *priv)
 static void
 i8018x_pcb_outw(uint16_t port, uint16_t val, void *priv)
 {
+    pcx_iolog_init();
 
     if (pcx_iolog > 0)
         pclog("[PCB] outw %04X off=%02X <= %04X\n", port, (uint16_t)(port - ((struct i8018x_pcb_t *) priv)->base), val);

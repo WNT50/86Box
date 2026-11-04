@@ -34,6 +34,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <86box/plat.h>
+#include <86box/keyboard.h>
 #define HAVE_STDARG_H
 #include <86box/86box.h>
 #include <86box/device.h>
@@ -175,6 +177,15 @@ pcx_nmi_enable(void)
 static void
 pcx_bus_timeout(uint32_t addr)
 {
+    if (getenv("PCX_NMILOG") != NULL) {
+        static int n;
+        if (n < 200) {
+            n++;
+            pclog("[NMILOG] t=%u addr=%05X @%04X:%04X ds=%04X\n", plat_get_ticks(),
+                  addr & 0xfffffu, cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc,
+                  cpu_state.seg_ds.seg);
+        }
+    }
     pcx.stat |= PCX_STAT_NMI;
     pcx.err_seg = (uint8_t) (addr >> 12);
     nmi_raise();
@@ -310,6 +321,61 @@ pcx_kbd_usart_write(uint16_t addr, uint8_t val, void *priv)
     if (((addr & 0x0003) == 0x0000) && (val == 0x26) && (CS != 0xfc00))
         serial_endpoint_receive(scn26x1_endpoint(priv), '<');
 
+}
+
+/* The PC-X console has no 8042: the keys go to the 8031 terminal board, which
+   hands them to the host over USART2.  With no key source the shell prints its
+   prompt and sits in HLT forever, so take the scan codes 86Box produces and
+   hand them to the second USART the way the board would. */
+static const char pcx_kbd_plain[0x40] = {
+    [0x02] = '1', [0x03] = '2', [0x04] = '3', [0x05] = '4', [0x06] = '5',
+    [0x07] = '6', [0x08] = '7', [0x09] = '8', [0x0a] = '9', [0x0b] = '0',
+    [0x0c] = '-', [0x0d] = '=', [0x0e] = '\b', [0x0f] = '\t',
+    [0x10] = 'q', [0x11] = 'w', [0x12] = 'e', [0x13] = 'r', [0x14] = 't',
+    [0x15] = 'y', [0x16] = 'u', [0x17] = 'i', [0x18] = 'o', [0x19] = 'p',
+    [0x1a] = '[', [0x1b] = ']', [0x1c] = '\r',
+    [0x1e] = 'a', [0x1f] = 's', [0x20] = 'd', [0x21] = 'f', [0x22] = 'g',
+    [0x23] = 'h', [0x24] = 'j', [0x25] = 'k', [0x26] = 'l', [0x27] = ';',
+    [0x28] = '\'', [0x29] = '`', [0x2b] = '\\',
+    [0x2c] = 'z', [0x2d] = 'x', [0x2e] = 'c', [0x2f] = 'v', [0x30] = 'b',
+    [0x31] = 'n', [0x32] = 'm', [0x33] = ',', [0x34] = '.', [0x35] = '/',
+    [0x39] = ' '
+};
+
+static const char pcx_kbd_shifted[0x40] = {
+    [0x02] = '!', [0x03] = '@', [0x04] = '#', [0x05] = '$', [0x06] = '%',
+    [0x07] = '^', [0x08] = '&', [0x09] = '*', [0x0a] = '(', [0x0b] = ')',
+    [0x0c] = '_', [0x0d] = '+',
+    [0x1a] = '{', [0x1b] = '}', [0x27] = ':', [0x28] = '"', [0x29] = '~',
+    [0x2b] = '|', [0x33] = '<', [0x34] = '>', [0x35] = '?'
+};
+
+static int pcx_kbd_shift;
+
+static void
+pcx_kbd_host(uint16_t scan, int down, UNUSED(void *priv))
+{
+    uint8_t sc = (uint8_t) (scan & 0xff);
+    char    ch;
+
+    if (!down) {
+        if ((sc == 0x2a) || (sc == 0x36))
+            pcx_kbd_shift = 0;
+        return;
+    }
+
+    if ((sc == 0x2a) || (sc == 0x36)) {
+        pcx_kbd_shift = 1;
+        return;
+    }
+
+    ch = pcx_kbd_shift ? pcx_kbd_shifted[sc & 0x3f] : pcx_kbd_plain[sc & 0x3f];
+    if (getenv("PCX_KBDLOG") != NULL)
+        pclog("[KBD] sc=%02X ch=%02X\n", sc, (uint8_t) ch);
+    if (ch == 0)
+        return;
+
+    serial_endpoint_receive(scn26x1_endpoint(pcx.usart[1]), (uint8_t) ch);
 }
 
 
@@ -753,9 +819,12 @@ machine_pcx_init_ex(const machine_t *model)
     io_sethandler(0xfbbe, 0x0001, pcx_io_hole_read8, pcx_io_hole_read16, NULL,
                   pcx_io_hole_write8, pcx_io_hole_write16, NULL, NULL);
 
-    /* probe: 80186 on-chip peripherals */
-    io_sethandler(0xff00, 0x0020, pcx_i186_logr, pcx_i186_logr16, NULL,
-                  pcx_i186_logw, pcx_i186_logw16, NULL, NULL);
+    /* Probe: 80186 on-chip peripherals.  Only install it when asked for -- the
+       handlers above shadow the PCB's own DMA block (0xFF00-0xFF1F) and would
+       swallow every DMA register write the driver makes. */
+    if (getenv("PCX_I186") != NULL)
+        io_sethandler(0xff00, 0x0020, pcx_i186_logr, pcx_i186_logr16, NULL,
+                      pcx_i186_logw, pcx_i186_logw16, NULL, NULL);
 
     io_sethandler(PCX_STAT_PORT, 0x0001, pcx_stat_read, NULL, NULL,
                   pcx_stat_write, NULL, NULL, NULL);
@@ -837,6 +906,7 @@ machine_pcx_init_ex(const machine_t *model)
 
     pcx.usart[1] = device_add_inst_params(&scn2661b_device, 2, (void *) (intptr_t) SERIAL_PORT_NONE); /* no connector */
     scn26x1_set_irq(pcx.usart[1], 1 << 2);
+    keyboard_set_input_handler(pcx_kbd_host, NULL);
     /* On the PC-X the second USART is the line the keyboard hangs off; on the
        PC-D that job belongs to the 8741 on the video board, so the part is a
        plain hidden USART there. */
