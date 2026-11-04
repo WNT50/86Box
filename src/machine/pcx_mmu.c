@@ -82,7 +82,7 @@
 #define PCX_MMU_IOOFF    0x0a00                    /* 0x8a00 read and all I/O is trapped */
 #define PCX_MMU_PAGES    1024                      /* 32 banks x 32 slots */
 #define PCX_MMU_PGSIZE   0x400                     /* 1 KB */
-#define PCX_MMU_WINDOW   0x100000                  /* the card sits under the whole 1 MB */
+#define PCX_MMU_WINDOW   0x080000                  /* MAME translates 0x00000-0x7ffff only */
 
 typedef struct {
     uint16_t ctl;
@@ -91,8 +91,6 @@ typedef struct {
     int      type;
     int      ack;                                  /* system call latched */
     int      fpend;                                /* protection fault latched */
-    int      iotrap;                               /* 0x8a00 trap raised the nmi */
-    int      ioguard;                              /* 0x8a00 read: I/O is trapped */
     uint32_t fault;                                /* last faulted address */
 } pcx_mmu_t;
 
@@ -101,9 +99,7 @@ static pcx_mmu_t pcx_mmu;
 /* Bit 4 / bit 5 enforcement.  Off by default: the model's table content still
    loses the loader's own map to its self test, so enforcing now only moves the
    failure.  Set PCX_PROT=1 to enable it (see the notes, section 250). */
-static int pcx_mmu_prot = -1;
 static int pcx_mmu_encs = -1;
-static int pcx_mmu_absf  = -1;
 
 /* Addresses this machine does not decode at all (PC-X: 0x80000-0xFBFFF, the
    region between the RAM behind the MMU and the ROM).  MAME models it as a
@@ -143,34 +139,6 @@ static uint32_t pcx_mmu_ram_mask = 0x000fffffu;
    0xfe35e-0xfe36e). */
 void (*pcx_mmu_nmi_status)(uint8_t bits) = NULL;
 
-static int
-pcx_mmu_io_guard(UNUSED(uint16_t port), UNUSED(uint8_t write))
-{
-    if (!pcx_mmu.ioguard)
-        return 0;
-
-    if (!pcx_mmu.iotrap) {
-        pcx_mmu.iotrap = 1;
-        pcx_mmu.fault = PCX_MMU_BASE + PCX_MMU_IOOFF;
-        /* The handler the POST installs looks at the status byte before it does
-           anything else: with no bit set it treats the interrupt as a debug
-           trap and drops into the ROM monitor (v3 BIOS 0xfe361-0xfe373, the
-           handler it builds at 0x879).  The trap reports as 0x08 -- the "not a
-           debug trap" line -- and leaves the time-out bit clear, which is the
-           combination the test then accepts. */
-        if (pcx_mmu_nmi_status != NULL)
-            pcx_mmu_nmi_status(0x08);
-        nmi_raise();
-    }
-
-    /* One refused cycle, then the line is open again: the POST arms the trap,
-       touches one port and expects its NMI handler -- which does I/O itself --
-       to have run (v3 BIOS 0xfe35e-0xfe36e). */
-    pcx_mmu.ioguard = 0;
-    io_guard        = NULL;
-
-    return 1;
-}
 
 static void
 pcx_mmu_cs_load(void)
@@ -178,17 +146,6 @@ pcx_mmu_cs_load(void)
     pcx_mmu.defer = 0;
 }
 
-static int
-pcx_mmu_abs(void)
-{
-    if (pcx_mmu_absf < 0) {
-        const char *env = getenv("PCX_ABS_NMI");
-
-        pcx_mmu_absf = (env && (env[0] == '1')) ? 1 : 0;
-    }
-
-    return pcx_mmu_absf;
-}
 
 static int
 pcx_mmu_def_cs(void)
@@ -272,6 +229,24 @@ pcx_mmu_slot(uint16_t port)
 static uint32_t
 pcx_mmu_translate(uint32_t addr, int rw)
 {
+    /* Whoever writes the module's far-call slot decides where the kernel's
+       dispatch lands; log the writer for the slot bytes only. */
+    if (rw && (addr >= 0x1060u) && (addr < 0x1064u)) {
+        static int n;
+        if (n < 200) {
+            n++;
+            int      ix = pcx_mmu_page_index(addr);
+            uint16_t en = pcx_mmu.pg[ix];
+            uint16_t uv = (uint16_t) ((en << 4) | (en >> 12));
+            pclog("[SLOT] w %05X idx=%03X entry=%04X -> phys=%05X @%04X:%04X ctl=%04X ds=%04X es=%04X ax=%04X bx=%04X cx=%04X si=%04X di=%04X\n",
+                  addr & 0xfffffu, ix, en,
+                  (((uint32_t) (uv & 0xff00u)) | (addr & 0x7ffu)) & pcx_mmu_ram_mask,
+                  cpu_state.seg_cs.seg, (uint16_t) cpu_state.oldpc,
+                  pcx_mmu.ctl, cpu_state.seg_ds, cpu_state.seg_es.seg,
+                  cpu_state.regs[0].w, cpu_state.regs[3].w, cpu_state.regs[1].w,
+                  cpu_state.regs[6].w, cpu_state.regs[7].w);
+        }
+    }
     uint16_t entry;
     uint32_t phys;
 
@@ -283,22 +258,20 @@ pcx_mmu_translate(uint32_t addr, int rw)
         return 0xffffffffu;
     }
 
-    if (pcx_mmu_prot < 0) {
-        const char *env = getenv("PCX_PROT");
-
-        pcx_mmu_prot = (env && (env[0] == '1')) ? 1 : 0;
-    }
 
     if ((pcx_mmu.type == PCX_MMU_NONE) || !(pcx_mmu.ctl & 0x0020) ||
         (addr >= PCX_MMU_WINDOW))
         return addr;
 
-    /* PCX_NODEFER=1: 立即生效（MAME 的模型），用来对照 defer 的影响。 */
+    /* MAME applies a new mapping immediately (mem_r reads the table on every
+       access); the deferred mode is kept behind PCX_DEFER=1 because the
+       kernel's "patch the return frame and lret into the paged view" trick
+       relies on the old behaviour. */
     {
-        static int nd = -1;
-        if (nd < 0)
-            nd = getenv("PCX_NODEFER") ? 1 : 0;
-        if (!nd && pcx_mmu.defer)
+        static int df = -1;
+        if (df < 0)
+            df = getenv("PCX_DEFER") ? 1 : 0;
+        if (df && pcx_mmu.defer)
             return addr;
     }
 
@@ -331,32 +304,75 @@ pcx_mmu_translate(uint32_t addr, int rw)
         }
     }
 
-    if (entry == 0x0000)
-        return addr;
+    /* Null entry, exactly as the card does it (MAME pcd.cpp mem_r/mem_w): a
+       read needs bit 1, a write needs bit 0, and without it the access never
+       reaches memory -- the card pulses NMI and the firmware reports the
+       segment.  PCX_NULLPASS=1 restores the old "let it through" behaviour so
+       the two can be compared. */
+    {
+        static int np = -1;
 
-    /* An entry without the read allow bit is a null entry: the card does not
-       let the access reach memory, it raises the non maskable interrupt so the
-       firmware can report the segment.  PCX_ABS_NMI=1 to model that instead of
-       letting the access through. */
-    if (pcx_mmu_abs() && !(entry & 0x0002)) {
-        pcx_mmu.fault = addr;
-        pcx_mmu.fpend = 1;
-        nmi_raise();
-        return 0xffffffffu;
-    }
+        if (np < 0)
+            np = getenv("PCX_NULLPASS") ? 1 : 0;
 
-    /* Protection, as the card does it: bit 5 is the present bit (an absent page
-       faults on any access) and bit 4 is the write allow bit (a write to a page
-       without it faults).  Neither is an x86 exception -- the card raises IRQ0
-       of the first controller and reports the status in bits 7-6 of the entry
-       register for the handler at INT 0x20, and the access does not take
-       effect. */
-    if (pcx_mmu_prot) {
-        if (!(entry & (rw ? 0x0002 : 0x0001))) {
+        if (!np && !(entry & (rw ? 0x0001u : 0x0002u))) {
+            static int nn;
+
+            if (nn < 12) {
+                nn++;
+                pclog("[NUL] addr=%05X idx=%03X entry=%04X rw=%d ctl=%02X ds=%04X @%04X:%04X\n",
+                      addr & 0xfffffu, pcx_mmu_page_index(addr), entry, rw,
+                      pcx_mmu.ctl, cpu_state.seg_ds, cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
+            }
             pcx_mmu.fault = addr;
             pcx_mmu.fpend = 1;
-            picint(0x0001);
+            nmi_raise();
             return 0xffffffffu;
+        }
+    }
+
+    /* MAME moves the 9 KB kernel block from 0x0DBE0 to 0x103E0 between 20 s and
+       40 s; log the first write per 256-byte block of that destination. */
+    if (rw && (addr >= 0x103E0u) && (addr < 0x12800u)) {
+        static int mv;
+        static uint8_t seen[0x40];
+        uint32_t blk = (addr - 0x103E0u) >> 8;
+
+        if (blk < sizeof(seen) && !seen[blk]) {
+            seen[blk] = 1;
+            if (mv < 48) {
+                mv++;
+                pclog("[MV] w %05X @%04X:%04X ctl=%04X\n", addr & 0xfffffu,
+                      cpu_state.seg_cs.seg, (uint16_t) cpu_state.oldpc, pcx_mmu.ctl);
+            }
+        }
+    }
+
+    /* Kernel code page (phys 0x0D100-0x0D300) being written means something
+       is trampling the code the kernel is running. */
+    if (rw && (addr >= 0x1F900u) && (addr < 0x1FA80u)) {
+        static int kn;
+        if (kn < 24) {
+            kn++;
+            pclog("[KWR] lin=%05X phys=%05X entry=%04X @%04X:%04X ax=%04X di=%04X cx=%04X\n",
+                  addr & 0xfffffu,
+                  (((uint32_t) ((uint16_t) ((pcx_mmu.pg[pcx_mmu_page_index(addr)] << 4) |
+                                            (pcx_mmu.pg[pcx_mmu_page_index(addr)] >> 12)) & 0xff00u)) |
+                   (addr & 0x7ffu)) & pcx_mmu_ram_mask,
+                  pcx_mmu.pg[pcx_mmu_page_index(addr)],
+                  cpu_state.seg_cs.seg, (uint16_t) cpu_state.oldpc,
+                  cpu_state.regs[0].w, cpu_state.regs[7].w, cpu_state.regs[1].w);
+        }
+    }
+
+    /* Is the per-task copy of the module (0x39300 for task 1) ever written? */
+    if (rw && (addr >= 0x39000u) && (addr < 0x39500u)) {
+        static int cpn;
+        if (cpn < 30) {
+            cpn++;
+            pclog("[CPY] w %05X entry=%04X @%04X:%04X\n", addr & 0xfffffu,
+                  pcx_mmu.pg[pcx_mmu_page_index(addr)],
+                  cpu_state.seg_cs.seg, (uint16_t) cpu_state.oldpc);
         }
     }
 
@@ -415,7 +431,22 @@ pcx_mmu_translate(uint32_t addr, int rw)
                即 bits 15..8 = 物理地址 bits 15..8，低 6 位是标志（0x30 = 存在+可写）。*/
             uint16_t val  = (uint16_t) ((pcx_mmu.pg[pcx_mmu_page_index(addr)] << 4) |
                                         (pcx_mmu.pg[pcx_mmu_page_index(addr)] >> 12));
-            phys = ((uint32_t) (val & 0xff00u)) | (addr & 0x7ffu);
+
+            /* PCX_MAMEPHYS=1: MAME's formula verbatim, in its own word
+               addressing: phys = ((reg << 3) & 0x7fc00) | (offset & 0x3ff),
+               then back to a byte address.  Kept as a switch because the
+               identity entries carry flags in their low bits, which this
+               formula does not mask away. */
+            static int mp = -1;
+            if (mp < 0)
+                mp = getenv("PCX_MAMEPHYS") ? 1 : 0;
+            if (mp) {
+                uint32_t w = ((((uint32_t) pcx_mmu.pg[pcx_mmu_page_index(addr)] << 3) & 0x7fc00u) |
+                              ((addr >> 1) & 0x3ffu));
+                phys = (w << 1) | (addr & 1u);
+            } else {
+                phys = ((uint32_t) (val & 0xff00u)) | (addr & 0x7ffu);
+            }
         } else {
             phys = ((uint32_t) (entry << 3) & 0x7fc00u) | (addr & (PCX_MMU_PGSIZE - 1));
         }
@@ -486,20 +517,11 @@ pcx_mmu_inw(uint16_t port, UNUSED(void *priv))
     if (off == PCX_MMU_CTL)
         return pcx_mmu.ctl;
 
-    if (off == PCX_MMU_IOOFF) {
-        /* Reading the trap port arms it: from here on every I/O cycle is kept
-           from its handler and the first one raises NMI. */
-        pcx_mmu.ioguard = 1;
-        io_guard        = pcx_mmu_io_guard;
-        return 0;
-    }
-
     if (off == PCX_MMU_ACK) {
         /* Reading the acknowledge port drops the request and clears whichever
            fault latched it. */
         pcx_mmu.ack    = 0;
         pcx_mmu.fpend  = 0;
-        pcx_mmu.iotrap = 0;
         picintc(0x0001);
         return 0;
     }
@@ -523,8 +545,6 @@ pcx_mmu_inw(uint16_t port, UNUSED(void *priv))
                 return data | 0xc0;   /* bit 7 system call, bit 6 pending */
             if (pcx_mmu.fpend)
                 return data | 0x40;   /* bit 6: a fault is latched */
-            if (pcx_mmu.iotrap)
-                return data | 0x80;   /* the 0x8a00 trap, not a fault */
         }
 
         {
@@ -576,7 +596,7 @@ pcx_mmu_outw(uint16_t port, uint16_t val, UNUSED(void *priv))
                       pcx_mmu.ctl, val & 0x003f, pcx_mmu.defer,
                       cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
         }
-        pcx_mmu.ctl = val & 0x003f;
+        pcx_mmu.ctl = val;
         /* The mapping the register installs applies from the next instruction
            stream on: the routine that flips the bit keeps running out of the
            prefetch queue, which is why it can patch its own return frame and
@@ -631,6 +651,27 @@ pcx_mmu_outw(uint16_t port, uint16_t val, UNUSED(void *priv))
     }
 }
 
+
+/* Debug helper: read a byte through the table without the null-entry NMI, so a
+   probe can look at memory the guest is about to touch. */
+uint8_t
+pcx_mmu_peek8(uint32_t addr)
+{
+    uint16_t e;
+    uint32_t ph;
+
+    if ((pcx_mmu.type == PCX_MMU_NONE) || !(pcx_mmu.ctl & 0x0020) ||
+        (addr >= PCX_MMU_WINDOW))
+        return mem_readb_phys(addr);
+
+    e = pcx_mmu.pg[pcx_mmu_page_index(addr)];
+    if (e == 0x0000)
+        return 0xff;
+
+    ph = ((uint32_t) ((uint16_t) ((e << 4) | (e >> 12)) & 0xff00u)) | (addr & 0x7ffu);
+    return mem_readb_phys(ph & pcx_mmu_ram_mask);
+}
+
 uint16_t
 pcx_mmu_pg_get(int idx)
 {
@@ -646,10 +687,7 @@ pcx_mmu_reset(void)
     pcx_mmu.defer = 0;
     pcx_mmu.ack   = 0;
     pcx_mmu.fpend  = 0;
-    pcx_mmu.iotrap = 0;
     pcx_mmu.fault  = 0;
-    pcx_mmu.ioguard = 0;
-    io_guard        = NULL;
     memset(pcx_mmu.pg, 0x00, sizeof(pcx_mmu.pg));
 }
 
@@ -703,7 +741,6 @@ pcx_mmu_close(void)
 {
     mem_machine_translate = NULL;
     mem_machine_cs_load   = NULL;
-    io_guard              = NULL;
 
     if (pcx_mmu.type == PCX_MMU_NONE)
         return;

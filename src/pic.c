@@ -1323,6 +1323,33 @@ picint_lines(uint16_t num, int level, int set, uint8_t *irq_state, int to_ioapic
 void
 picint_common(uint16_t num, int level, int set, uint8_t *irq_state)
 {
+    /* PCX_IRQ=1: what the machine actually feeds the 8259.  IRQ0 is counted
+       (every 2000th line printed), every other channel is printed the first
+       15 times - enough to see whether the scheduler is being woken. */
+    {
+        static int on = -1, n0, nn;
+
+        if (on < 0)
+            on = getenv("PCX_IRQ") ? 1 : 0;
+        if (on && set) {
+            int b;
+
+            for (b = 0; b < 16; b++) {
+                if (!(num & (1u << b)))
+                    continue;
+                if (b == 0) {
+                    if ((++n0 % 2000) == 0)
+                        pclog("[IRQ] irq0 #%d @%04X:%04X\n", n0,
+                              cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
+                } else if (nn < 15) {
+                    nn++;
+                    pclog("[IRQ] irq%d assert @%04X:%04X\n", b,
+                          cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
+                }
+            }
+        }
+    }
+
     picint_lines(num, level, set, irq_state, 1);
 }
 

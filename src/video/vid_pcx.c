@@ -202,6 +202,7 @@ pcx_video_poll(void *priv)
            it (0xf9a0 bit 0 = 0), even though the board itself is character
            only.  What the PC-X does not have is the PC-D's bitmap page, which
            is why the display below never switches to it. */
+        if (getenv("PCX_NOVRAM") == NULL)
         mem_mapping_add(&dev->vram_mapping, 0x000f0000, 0x00008000,
                         pcx_vram_read, NULL, NULL,
                         pcx_vram_write, NULL, NULL,
@@ -379,6 +380,33 @@ pcx_video_write(uint16_t addr, uint8_t val, void *priv)
     }
 }
 
+static uint8_t pcx_video_read(uint16_t addr, void *priv);
+static void    pcx_video_write(uint16_t addr, uint8_t val, void *priv);
+static void    pcx_vram_sw_write(uint16_t addr, uint8_t val, void *priv);
+
+/* Whole 64-byte window of the video board: only 0x00-0x0f and 0x20 decode,
+   everything else answers an undriven bus, as the device's own map does in
+   MAME (offsets outside its map fall through to unmap_value_high). */
+static uint8_t
+pcx_port_read(uint16_t addr, void *priv)
+{
+    if ((uint16_t) (addr - 0xf980) < 0x10)
+        return pcx_video_read(addr, priv);
+
+    return 0xff;
+}
+
+static void
+pcx_port_write(uint16_t addr, uint8_t val, void *priv)
+{
+    uint16_t off = (uint16_t) (addr - 0xf980);
+
+    if (off < 0x10)
+        pcx_video_write(addr, val, priv);
+    else if (off == 0x20)
+        pcx_vram_sw_write(addr, val, priv);
+}
+
 static void
 pcx_vram_sw_write(UNUSED(uint16_t addr), uint8_t val, void *priv)
 {
@@ -480,10 +508,20 @@ pcx_video_init(const device_t *info)
        access.  So it is added from the first scan. */
 
     timer_add(&dev->timer, pcx_video_poll, dev, 1);
-    io_sethandler(0xf980, 0x0010,
-                  pcx_video_read, NULL, NULL, pcx_video_write, NULL, NULL, dev);
-    io_sethandler(0xf9a0, 0x0001,
-                  NULL, NULL, NULL, pcx_vram_sw_write, NULL, NULL, dev);
+    /* MAME's pcx_io hands the whole 0xf980-0xf9bf span to the video board
+       (pcd.cpp:511) and lets the device's own map decide what the gaps answer;
+       the POST walks that window when it builds its device table.  Claim the
+       same 64 bytes here, with the undecoded ones reading as open bus.
+       PCX_PORTS16=1 restores the old 16-byte claim for comparison. */
+    if (getenv("PCX_PORTS16") != NULL) {
+        io_sethandler(0xf980, 0x0010,
+                      pcx_video_read, NULL, NULL, pcx_video_write, NULL, NULL, dev);
+        io_sethandler(0xf9a0, 0x0001,
+                      NULL, NULL, NULL, pcx_vram_sw_write, NULL, NULL, dev);
+    } else {
+        io_sethandler(0xf980, 0x0040,
+                      pcx_port_read, NULL, NULL, pcx_port_write, NULL, NULL, dev);
+    }
 
     return dev;
 }
