@@ -79,6 +79,23 @@ static void wd2791_timer(void *priv);
    300 rpm is 200 ms. */
 #define WD_RECORD_SEARCH_US (200 * 1000)
 
+/* Experiment hook: the driver gives up on a read well before the fixed
+   full-revolution wait this model uses for the record search. */
+static uint64_t
+wd_search_us(void)
+{
+    static uint64_t v;
+    static int      init;
+
+    if (!init) {
+        const char *e = getenv("PCX_SEARCH_US");
+
+        v    = e ? (uint64_t) strtoull(e, NULL, 0) : WD_RECORD_SEARCH_US;
+        init = 1;
+    }
+    return v;
+}
+
 /* Shortest time a command stays BUSY.  Long enough for a polled driver to see
    it, short enough not to slow anything down. */
 #define WD_INSTANT_CMD_US   (200)
@@ -142,15 +159,15 @@ wd2791_update_rate(wd2791_t *dev)
 static uint8_t wd_status(wd2791_t *dev);
 
 static void
-wd_irq_raise(wd2791_t *dev)
+wd_irq_raise(wd2791_t *dev, const char *why)
 {
     if (getenv("PCX_FDCIQ") != NULL) {
         static int n;
         if (n < 400) {
             n++;
-            pclog("[FDCIQ] t=%u cmd=%02X st=%02X state=%d busy=%d intrq=%d bc=%d @%04X:%04X\n", plat_get_ticks(),
-                  dev->command, wd_status(dev), dev->state, dev->busy, dev->intrq, dev->byte_count,
-                  cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
+            pclog("[FDCIQ] t=%u why=%s cmd=%02X st=%02X state=%d busy=%d intrq=%d bc=%d @%04X:%04X\n",
+                  plat_get_ticks(), why, dev->command, wd_status(dev), dev->state, dev->busy,
+                  dev->intrq, dev->byte_count, cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
         }
     }
     dev->intrq = 1;
@@ -174,7 +191,7 @@ wd_finish(wd2791_t *dev)
     dev->drq          = 0;
     dev->done_pending  = 0;
     dev->chain_pending = 0;
-    wd_irq_raise(dev);
+    wd_irq_raise(dev, "finish");
 }
 
 static void
@@ -304,7 +321,7 @@ static void
 wd_chain_next(wd2791_t *dev)
 {
     dev->sector_reg = (uint8_t) (dev->sector_reg + 1);
-    timer_set_delay_u64(&dev->timer, (uint64_t) WD_RECORD_SEARCH_US * TIMER_USEC);
+    timer_set_delay_u64(&dev->timer, wd_search_us() * TIMER_USEC);
     wd_sector_read(dev, dev->sector_reg);
 }
 
@@ -535,7 +552,7 @@ wd_seek_finish(wd2791_t *dev)
         dev->track_reg = (uint8_t) dev->target;
 
     dev->busy  = 0;
-    wd_irq_raise(dev);
+    wd_irq_raise(dev, "type1");
 }
 
 static void
@@ -555,7 +572,7 @@ wd_type1(wd2791_t *dev, uint8_t val)
         dev->status |= WD_S_RNF;
         dev->track_reg = dev->track_reg;
         dev->busy      = 0;
-        wd_irq_raise(dev);
+        wd_irq_raise(dev, "nomedium");
         return;
     }
 
@@ -813,7 +830,7 @@ wd_force_interrupt(wd2791_t *dev, uint8_t val)
     dev->drq   = 0;
 
     if (cond & 0x08)
-        wd_irq_raise(dev);
+        wd_irq_raise(dev, "force");
 }
 
 /* ------------------------------------------------------------------------- */
