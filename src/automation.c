@@ -2029,6 +2029,12 @@ handle_request(char *line)
         sb_printf(&resp, ",\"ms\":%llu,\"frames\":%llu,\"held\":%s,\"paused\":%s,\"ff\":%s,\"w\":%d,\"h\":%d,\"bios_mode\":%d,\"quantum_ms\":%d}",
                   (unsigned long long) emu_ms, (unsigned long long) frame_count, held ? "true" : "false",
                   dopause ? "true" : "false", fast_forward ? "true" : "false", frame_w, frame_h, mode, force_10ms ? 10 : 1);
+    } else if (!strcmp(argv[0], "mouse") && (argc == 3)) {
+        /* mouse <dx> <dy>: synthetic pointer motion for headless tests.  The
+           device models consume the accumulated deltas through
+           mouse_subtract_coords(), so adding here is enough to drive them. */
+        mouse_inject_delta(atoi(argv[1]), atoi(argv[2]));
+        respond_ok_time();
     } else if (!strcmp(argv[0], "hold")) {
         held = 1;
         respond_ok_time();

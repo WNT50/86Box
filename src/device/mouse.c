@@ -419,6 +419,16 @@ mouse_subtract_coords(int *delta_x, int *delta_y, int *o_x, int *o_y,
     mouse_subtract_y(delta_y, o_y, min, max, invert, abs);
 }
 
+void
+mouse_inject_delta(int delta_x, int delta_y)
+{
+    /* Headless test hook: feed synthetic motion into the same accumulators the
+       front end updates, so device models picking it up via
+       mouse_subtract_coords() see it exactly as if the user moved the mouse. */
+    ATOMIC_STORE(mouse_x, ATOMIC_LOAD(mouse_x) + (double) delta_x);
+    ATOMIC_STORE(mouse_y, ATOMIC_LOAD(mouse_y) + (double) delta_y);
+}
+
 int
 mouse_moved(void)
 {

@@ -52,6 +52,7 @@
 
 
 #ifdef __cplusplus
+
 extern "C" {
 #endif
 
@@ -107,6 +108,7 @@ extern void            mouse_subtract_y(int *delta_y, int *o_y, int min, int max
 extern void            mouse_subtract_coords(int *delta_x, int *delta_y, int *o_x, int *o_y,
                                              int min, int max, int invert, int abs);
 extern  int            mouse_moved(void);
+extern void            mouse_inject_delta(int delta_x, int delta_y);
 extern  int            mouse_state_changed(void);
 extern  int            mouse_mbut_changed(void);
 extern void            mouse_scale_fx(double x);
