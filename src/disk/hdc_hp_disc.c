@@ -50,6 +50,7 @@
 #include <86box/86box.h>
 #include <86box/config.h>
 #include <86box/ini.h>
+#include <86box/mem.h>
 #include <86box/device.h>
 #include <86box/io.h>
 #include <86box/mem.h>
@@ -125,11 +126,21 @@ typedef struct hp_disc_t {
     uint64_t packets;
     uint64_t reads;
     uint64_t writes;
+    uint64_t irqs;
 
     pc_timer_t timer;
+    pc_timer_t pc_timer;   /* HP_DISC_PC=<us>：周期性采 CS:IP */
+    int        pc_us;
     uint8_t      shadow[HP_DISC_ROM_SIZE];
     mem_mapping_t mapping;
 } hp_disc_t;
+
+static void
+hp_disc_raise_irq(hp_disc_t *dev)
+{
+    dev->irqs++;
+    picint(1 << dev->irq);
+}
 
 static uint8_t
 hp_disc_rom_read(uint32_t addr, void *priv)
@@ -158,7 +169,7 @@ hp_disc_complete(void *priv)
     if (dev->tracing)
         pclog("hp_disc: command %02x completed, status %02x\n", dev->cmd, dev->status);
 
-    if (!getenv("HP_DISC_NOIRQ")) picint(1 << dev->irq);
+    if (!getenv("HP_DISC_NOIRQ")) hp_disc_raise_irq(dev);
 }
 
 
@@ -170,6 +181,17 @@ hp_disc_complete(void *priv)
    b8      = 0x18（长度字段标签）
    b9..b12 = 长度，32 位大端（字节）
    b13..   = 状态相关尾字                                              */
+/* HP_DISC_PIO：逐次打印 base+0/base+2 上的读写（方向、字节数、当时 phase），
+   用来判定 DISKHP1 的命令/数据方向。 */
+static int
+hp_disc_pio_on(void)
+{
+    static int on = -1;
+    if (on < 0)
+        on = (getenv("HP_DISC_PIO") != NULL) ? 1 : 0;
+    return on;
+}
+
 static void
 hp_disc_parse_packet(hp_disc_t *dev)
 {
@@ -210,12 +232,40 @@ hp_disc_parse_packet(hp_disc_t *dev)
         dev->count = HP_DISC_MAX_SECTORS;
 }
 
+static void
+hp_disc_pc_cb(void *priv)
+{
+    hp_disc_t *dev = (hp_disc_t *) priv;
+    static uint32_t last = 0xffffffff;
+    uint32_t pc = (cpu_state.seg_cs.base << 4) + cpu_state.pc;
+
+    if (pc != last) {
+        last = pc;
+        fprintf(stderr, "PC %05x:%04x fl34=%02x model[ph=%d st=%02x left=%d pos=%u reads=%u irq=%u]\n",
+                cpu_state.seg_cs.base, cpu_state.pc,
+                mem_readb_phys(cpu_state.seg_ds.base + 0x0e34),
+                dev->phase, dev->status, dev->xfer_left, dev->packet_pos,
+                dev->reads, dev->irqs);
+    }
+    timer_set_delay_u64(&dev->pc_timer, (uint64_t) dev->pc_us * TIMER_USEC);
+}
+
 static int
 hp_disc_floppy_media(void)
 {
-    const char *fn = config_get_string(NULL, "fdd_01_fn", "");
+    /* HP_DISC_FORCEA: bit0 = 把引导权交还 BIOS；bit1 = 同时不挂钩 INT 13h */
+    {
+        const char *e = getenv("HP_DISC_FORCEA");
+        if (e != NULL) {
+            int v = atoi(e);
+            return v ? v : 1;
+        }
+    }
 
-    return (fn != NULL) && (fn[0] != '\0');
+    {
+        const char *fn = config_get_string("General", "fdd_01_fn", "");
+        return (fn != NULL) && (fn[0] != '\0');
+    }
 }
 
 static void
@@ -386,7 +436,7 @@ hp_disc_end_out(hp_disc_t *dev)
             pclog("hp_disc: >> IRQ(sector) lba=%06x left=%i\n",
                   dev->lba, dev->xfer_left);
         if (!getenv("HP_DISC_NOIRQ"))
-            picint(1 << dev->irq);
+            hp_disc_raise_irq(dev);
         return;
     }
 
@@ -397,19 +447,23 @@ hp_disc_end_out(hp_disc_t *dev)
     dev->status     = 0xcc;
 
     if (!getenv("HP_DISC_NOIRQ"))
-        picint(1 << dev->irq);
+        hp_disc_raise_irq(dev);
 }
 
 static uint8_t
 hp_disc_in(uint16_t addr, void *priv)
 {
     hp_disc_t *dev = (hp_disc_t *) priv;
+    if (hp_disc_pio_on()) pclog("PIO %04x:%04x inb%i ph=%d pos=%u left=%d\n", cpu_state.seg_cs.base, cpu_state.pc, addr - dev->base, dev->phase, dev->packet_pos, dev->xfer_left);
     int        len;
 
     switch (addr - dev->base) {
         case 0:
-            /* reading the status port acknowledges the interrupt */
-            picintc(1 << dev->irq);
+            /* reading the status port acknowledges the interrupt。
+               HP_DISC_NOACK：不在这里撤销，留给 EOI——驱动在发命令前也会
+               读一次状态（0x2727），那一下会把还没被 CPU 取走的中断撤掉。 */
+            if (!getenv("HP_DISC_NOACK"))
+                picintc(1 << dev->irq);
             if (dev->tracing && (dev->trace_ops > 0)) {
                 dev->trace_ops--;
                 pclog("hp_disc:   in  %02x -> %02x\n", addr - dev->base, dev->status);
@@ -463,6 +517,7 @@ static uint16_t
 hp_disc_inw(uint16_t addr, void *priv)
 {
     hp_disc_t *dev = (hp_disc_t *) priv;
+    if (hp_disc_pio_on()) pclog("PIO %04x:%04x inw%i ph=%d pos=%u left=%d\n", cpu_state.seg_cs.base, cpu_state.pc, addr - dev->base, dev->phase, dev->packet_pos, dev->xfer_left);
     int        len;
 
     if (dev->tracing && (dev->trace_all < 4000)) {
@@ -504,7 +559,7 @@ hp_disc_inw(uint16_t addr, void *priv)
                             pclog("hp_disc: >> IRQ(read) lba=%06x left=%i\n",
                                   dev->lba, dev->xfer_left);
                         if (!getenv("HP_DISC_NOIRQ"))
-                            picint(1 << dev->irq);
+                            hp_disc_raise_irq(dev);
                     } else {
                         dev->phase      = HP_PHASE_IDLE;
                         dev->data_ready = 0;
@@ -539,6 +594,7 @@ static void
 hp_disc_out(uint16_t addr, uint8_t val, void *priv)
 {
     hp_disc_t *dev = (hp_disc_t *) priv;
+    if (hp_disc_pio_on()) pclog("PIO %04x:%04x outb%i <= %02x ph=%d pos=%u left=%d\n", cpu_state.seg_cs.base, cpu_state.pc, addr - dev->base, val, dev->phase, dev->packet_pos, dev->xfer_left);
     int        len;
     uint16_t   shmem_len = 0;
 
@@ -552,7 +608,7 @@ hp_disc_out(uint16_t addr, uint8_t val, void *priv)
             if (dev->tracing) {
                 uint32_t dseg = cpu_state.seg_ds.base;
                 pclog("hp_disc: >CS base=%05x ip=%04x DS st=%02x len=%04x err=%02x blk0=%04x"
-                      " unit=%02x lba=%02x%02x%02x%02x sec=%02x fl=%04x\n",
+                      " unit=%02x lba=%02x%02x%02x%02x sec=%02x fl=%04x irqs=%04x flags=%02x\n",
                       cpu_state.seg_cs.base, cpu_state.pc,
 
                       mem_readb_phys(dseg + 0x210),
@@ -565,7 +621,9 @@ hp_disc_out(uint16_t addr, uint8_t val, void *priv)
                       mem_readb_phys(dseg + 0x230),
                       mem_readb_phys(dseg + 0x231),
                       mem_readb_phys(dseg + 0x232),
-                      mem_readw_phys(dseg + 0x218));
+                      mem_readw_phys(dseg + 0x218),
+                      mem_readw_phys(dseg + 0x1f8),
+                      mem_readb_phys(dseg + 0x34e));
             }
             dev->cmd   = val;
             dev->error = 0;
@@ -619,7 +677,7 @@ hp_disc_out(uint16_t addr, uint8_t val, void *priv)
                         if (dev->tracing)
                             pclog("hp_disc: short command %04x -> 20-byte status\n", sc);
                         if (!getenv("HP_DISC_NOIRQ"))
-                            picint(1 << dev->irq);
+                            hp_disc_raise_irq(dev);
                         break;
                     }
                     if (dev->tracing) {
@@ -652,6 +710,8 @@ hp_disc_out(uint16_t addr, uint8_t val, void *priv)
                     if (getenv("HP_DISC_BLK")) {
                         uint8_t *b = (uint8_t *) dev->packet;
                         uint32_t dseg2 = cpu_state.seg_ds.base;
+                        fprintf(stderr, " [reads=%u writes=%u status=%02x phase=%d left=%d]",
+                                dev->reads, dev->writes, dev->status, dev->phase, dev->xfer_left);
                         fprintf(stderr, "C1 %06x ip=%04x pp=%i drv_unit=%02x drv_lba=%02x%02x%02x%02x :",
                                 cpu_state.pc, cpu_state.pc, dev->packet_pos,
                                 mem_readb_phys(dseg2 + 0x22d),
@@ -666,7 +726,7 @@ hp_disc_out(uint16_t addr, uint8_t val, void *priv)
                     dev->packets++;
                     dev->status = 0xcc;
                     if (!getenv("HP_DISC_NOIRQ"))
-                        picint(1 << dev->irq);
+                        hp_disc_raise_irq(dev);
                     if (dev->block_ok)
                         hp_disc_arm(dev);  /* 状态仍是 0x4C，驱动 0x2727 能过 */
                     break;
@@ -680,7 +740,7 @@ hp_disc_out(uint16_t addr, uint8_t val, void *priv)
                         dev->buffer_pos = 0;
                         dev->status     = 0xc0;
                         if (!getenv("HP_DISC_NOIRQ"))
-                            picint(1 << dev->irq);
+                            hp_disc_raise_irq(dev);
                         break;
                     }
                     /* 数据阶段：只 arm，方向等第一个数据口访问。
@@ -688,13 +748,13 @@ hp_disc_out(uint16_t addr, uint8_t val, void *priv)
                     if (!dev->block_ok) {
                         dev->status = 0x4c;
                         if (!getenv("HP_DISC_NOIRQ"))
-                            picint(1 << dev->irq);
+                            hp_disc_raise_irq(dev);
                         break;
                     }
                     hp_disc_arm(dev);
                     dev->status = 0xc0;
                     if (!getenv("HP_DISC_NOIRQ"))
-                        picint(1 << dev->irq);
+                        hp_disc_raise_irq(dev);
                     break;
 
                 case HP_DISC_CMD_READ:
@@ -799,6 +859,22 @@ hp_disc_outw(uint16_t addr, uint16_t val, void *priv)
                在暂存指针为 0 时只接受两种首字：0x1020（正常命令块）和
                0xFF0D（2 字节状态请求）。其它一律丢掉，避免 20 个 0 把包边界
                挤掉，导致后面的真块被解析成 lba=0。 */
+            /* ARMED 且还没搬过任何字节时，数据口来的字不可能是搬运起点：
+               DISKHP1 的搬运用例固定 cx=0x100（一个扇区一次）。上一笔读命令
+               收尾后驱动会直接发下一个命令包（0xFF0D 状态查询），若把它当写
+               数据，这笔读就永远收不了尾、包边界也跟着错位（实测 pos 停在
+               14、后续每包只剩 1 字节）。 */
+            if ((dev->phase == HP_PHASE_ARMED) && (dev->wpos == 0) &&
+                (dev->buffer_pos == 0) &&
+                (((val & 0xfff0) == 0x1020) || (val == 0xff0d))) {
+                if (dev->tracing)
+                    pclog("hp_disc: ARMED -> new packet %04x\n", val);
+                dev->phase      = HP_PHASE_IDLE;
+                dev->packet_pos = 0;
+                dev->wpos       = 0;
+                dev->xfer_left  = 0;
+            }
+
             if ((dev->phase == HP_PHASE_IDLE) && (dev->packet_pos == 0) &&
                 (((val & 0xfff0) != 0x1020) && (val != 0xff0d))) {
                 if (dev->tracing)
@@ -870,7 +946,10 @@ hp_disc_init(const device_t *info)
     hp_disc_t *dev = (hp_disc_t *) calloc(1, sizeof(hp_disc_t));
 
     dev->base    = (uint16_t) info->local;
-    dev->irq     = getenv("HP_DISC_IRQ") ? atoi(getenv("HP_DISC_IRQ")) : 5;
+    /* DISKHP1 每次发命令前 0x276D 打开的是「主片 bit2（级联）+ 从片 bit6」，
+       命令收尾再把 IRQ14 掩回去——即这块适配器的中断线是 IRQ14，不是 IRQ5。
+       默认给 5 时驱动侧 [0x1f8] 中断计数永远是 0（实测），命令全部超时。 */
+    dev->irq     = getenv("HP_DISC_IRQ") ? atoi(getenv("HP_DISC_IRQ")) : 14;
     dev->status  = 0x00;
     dev->tracing = (getenv("HP_DISC_TRACE") != NULL);
     dev->hdd_id  = -1;
@@ -894,6 +973,13 @@ hp_disc_init(const device_t *info)
     }
 
     timer_add(&dev->timer, hp_disc_complete, dev, 0);
+    timer_add(&dev->pc_timer, hp_disc_pc_cb, dev, 0);
+    if (getenv("HP_DISC_PC")) {
+        dev->pc_us = getenv("HP_DISC_PC")[0] ? atoi(getenv("HP_DISC_PC")) : 10000;
+        if (dev->pc_us <= 0)
+            dev->pc_us = 10000;
+        timer_set_delay_u64(&dev->pc_timer, (uint64_t) dev->pc_us * TIMER_USEC);
+    }
 
     io_sethandler(dev->base, 8,
                   hp_disc_in, hp_disc_inw, NULL,
