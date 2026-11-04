@@ -488,6 +488,21 @@ pcx_video_write(uint16_t addr, uint8_t val, void *priv)
                     pcx_ring_dump();
                 }
             }
+            {
+                static char hist[7];
+                int         z;
+                for (z = 0; z < 5; z++)
+                    hist[z] = hist[z + 1];
+                hist[5] = (char) val;
+                hist[6] = 0;
+                if ((val == 'r') && !strcmp(hist, "flintr")) {
+                    static int fn;
+                    if (fn < 8) {
+                        fn++;
+                        pclog("[FLINTR] #%d t=%u\n", fn, plat_get_ticks());
+                    }
+                }
+            }
             dev->prev_char = val;
             pcx_term_write(&dev->term, val);
             pcx_term_dump(dev);
