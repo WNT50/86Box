@@ -36,8 +36,10 @@
 #include <86box/rom.h>
 #include <86box/video.h>
 #include <86box/plat.h>
+#include "../cpu/cpu.h"
 
 extern void pcx_ring_dump(void);
+extern void pcx_dump_code(uint32_t log, int len, const char *why);
 #include <86box/pcx_term.h>
 #include <86box/pcx_vid.h>
 #include <86box/kbc_siemens.h>
@@ -406,8 +408,83 @@ pcx_video_write(uint16_t addr, uint8_t val, void *priv)
             if ((val == 'G') && (dev->prev_char == '\n') && (getenv("PCX_RING") != NULL)) {
                 static int gn;
                 if (gn < 3) {
+                    int k;
+
                     gn++;
-                    pclog("[RING] request %d at t=%u\n", gn, plat_get_ticks());
+                    pclog("[RING] request %d at t=%u ss=%04X sp=%04X\n", gn,
+                          plat_get_ticks(), cpu_state.seg_ss.seg,
+                          cpu_state.regs[4].w);
+                    /* Walk the stack and report any word that points at the
+                       text being printed; that is the format string argument. */
+                    for (k = 0; k < 64; k++) {
+                        uint32_t slot = ((uint32_t) cpu_state.seg_ss.seg << 4) +
+                                        cpu_state.regs[4].w + 2 * k;
+                        uint16_t w;
+                        uint32_t a;
+
+                        if (mem_machine_translate != NULL) {
+                            w = (uint16_t) (readmembl(mem_machine_translate(slot, 0)) |
+                                            (readmembl(mem_machine_translate(slot + 1, 0)) << 8));
+                        } else {
+                            w = (uint16_t) (readmembl(slot) | (readmembl(slot + 1) << 8));
+                        }
+                        a = w;
+                        if (mem_machine_translate != NULL)
+                            a = mem_machine_translate(w, 0);
+                        if (readmembl(a) == '\n') {
+                            char t[9];
+                            int  j;
+
+                            for (j = 0; j < 8; j++) {
+                                uint32_t b = w + 1 + j;
+                                if (mem_machine_translate != NULL)
+                                    b = mem_machine_translate(b, 0);
+                                t[j] = (char) readmembl(b);
+                            }
+                            t[8] = 0;
+                            pclog("[RING] sp+%02X = %04X -> \"%s\"\n", 2 * k, w, t);
+                        }
+                    }
+                    for (k = 0x2c; k < 0x60; k += 2) {
+                        uint32_t slot = ((uint32_t) cpu_state.seg_ss.seg << 4) +
+                                        cpu_state.regs[4].w + k;
+                        uint16_t w;
+
+                        if (mem_machine_translate != NULL)
+                            w = (uint16_t) (readmembl(mem_machine_translate(slot, 0)) |
+                                            (readmembl(mem_machine_translate(slot + 1, 0)) << 8));
+                        else
+                            w = (uint16_t) (readmembl(slot) | (readmembl(slot + 1) << 8));
+                        pclog("[RING] sp+%02X = %04X\n", k, w);
+                    }
+                    /* The frame right above the format pointer is the call
+                       that produced this message: dump the code around it. */
+                    {
+                        uint32_t slot = ((uint32_t) cpu_state.seg_ss.seg << 4) +
+                                        cpu_state.regs[4].w + 0x30;
+                        uint16_t ipw, csw;
+
+                        if (mem_machine_translate != NULL) {
+                            ipw = (uint16_t) (readmembl(mem_machine_translate(slot, 0)) |
+                                              (readmembl(mem_machine_translate(slot + 1, 0)) << 8));
+                            csw = (uint16_t) (readmembl(mem_machine_translate(slot + 2, 0)) |
+                                              (readmembl(mem_machine_translate(slot + 3, 0)) << 8));
+                        } else {
+                            ipw = (uint16_t) (readmembl(slot) | (readmembl(slot + 1) << 8));
+                            csw = (uint16_t) (readmembl(slot + 2) | (readmembl(slot + 3) << 8));
+                        }
+                        pclog("[RING] caller %04X:%04X\n", csw, ipw);
+                        {
+                            uint32_t v = 0x6424;
+                            uint16_t pg;
+                            if (mem_machine_translate != NULL)
+                                v = mem_machine_translate(v, 0);
+                            pg = (uint16_t) (readmembl(v) | (readmembl(v + 1) << 8));
+                            pclog("[RING] free pages [0x6424] = %u -> %u KB\n",
+                                  pg, (unsigned) pg * 2u);
+                        }
+                        pcx_dump_code((((uint32_t) csw) << 4) + ipw - 64, 160, "fmt-caller");
+                    }
                     pcx_ring_dump();
                 }
             }
