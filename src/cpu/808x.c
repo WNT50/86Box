@@ -2148,6 +2148,39 @@ execx86_instruction(void)
         }
     }
 
+    /* PCX_W6424=1: watch the kernel's free-page counter and report the
+       instruction that first changes it. */
+    {
+        static int w_on = -1, w_last = -1, w_hits;
+        static unsigned w_tick;
+
+        if (w_on < 0)
+            w_on = getenv("PCX_W6424") ? 1 : 0;
+        if (w_on && (w_hits < 40) && ((++w_tick & 31u) == 0)) {
+            uint32_t a = 0x6424u;
+            int      v;
+
+            if (mem_machine_translate != NULL)
+                a = mem_machine_translate(a, 0);
+            v = readmembl(a) | (readmembl(a + 1) << 8);
+            if ((v != w_last) && ((uint16_t) CS < 0xf000u)) {
+                static int peak = -1, fell;
+
+                if (v == 0)
+                    peak = 0;
+                else if (v > peak)
+                    peak = v;
+                if ((w_last > 0) && (v > 0) && (v < w_last) && !fell) {
+                    fell = 1;
+                    pclog("[W6424] peak %d, first drop to %d at %04X:%04X\n",
+                          peak, v, (uint16_t) CS, (uint16_t) cpu_state.pc);
+                    pcx_ring_dump();
+                }
+                w_last = v;
+            }
+        }
+    }
+
     /* PCX_RING=1: record it; pcx_ring_dump() is called from the video model. */
     {
         static int r_on = -1;
