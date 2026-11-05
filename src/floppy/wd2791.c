@@ -29,8 +29,8 @@
 #include <string.h>
 #include <86box/86box.h>
 #include <86box/plat.h>
+#include <86box/mem.h>
 
-void pcx_ring_dump(void);
 #include <86box/plat_unused.h>
 #include <86box/timer.h>
 #include <86box/pic.h>
@@ -191,15 +191,6 @@ wd_irq_lower(wd2791_t *dev)
 static void
 wd_finish(wd2791_t *dev)
 {
-    {
-        static int rd;
-
-        if ((getenv("PCX_RINGAT") != NULL) && !rd &&
-            ((dev->command & 0x1F) == 0x14)) {
-            rd = 1;
-            pcx_ring_dump();
-        }
-    }
     if (getenv("PCX_FDCLOG") != NULL)
         pclog("[DONE] t=%u cmd=%02X bc=%d state=%d\n", plat_get_ticks(),
               dev->command, dev->byte_count, dev->state);
