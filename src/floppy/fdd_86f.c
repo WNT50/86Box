@@ -1113,13 +1113,16 @@ int
 d86f_can_read_address(void *priv)
 {
     fdd_drive_t *drv = (fdd_drive_t *) priv;
-    int          ret = (fdc_get_bitcell_period(drv->fdc) == d86f_get_bitcell_period(drv));
+    int          bc  = (fdc_get_bitcell_period(drv->fdc) == d86f_get_bitcell_period(drv));
+    int          med = fdd_can_read_medium(&drives[real_drive(drv->fdc, drv->id)]);
+    int          mf  = (fdc_is_mfm(drv->fdc) == d86f_is_mfm(drv));
+    int          enc = (d86f_get_encoding(drv) <= 1);
 
-    ret = ret && fdd_can_read_medium(&drives[real_drive(drv->fdc, drv->id)]);
-    ret = ret && (fdc_is_mfm(drv->fdc) == d86f_is_mfm(drv));
-    ret = ret && (d86f_get_encoding(drv) <= 1);
+    if (getenv("PCX_FDCLOG") != NULL)
+        pclog("[86FCAN] bc=%d med=%d mfm=%d (fdc=%d drv=%d) enc=%d\n",
+              bc, med, mf, fdc_is_mfm(drv->fdc), d86f_is_mfm(drv), enc);
 
-    return ret;
+    return bc && med && mf && enc;
 }
 
 void
