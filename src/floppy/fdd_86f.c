@@ -1556,6 +1556,12 @@ d86f_read_sector_id(void *priv, const int side, const int match)
                     dev->id_find.sync_marks = dev->id_find.bits_obtained =
                     dev->id_find.bytes_obtained = 0;
                     dev->id_found |= 1;
+                    if (getenv("PCX_IDLOG") != NULL)
+                        pclog("[ID] found C=%d H=%d R=%d N=%d | want C=%d H=%d R=%d N=%d\n",
+                              dev->last_sector.id.c, dev->last_sector.id.h,
+                              dev->last_sector.id.r, dev->last_sector.id.n,
+                              dev->req_sector.id.c, dev->req_sector.id.h,
+                              dev->req_sector.id.r, dev->req_sector.id.n);
                     /* The datasheet lists what has to match: track number,
                        sector number, side number and a good CRC -- the sector
                        length byte is not among them, and the length that is
