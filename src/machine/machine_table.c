@@ -34,6 +34,7 @@
 #include <86box/hdc.h>
 #include <86box/scsi_ncr53c8xx.h>
 #include <86box/scsi_aic7xxx.h>
+#include <86box/scsi_sm912.h>
 #include <86box/keyboard.h>
 #include <86box/nvr.h>
 #include <86box/sio.h>
@@ -3855,6 +3856,7 @@ const machine_t machines[] = {
         .vid_device               = NULL,
         .snd_device               = NULL,
         .net_device               = NULL,
+        .scsi_device              = &scsi_sm912_device,
         .aliases                  = { "PC-X", "" }
     },
     /* Siemens PC-D: same mainboard and BIOS as the PC-X, but the SCN2674

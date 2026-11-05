@@ -15,11 +15,15 @@
 #ifndef EMU_SCSI_SM912_H
 #define EMU_SCSI_SM912_H
 
+#include <86box/device.h>
+
 typedef struct scsi_sm912_t scsi_sm912_t;
 
 /* IRQ line callback: the adapter asks for one when the target has a status or
    message byte waiting, exactly like the on-board 8259 IR5 input. */
 typedef void (*scsi_sm912_irq_t)(void *priv, int level);
+
+extern const device_t  scsi_sm912_device;
 
 extern scsi_sm912_t *scsi_sm912_init(uint16_t base, scsi_sm912_irq_t irq,
                                      void *irq_priv);
