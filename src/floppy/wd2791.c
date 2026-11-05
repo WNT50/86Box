@@ -189,6 +189,9 @@ wd_irq_lower(wd2791_t *dev)
 static void
 wd_finish(wd2791_t *dev)
 {
+    if (getenv("PCX_FDCLOG") != NULL)
+        pclog("[DONE] t=%u cmd=%02X bc=%d state=%d\n", plat_get_ticks(),
+              dev->command, dev->byte_count, dev->state);
     /* Post-byte gap: CRC and the status phase.  Without it the interrupt lands
        in the same emulated instant as the last data byte, which is the one
        moment a polled driver is not yet listening for it. */

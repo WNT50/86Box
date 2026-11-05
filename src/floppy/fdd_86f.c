@@ -3224,7 +3224,11 @@ d86f_read_track(void *priv, const int track, const int thin_track, const int sid
         const int array_size = d86f_get_array_size(drv, side, 0);
         /* 4x oversampled cells: the stored byte count is the authority on how
            long the track really is, whatever the rate field claims. */
-        dev->raw_override[side] = (uint32_t) array_size * 2;
+        {
+            const char *sc = getenv("D86F_RAW_SCALE");
+            dev->raw_override[side] = (uint32_t) array_size *
+                                      (sc ? (uint32_t) atoi(sc) : 2);
+        }
         {
             size_t got = fread(da, 1, array_size, dev->fp);
             if (getenv("D86FDBG") != NULL)
