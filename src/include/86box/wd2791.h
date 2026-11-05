@@ -107,6 +107,8 @@ typedef struct wd2791_t {
 
     int sector_size;
     int byte_count;
+    int first_read;   /* set when the drive is selected, cleared by the first read */
+    int was_first;    /* value of first_read when the running command started */
     int id_count;
     uint8_t id_buf[8];
 

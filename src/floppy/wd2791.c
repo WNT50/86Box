@@ -874,6 +874,8 @@ wd_start_read(wd2791_t *dev)
     /* The record length the command asks for follows N (or the medium, in
        single density); the transfer is that long, not a fixed 512 bytes. */
     dev->sector_size = 128 << wd_sector_size_code(dev);
+    dev->was_first   = dev->first_read;
+    dev->first_read  = 0;
 
     {
         static int fl = -1;
@@ -1079,7 +1081,12 @@ wd_force_interrupt(wd2791_t *dev, uint8_t val)
            not finish its last record; the chip reports Record Not Found.  The
            PC-X POST takes exactly that answer as "this is not a DOS boot
            sector" and falls back to the sector 7 check used by SINIX disks. */
-        if (dev->multi && (dev->rec_done >= 2))
+        /* Only the probe read the POST issues right after selecting a drive is
+           a failure when the host stops it: that is the "is this a DOS boot
+           sector" test, and a Record Not Found is what sends the SINIX path to
+           the volume label.  Every later read has the host's own byte count as
+           its end, and reporting an error there aborts the loader. */
+        if (dev->multi && dev->was_first && (dev->rec_done >= 2))
             wd_rnf(dev, __LINE__);
 
         dev->chain_pending = 0;
@@ -1612,6 +1619,12 @@ wd2791_set_dskctl(wd2791_t *dev, uint8_t val)
        reads the boot sector with the latch at 0x05, which has to be MFM on a
        360k medium. */
     dev->dden   = (val & 0x10) ? 1 : 0;
+
+    /* A fresh selection starts a fresh probe: the POST reads the boot sector
+       of the drive it just picked and expects that one to be the read that can
+       fail. */
+    if (prev_drive != dev->drive)
+        dev->first_read = 1;
 
     if (getenv("PCX_DSKLOG") != NULL)
         pclog("[DSKSET] val=%02X -> drive=%d side=%d dden=%d\n", val,
