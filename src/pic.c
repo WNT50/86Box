@@ -1205,6 +1205,15 @@ pic3_int(uint8_t line, int set)
     if (set)
         pic3.irr |= (uint8_t) (1 << line);
 
+    /* The PIC is programmed for level-triggered inputs (ICW1 bit 3), so
+       pic_acknowledge() keeps the IRR bit while the line still reads high.
+       Track the level the device actually drives: without it the line stays
+       high for ever, every EOI re-delivers the same request, and the machine
+       spends its time in the BIOS spurious-interrupt handler at F000:C3E3. */
+    pic3.lines[line] = set ? 1 : 0;
+    if (!set)
+        pic3.irr &= (uint8_t) ~(1 << line);
+
     pic_notify();
 
 }
