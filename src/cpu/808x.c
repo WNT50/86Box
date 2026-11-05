@@ -2207,6 +2207,20 @@ execx86_instruction(void)
         }
     }
 
+    /* PCX_SSLOG=1: every change of SS, so a lost segment shows up. */
+    {
+        static int sl = -1;
+        static uint16_t last_ss = 0xFFFF;
+
+        if (sl < 0)
+            sl = getenv("PCX_SSLOG") ? 1 : 0;
+        if (sl && (last_ss != cpu_state.seg_ss.seg)) {
+            pclog("[SS] %04X -> %04X at %04X:%04X SP=%04X\n",
+                  last_ss, cpu_state.seg_ss.seg, CS, cpu_state.pc, SP);
+            last_ss = cpu_state.seg_ss.seg;
+        }
+    }
+
     /* PCX_REGS=1: the state the moment control lands in the loader's buffer. */
     {
         static int rr = -1, shown;
