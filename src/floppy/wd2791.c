@@ -745,11 +745,11 @@ wd_start_read(wd2791_t *dev)
         if (fl < 0)
             fl = (getenv("PCX_FDCLOG") != NULL);
         if (fl)
-            pclog("[FDC] read C=%d H=%d R=%d drv_track=%d pos=%u raw=%u rate=%d cmd=%02X size=%d n=%d from %04X:%04X dst=%04X:%04X\n",
+            pclog("[FDC] read C=%d H=%d R=%d drv_track=%d pos=%u raw=%u rate=%d cmd=%02X size=%d n=%d from %04X:%04X dst=%04X:%04X dden=%d\n",
                   dev->track_reg, dev->side, dev->sector_reg, fdd_current_track(drv),
                   d86f_get_track_pos(drv), d86f_get_raw_size(drv, dev->side),
                   dev->fdc.rate, dev->command, dev->sector_size, wd_sector_size_code(dev),
-                  CS, cpu_state.pc, ES, DI);
+                  CS, cpu_state.pc, ES, DI, dev->dden);
     }
 
     /* Start at the index hole.  The controller scans from there, and the
