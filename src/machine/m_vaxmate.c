@@ -43,7 +43,6 @@
 
 extern dma_t dma[8];
 extern uint8_t dma_m;
-extern void vaxmate_video_dump(int w, int h);
 
 /* The 64 KB BIOS is two 32 KB EPROMs on a 16-bit bus: the 3.10 device holds
    the low (even) byte, the 3.11 device the high (odd) byte. */

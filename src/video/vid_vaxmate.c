@@ -30,7 +30,6 @@
  */
 #include <stdbool.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
@@ -42,7 +41,6 @@
 #include <86box/timer.h>
 #include <86box/pit.h>
 
-#include "cpu.h"
 #include <86box/video.h>
 #include <86box/plat_unused.h>
 
@@ -176,12 +174,7 @@ typedef struct vaxmate_video_t {
         monitor_index_global = vid->prev_monitor_index;     \
     }
 
-static uint64_t vax_fw, vax_vw;
-static uint64_t vax_frm_lines, vax_frm_rows, vax_frm_frames, vax_frm_vcresets;
-static int      vax_init_count;
-static vaxmate_video_t *vax_timer_vid;
-static void vaxmate_shot_now(void);
-static vaxmate_video_t *vaxmate_vid_global = NULL;  /* 临时诊断：0=3D8 1=3D4/5 2=3D0/1 */
+static vaxmate_video_t *vaxmate_vid_global = NULL;
 
 static video_timings_t timing_vaxmate = { .type = VIDEO_ISA, .write_b = 8, .write_w = 16, .write_l = 32,
                                           .read_b = 8, .read_w = 16, .read_l = 32 };
@@ -306,7 +299,6 @@ vaxmate_video_write(uint32_t addr, uint8_t val, void *priv)
 
     if ((vid->ctrl_b & CTLB_FONT_ENABLE) && (vid->mode <= VMODE_TEXT80)) {
         /* B8000-B9FFF even addresses -> 4 KB font RAM */
-        vax_fw++;
         uint32_t off = (addr - 0xb8000) >> 1;
         if (off < VAXMATE_FONT_RAM) {
             vid->font_ram[off] = val;
@@ -710,10 +702,6 @@ vaxmate_video_poll(void *priv)
         video_res_y = h;
         video_bpp   = 1;
 
-        vax_frm_frames++;
-        if (getenv("VAX_SHOT") && (vax_frm_frames == 150))
-            vaxmate_shot_now();
-
         vid->displine = 0;
         vid->vc       = 0;
     }
@@ -876,20 +864,9 @@ vaxmate_spr_out(uint16_t addr, uint8_t val, void *priv)
 
     (void) addr;
 
-    int was = vid->video_disabled;
-
     vid->spr            = val;
     /* bit3 是“断开视频”位（POST 写 00，视频正常；写 08 才关闭）。 */
     vid->video_disabled = (val & SPR_DISABLE_VIDEO) ? 1 : 0;
-    if (getenv("VIDEO_FORCE_ON"))
-        vid->video_disabled = 0;   /* 实验：忽略断开位 */
-    if (getenv("VIDEO_LOG"))
-        fprintf(stderr, "[SPR] val=%02X dis=%d CS=%04X PC=%06X DS=%04X ES=%04X\n",
-                val, vid->video_disabled, (unsigned) cpu_state.seg_cs.seg,
-                (unsigned) cpu_state.pc, (unsigned) cpu_state.seg_ds.seg,
-                (unsigned) cpu_state.seg_es.seg);
-
-    (void) was;
     /* 映射常驻：断开时由 read/write 返回 0xFF / 丢弃。
        若真的 mem_mapping_disable，访问会回落到机器层的内部 RAM，
        BIOS 的探测写 0x5A 就能读回 0x5A，被误判成“工业标准卡”。 */
@@ -921,7 +898,6 @@ vaxmate_video_init(UNUSED(const device_t *info))
     vid->video_disabled = 0;
     vid->dispon        = 1;
     vaxmate_vid_global = vid;
-    vax_init_count++;
 
     /* power-on VLT: identity IRGB ramp (Table 7-4 approximation) */
     for (c = 0; c < VAXMATE_VLT; c++)
@@ -1022,80 +998,3 @@ const device_t vaxmate_video_device = {
     .force_redraw  = NULL,
     .config        = NULL
 };
-
-/* 临时：把当前渲染缓冲导出成 PPM，便于离屏检查画面 */
-void
-vaxmate_video_dump(int w, int h)
-{
-    FILE *f;
-    int   x, y;
-
-    if ((vaxmate_vid_global == NULL) || (buffer32 == NULL))
-        return;
-
-    fprintf(stderr, "[VIDDBG] mode=%d ctrl_a=%02X ctrl_b=%02X memaddr=%04X "
-            "R0=%02X R1=%02X R9=%02X disp=%d dis=%d vram0=%02X%02X\n",
-            vaxmate_vid_global->mode, vaxmate_vid_global->ctrl_a,
-            vaxmate_vid_global->ctrl_b, vaxmate_vid_global->memaddr,
-            vaxmate_vid_global->crtc[0], vaxmate_vid_global->crtc[1],
-            vaxmate_vid_global->crtc[9], vaxmate_vid_global->dispon,
-            vaxmate_vid_global->video_disabled,
-            vaxmate_vid_global->vram[0], vaxmate_vid_global->vram[1]);
-    if (getenv("VAX_CRTC")) {
-        int i;
-        {
-            int i, nz = 0;
-            for (i = 0; i < 4096; i++)
-                if (vaxmate_vid_global->font_ram[i]) nz++;
-            fprintf(stderr, "[FONT] nonzero=%d fw=%llu vw=%llu ctrl_b=%02X\n", nz,
-                    (unsigned long long) vax_fw, (unsigned long long) vax_vw,
-                    vaxmate_vid_global->ctrl_b);
-            fprintf(stderr, "[FONT] first=%02X%02X%02X%02X\n",
-                    vaxmate_vid_global->font_ram[0], vaxmate_vid_global->font_ram[1],
-                    vaxmate_vid_global->font_ram[2], vaxmate_vid_global->font_ram[3]);
-        }
-        fprintf(stderr, "[PTR] timer=%p global=%p\n", (void *) vax_timer_vid, (void *) vaxmate_vid_global);
-        fprintf(stderr, "[FRM] lines=%llu rows=%llu frames=%llu vc=%d disp=%d vadj=%d scan=%d dline=%d vt=%02X vd=%02X vs=%02X resets=%llu\n",
-                (unsigned long long) vax_frm_lines, (unsigned long long) vax_frm_rows,
-                (unsigned long long) vax_frm_frames, vaxmate_vid_global->vc,
-                vaxmate_vid_global->dispon, vaxmate_vid_global->vadj,
-                vaxmate_vid_global->scanline, vaxmate_vid_global->displine,
-                vaxmate_vid_global->crtc[4], vaxmate_vid_global->crtc[6],
-                vaxmate_vid_global->crtc[7], (unsigned long long) vax_frm_vcresets);
-        fprintf(stderr, "[CRTC]");
-        for (i = 0; i < 16; i++)
-            fprintf(stderr, " %02X", vaxmate_vid_global->crtc[i]);
-        fprintf(stderr, " vc=%d scan=%d\n", vaxmate_vid_global->vc, vaxmate_vid_global->scanline);
-    }
-
-    f = fopen("/tmp/vx_shot.ppm", "wb");
-    if (f == NULL)
-        return;
-
-    fprintf(f, "P6\n%d %d\n255\n", w, h);
-    for (y = 0; y < h; y++) {
-        for (x = 0; x < w; x++) {
-            uint32_t c = buffer32->line[y][x];
-            fputc((c >> 16) & 0xff, f);
-            fputc((c >> 8) & 0xff, f);
-            fputc(c & 0xff, f);
-        }
-    }
-    fclose(f);
-    rename("/tmp/vx_shot_tmp.ppm", "/tmp/vx_shot2.ppm");
-}
-
-static void
-vaxmate_shot_now(void)
-{
-    FILE *f = fopen("/tmp/vx_shot_tmp.ppm", "wb");
-    int x, y;
-    if ((f == NULL) || (buffer32 == NULL)) return;
-    fprintf(f, "P6\n640 400\n255\n");
-    for (y = 0; y < 400; y++)
-        for (x = 0; x < 640; x++) {
-            uint32_t c = buffer32->line[y][x];
-            fputc((c >> 16) & 0xff, f); fputc((c >> 8) & 0xff, f); fputc(c & 0xff, f);
-        }
-    fclose(f);
-}
