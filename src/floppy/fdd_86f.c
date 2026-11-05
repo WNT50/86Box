@@ -2866,6 +2866,14 @@ d86f_poll(void *priv)
        any other controller the idle state means nothing is pending, so the
        check stays as it was. */
     if ((dev->index_count == 2) && ((dev->state != STATE_IDLE) || (((fdc_t *) drv->fdc)->ext_noidam != NULL))) {
+        if (getenv("PCX_RNFLOG") != NULL)
+            pclog("[RNFABORT] state=%02X pos=%u hole=%u last C=%d H=%d R=%d N=%d want C=%d H=%d R=%d\n",
+                  dev->state, dev->track_pos,
+                  drv->d86f_handler.index_hole_pos(drv, side),
+                  dev->last_sector.id.c, dev->last_sector.id.h,
+                  dev->last_sector.id.r, dev->last_sector.id.n,
+                  dev->req_sector.id.c, dev->req_sector.id.h,
+                  dev->req_sector.id.r);
         switch (dev->state) {
             case STATE_0A_FIND_ID:
             case STATE_SECTOR_NOT_FOUND:
@@ -3665,8 +3673,13 @@ d86f_readsector(void *priv, const int sector, const int track, const int side,
         dev->state       = STATE_IDLE;
         dev->index_count = 0;
         fdc_noidam(drv->fdc);
-    } else if (sector == SECTOR_FIRST)
+    } else if (sector == SECTOR_FIRST) {
+        if (getenv("PCX_RNFLOG") != NULL)
+            pclog("[RNFSTART] pos=%u hole=%u want C=%d H=%d R=%d\n", dev->track_pos,
+                  drv->d86f_handler.index_hole_pos(drv, side),
+                  dev->req_sector.id.c, dev->req_sector.id.h, dev->req_sector.id.r);
         dev->state = STATE_02_SPIN_TO_INDEX;
+    }
     else if (sector == SECTOR_NEXT)
         dev->state = STATE_02_FIND_ID;
     else
