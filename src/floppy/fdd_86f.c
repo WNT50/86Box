@@ -3422,9 +3422,12 @@ d86f_write_track(void *priv, FILE **fp, const int side, uint16_t *da0, uint16_t 
         /* Sixteen cells per word, two bytes per word.  The array is four times
            larger than the track really is, so the source's own cell count --
            when it has one -- describes the length that matters. */
+        const char *cc = getenv("D86F_CELLS");
         const char *rm = getenv("D86F_RAW_MODE");
 
-        if (rm != NULL)
+        if (cc != NULL)
+            extra_bit_cells = (uint32_t) atoi(cc);
+        else if (rm != NULL)
             extra_bit_cells = d86f_get_raw_size(drv, side);
         else
             extra_bit_cells = (uint32_t) array_size * 8;
@@ -3460,6 +3463,13 @@ d86f_write_track(void *priv, FILE **fp, const int side, uint16_t *da0, uint16_t 
             rate = 3;
         else
             rate = 5;
+
+        {
+            const char *rc = getenv("D86F_RATE_CODE");
+
+            if (rc != NULL)
+                rate = (uint16_t) atoi(rc);
+        }
 
         side_flags = (uint16_t) ((side_flags & 0x18) | rate);
     }
