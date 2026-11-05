@@ -155,23 +155,6 @@ hp_hil_trace(const char *fmt, ...)
     va_end(ap);
 }
 
-static void
-hp_hil_irq(void)
-{
-    hp_hil_t *dev = hp_hil_dev;
-
-    /* The MLC's INT output follows the FIFO, it is not a one-shot latch:
-       it stays up until the System has taken every queued frame, and drops
-       again as soon as the last one is read. */
-    if (dev->fifo_count) {
-        dev->r3 |= HIL_R3_INT;
-        pic3_int(HIL_IRQ_LINE, 1);
-    } else {
-        dev->r3 &= (uint8_t) ~HIL_R3_INT;
-        pic3_int(HIL_IRQ_LINE, 0);
-    }
-}
-
 /* A frame the System has to read: data byte plus its command/address byte. */
 static void
 hp_hil_fifo_push(uint16_t frame)
@@ -181,14 +164,21 @@ hp_hil_fifo_push(uint16_t frame)
     hp_hil_trace("HIL: push %03X\n", frame);
     if (dev->fifo_count >= HIL_FIFO_SIZE) {
         dev->r2 |= HIL_R2_FOF;
-        hp_hil_irq();
+        dev->r3 |= HIL_R3_INT;
+        pic3_int(HIL_IRQ_LINE, 1);
         return;
     }
 
     dev->fifo[(dev->fifo_head + dev->fifo_count) % HIL_FIFO_SIZE] = frame;
     dev->fifo_count++;
 
-    hp_hil_irq();
+    /* The MLC interrupts on the command frame, not on the record in front of
+       it: MAME's hp_hil_mlc_device::hil_write() only touches R3 for frames
+       with the command bit set, and the data frames queue silently. */
+    if (frame & 0x0800) {
+        dev->r3 |= HIL_R3_INT;
+        pic3_int(HIL_IRQ_LINE, 1);
+    }
 }
 
 /* The HIL driver keeps its context in RAM and finds it through the int 6Fh
@@ -359,8 +349,6 @@ hp_hil_fifo_pop(void)
     dev->fifo_head = (dev->fifo_head + 1) % HIL_FIFO_SIZE;
     dev->fifo_count--;
 
-    hp_hil_irq();
-
     return frame;
 }
 
@@ -416,6 +404,14 @@ hp_hil_kbd_frame(uint16_t frame)
         return;
     }
     if ((addr != 0) && (addr != dev->kbd_addr))
+        return;
+
+    /* A configured device only listens on its own address: address 0 is the
+       broadcast the System uses to look for further devices, and only the
+       link-wide commands are for everybody.  Leaving the frame unanswered is
+       what makes the System time out at F000:38B7 and end the enumeration. */
+    if ((dev->kbd_addr != 0) && (addr == 0) &&
+        (data != HIL_IFC) && (data != HIL_DHR))
         return;
 
     hp_hil_trace("HIL: device <= %03X (addr %d, op %02X)\n", frame, addr, data);
@@ -474,6 +470,11 @@ hp_hil_kbd_frame(uint16_t frame)
                the System learns where the chain ends (F000:3782 reads the
                byte, subtracts 8 and uses the result as the address for the
                next command). */
+            /* Already configured: this ACF is looking for the next device
+               further down the link, and answering re-runs the whole
+               enumeration from F000:3734. */
+            if (dev->kbd_addr != 0)
+                return;
             dev->kbd_addr = data & 0x07;
             hp_hil_trace("HIL: mouse configured as address %d\n", dev->kbd_addr);
             if (dev->loop && (addr == 0))
@@ -588,12 +589,12 @@ hp_hil_write(uint16_t port, uint8_t val, void *priv)
             break;
 
         case 0x006c: /* W0: frame data, writing it sends the frame */
-            dev->r2 = 0x00;
-            /* A new command starts a new transaction: drop stale replies. */
-            if ((val == HIL_IFC) && ((dev->w1 & 0x08) != 0) && ((dev->w1 & 0x07) == 0)) {
-                dev->fifo_count = 0;
-                dev->fifo_head  = 0;
-            }
+            /* Every transmission starts a new transaction: the MLC drops
+               whatever the last one left behind (MAME: m_fifo.clear() at the
+               top of hp_hil_mlc_device::write(), case 0). */
+            dev->r2         = 0x00;
+            dev->fifo_head  = 0;
+            dev->fifo_count = 0;
             hp_hil_transmit(val);
             break;
 
@@ -605,7 +606,6 @@ hp_hil_write(uint16_t port, uint8_t val, void *priv)
             dev->fifo_count = 0;
             dev->r2         = 0x00;
             hp_hil_trace("HIL: W2 = %02X (fifo cleared)\n", val);
-            hp_hil_irq();
             break;
 
         case 0x006f: /* W3: APE (Auto Poll Enable) lives in bit 1 */
@@ -647,8 +647,11 @@ hp_hil_read(uint16_t port, void *priv)
             }
             break;
 
-        case 0x006f: /* R3: INT/NMI/LERR; reading it does not drop INT */
-            ret = dev->r3;
+        case 0x006f: /* R3: INT/NMI/LERR.  Reading R3 acknowledges INT and
+                        drops the line (MAME hp_hil.cpp, read case 3). */
+            ret      = dev->r3;
+            dev->r3 &= (uint8_t) ~HIL_R3_INT;
+            pic3_int(HIL_IRQ_LINE, 0);
             break;
 
         default:
