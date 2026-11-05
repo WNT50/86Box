@@ -3412,67 +3412,26 @@ d86f_write_track(void *priv, FILE **fp, const int side, uint16_t *da0, uint16_t 
     uint16_t       side_flags      = drv->d86f_handler.side_flags(drv);
     uint32_t       extra_bit_cells = drv->d86f_handler.extra_bit_cells(drv, side);
 
-    /* A sector image has no bit cells of its own: it reports 0 and lets the
-       reader recompute the track length from the rate bits.  That recomputation
-       gives twice the real length for a 250 kbit track, so the playback then
-       believes each sector is twice as far away and every read has to scan the
-       whole (double) track.  Recording the true length makes the image
-       self-describing. */
+    /* A sector image carries neither a track length nor honest side flags:
+       its handler reports zeros and defaults.  The reader compares the image's
+       bit cell clock against the controller's before it searches, so both
+       have to agree, and the length has to be the track the controller is
+       turning: 250 kbit at 300 rpm is 50000 cells. */
     if (d86f_export_disk_flags != 0) {
-        /* Sixteen cells per word, two bytes per word.  The array is four times
-           larger than the track really is, so the source's own cell count --
-           when it has one -- describes the length that matters. */
-        const char *cc = getenv("D86F_CELLS");
-        const char *rm = getenv("D86F_RAW_MODE");
+        static const uint16_t kbps[8] = { 500, 300, 250, 1000, 250, 2000, 250, 250 };
+        const fdc_t *fdc  = (const fdc_t *) drv->fdc;
+        uint16_t     code = (fdc != NULL) ? (uint16_t) (fdc->rate & 7) : 2;
 
-        if (cc != NULL)
-            extra_bit_cells = (uint32_t) atoi(cc);
-        else if (rm != NULL)
-            extra_bit_cells = d86f_get_raw_size(drv, side);
-        else
-            extra_bit_cells = (uint32_t) array_size * 8;
-    }
-    else if (getenv("D86F_TRUE_RAW") != NULL)
+        side_flags      = (uint16_t) ((side_flags & 0x18) | code);
+        extra_bit_cells = (uint32_t) kbps[code] * 200;    /* 60/300 of a second */
+
+        if (getenv("D86F_RATE_CODE") != NULL)
+            side_flags = (uint16_t) ((side_flags & 0x18) |
+                                     (uint16_t) atoi(getenv("D86F_RATE_CODE")));
+        if (getenv("D86F_CELLS") != NULL)
+            extra_bit_cells = (uint32_t) atoi(getenv("D86F_CELLS"));
+    } else if (getenv("D86F_TRUE_RAW") != NULL)
         extra_bit_cells = d86f_get_raw_size(drv, side);
-
-    /* A sector image has no side flags of its own either.  Its handler reports
-       whatever the drive defaults to, and that value claims 300 kbit at
-       360 rpm for a disk that really holds 250 kbit at 300 rpm.  The reader
-       then decodes the flux at the wrong clock and spends whole revolutions
-       hunting for sync.  Derive the flags from the track that is being
-       written: the cells and the rotation are what the medium actually has. */
-    {
-        /* 4x oversampled cells per stored byte: the data is the truth here,
-           the rate table is what we are trying to repair. */
-        const uint32_t raw  = (uint32_t) array_size * 8;
-        const double   rpm  = 300.0;
-        /* The rate field describes the bit cell clock, and the image stores
-           four cells per data bit, so a 250 kbit track runs at 1 MHz here. */
-        const double   kbit = (double) raw * rpm / 60000.0;
-        uint16_t       rate;
-
-        if (kbit < 200.0)
-            rate = 4;
-        else if (kbit < 275.0)
-            rate = 2;
-        else if (kbit < 400.0)
-            rate = 1;
-        else if (kbit < 750.0)
-            rate = 0;
-        else if (kbit < 1500.0)
-            rate = 3;
-        else
-            rate = 5;
-
-        {
-            const char *rc = getenv("D86F_RATE_CODE");
-
-            if (rc != NULL)
-                rate = (uint16_t) atoi(rc);
-        }
-
-        side_flags = (uint16_t) ((side_flags & 0x18) | rate);
-    }
     /* The index hole marks where a revolution starts.  A synthesized track
        begins with the pre-track gap, so the hole sits at its end, not at
        byte zero; the caller can pin it while the layout is being verified. */
