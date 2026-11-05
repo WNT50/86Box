@@ -232,34 +232,41 @@ hp_hil_pointer_tick(void *priv)
        to report.  So the gate is "device addressed and link out of loop",
        not the pass-through mode. */
     if ((dev->kbd_addr != 0) && !dev->loop) {
-        /* Auto Poll (W3.APE): every AP strobe makes the MLC issue a POL and
-           the answer carries whatever the device has.  The model has no AP
-           source, so the pointer sampler doubles as the strobe.  Without
-           this the driver -- which masks the link interrupt and waits for
-           auto-polled answers -- only ever sees the first report. */
-        static int ap_div;
+        /* Auto Poll: every AP strobe makes the MLC issue a POL and the answer
+           carries whatever the device has.  There is no AP source in the
+           model and this ROM never sets W3.APE, so the pointer sampler doubles
+           as the strobe.  AP is a 60 Hz line from the 8041 (Vectra TRM Vol 1,
+           section 4): three polls in every five 10 ms ticks.
 
-        if ((dev->w3 & HIL_W3_APE) && (dev->fifo_count == 0) &&
-            ((ap_div++ % 6) == 0)) {
-            dev->w1 = 0x08;             /* command frame, broadcast address */
+           Two things make a strobe worth issuing: the driver is parked waiting
+           for a frame (HPHIL.SYS spins on DS:0x10 bit 0 at F000:92AB), or the
+           device has motion to report and nothing has polled it yet (OS/2's
+           HIL.SYS stops polling once the link is up and waits for the
+           interrupt instead). */
+        static int ap_div;
+        static const uint8_t ap_pattern[5] = { 1, 0, 1, 1, 0 };
+
+        uint32_t ctx = hp_hil_driver_ctx();
+
+        if (((dev->dx || dev->dy) ||
+             ((ctx != 0) && (mem_readw_phys(ctx + 0x10) & 0x0001))) &&
+            (dev->fifo_count == 0) && ap_pattern[ap_div++ % 5]) {
+            /* Poll this device directly: a broadcast poll is answered by the
+               first device in the chain, and OS/2's HIL.SYS keeps its own
+               idea of which address the mouse got. */
+            dev->w1 = (uint8_t) (0x08 | (dev->kbd_addr & 0x07));
             hp_hil_transmit(HIL_POL);
         }
-        /* Fallback for a driver that never enables AP: hand the report over
-           directly, the System reads it in its interrupt handler. */
-        if ((dev->dx || dev->dy) && ((dev->fifo_count + 3) <= HIL_FIFO_SIZE)) {
-            hp_hil_trace("HIL: host pointer %d,%d -> report\n", dev->dx, dev->dy);
-            hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, HIL_POL_AXES_XY));
-            hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, (uint8_t) dev->dx));
-            hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, (uint8_t) dev->dy));
-            dev->dx = 0;
-            dev->dy = 0;
+        /* Motion is not pushed here: the record is the device's answer to a
+           poll (hp_hil_kbd_frame(), HIL_POL case), and a record that arrives
+           without one makes the driver read a frame it never asked for.  The
+           deltas simply stay latched until the next POL asks for them. */
+        if (dev->dx || dev->dy) {
+            hp_hil_trace("HIL: host pointer %d,%d latched\n", dev->dx, dev->dy);
         }
-        /* The IRR is edge latched: re-assert while a frame is waiting so a
-           request raised while the PIC was masked is not lost. */
-        if (dev->fifo_count) {
-            dev->r3 |= HIL_R3_INT;
-            pic3_int(HIL_IRQ_LINE, 1);
-        }
+        /* The request is raised once, when the command frame lands in the
+           FIFO (see hp_hil_fifo_push()); re-asserting it every tick turned a
+           60 Hz poll into a 240 Hz interrupt storm. */
     }
 
     timer_advance_u64(&dev->pointer_timer, (10000ULL * TIMER_USEC));
@@ -281,7 +288,6 @@ hp_hil_poll_link(void)
         hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, (uint8_t) dev->dy));
         dev->dx = 0;
         dev->dy = 0;
-        pic3_int(HIL_IRQ_LINE, 1);
     }
 }
 
@@ -348,6 +354,8 @@ hp_hil_fifo_pop(void)
     frame     = dev->fifo[dev->fifo_head];
     dev->fifo_head = (dev->fifo_head + 1) % HIL_FIFO_SIZE;
     dev->fifo_count--;
+    hp_hil_trace("HIL: pop %03X at %04X:%04X\n", frame,
+                 cpu_state.seg_cs.seg, cpu_state.pc);
 
     return frame;
 }
@@ -410,8 +418,14 @@ hp_hil_kbd_frame(uint16_t frame)
        broadcast the System uses to look for further devices, and only the
        link-wide commands are for everybody.  Leaving the frame unanswered is
        what makes the System time out at F000:38B7 and end the enumeration. */
+    /* Only the enumeration commands are refused once this device has an
+       address: ACF is how the System walks the chain, and IDD asks the next
+       device further down.  Everything else broadcast on the link - IFC, DSR,
+       DHR, ELB, EPT, POL, the register commands and the link tests - is for
+       every device, and swallowing them leaves the driver thinking the device
+       vanished (OS/2 resets it with DSR before every re-enumeration). */
     if ((dev->kbd_addr != 0) && (addr == 0) &&
-        (data != HIL_IFC) && (data != HIL_DHR))
+        ((data == HIL_IDD) || ((data >= HIL_ACF) && (data <= (HIL_ACF + 0x07)))))
         return;
 
     hp_hil_trace("HIL: device <= %03X (addr %d, op %02X)\n", frame, addr, data);
@@ -522,8 +536,12 @@ hp_hil_kbd_frame(uint16_t frame)
     if ((data >= HIL_POL) && (data <= (HIL_POL + 0x0f))) {
         /* The record ends with the poll command incremented, so the next
            device on the link sees its own address. */
+        /* Hand the poll to the next device in the chain, not back to the
+           address it came from: a broadcast poll (address 0) belongs to the
+           first device, and re-addressing it to 0+1 pointed it at this device
+           again, so the System never saw the end of the chain. */
         hp_hil_fifo_push((uint16_t) ((frame & ~0x0700) |
-                                     (((addr + 1) & 0x07) << 8)));
+                                     ((((dev->kbd_addr ? dev->kbd_addr : addr) + 1) & 0x07) << 8)));
     } else {
         hp_hil_fifo_push(frame);
     }
@@ -548,7 +566,6 @@ hp_hil_transmit(uint8_t data)
 
     hp_hil_trace("HIL: send %03X (addr %d, %s %02X)%s\n", frame, addr,
                  command ? "op" : "data", data, dev->loop ? " [loop]" : "");
-
     /* The adapter is only the wire: a device in loop-back hands the frame
        back itself (HP-HIL TRM 1-10), and a device in pass-thru answers the
        commands addressed to it. */
@@ -622,14 +639,25 @@ hp_hil_read(uint16_t port, void *priv)
 
     switch (port) {
         case 0x006c: /* R0: data byte of the frame on top, and pop it */
-            ret = (uint8_t) (hp_hil_fifo_pop() & 0xff);
+            if (dev->fifo_count) {
+                ret = (uint8_t) (hp_hil_fifo_pop() & 0xff);
+            } else {
+                /* Nobody answered: the MLC reports a frame error (0xFD)
+                   rather than handing back a zero, which is what the
+                   driver's wait loop (F000:7B86) looks for. */
+                ret      = 0xfd;
+                dev->r2 |= HIL_R2_FERR;
+            }
             break;
 
         case 0x006d: /* R1: command bit + address of the frame on top */
             if (dev->fifo_count)
                 ret = (uint8_t) ((hp_hil_fifo_peek() >> 8) & 0x0f);
             else
-                ret = 0x00;
+                /* Bit 3 is set when no frame is waiting: the reader
+                   (F000:7BCA) stops on it, and handing back 0x00 instead
+                   makes it believe another frame is coming and poll forever. */
+                ret = 0x08;
             break;
 
         case 0x006e: /* R2: parity, frame and overflow errors */
