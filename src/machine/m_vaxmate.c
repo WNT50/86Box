@@ -44,8 +44,8 @@
 extern dma_t dma[8];
 extern uint8_t dma_m;
 
-/* The 64 KB BIOS is two 32 KB EPROMs on a 16-bit bus: the 3.10 device holds
-   the low (even) byte, the 3.11 device the high (odd) byte. */
+/* The 64 KB BIOS is two 32 KB EPROMs on a 16-bit bus: the 310E6 device holds
+   the low (even) byte, the 311E6 device the high (odd) byte. */
 #define VAXMATE_BIOS_EVEN "roms/machines/vaxmate/vaxmate_310E6_even.bin"
 #define VAXMATE_BIOS_ODD  "roms/machines/vaxmate/vaxmate_311E6_odd.bin"
 
