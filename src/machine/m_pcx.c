@@ -41,6 +41,8 @@
 #include <86box/device.h>
 #include <86box/io.h>
 #include <86box/machine.h>
+
+extern volatile int fdcinited;
 #include <86box/mem.h>
 #include <86box/nmi.h>
 #include <86box/pcx_mmu.h>
@@ -857,6 +859,10 @@ machine_pcx_init_ex(const machine_t *model)
     /* WD2791 formatter: registers at 0xf900-0xf903, INTRQ on IR6, DRQ on the
        80186 DMA channel 1.  The 0xf904 latch above feeds it drive/side/DDEN. */
     pcx.fdc = wd2791_init();
+    /* The Qt front end only builds the floppy indicators (and their media
+       menus) when the standard controller has announced itself.  This machine
+       brings its own WD2791 instead, so say so here. */
+    fdcinited = 1;
 
     /* Not implemented yet -- see the TODO list below. */
 
