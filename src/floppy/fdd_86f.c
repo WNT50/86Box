@@ -1539,6 +1539,11 @@ d86f_read_sector_id(void *priv, const int side, const int match)
                     } else if (dev->state == STATE_0A_READ_ID)
                         dev->state--;
                     else {
+                        if (getenv("PCX_IDLOG") != NULL)
+                            pclog("[IDBAD] C=%d H=%d R=%d N=%d want R=%d\n",
+                                  dev->last_sector.id.c, dev->last_sector.id.h,
+                                  dev->last_sector.id.r, dev->last_sector.id.n,
+                                  dev->req_sector.id.r);
                         dev->error_condition |= 1; /* Mark that there was an ID CRC error. */
                         dev->state++;
                     }
