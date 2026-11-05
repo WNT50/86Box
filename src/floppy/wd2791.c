@@ -186,14 +186,22 @@ wd_irq_lower(wd2791_t *dev)
     picintc(1 << WD2791_IRQ);
 }
 
+/* Bytes the host actually took out of the data register for the command now
+   running; [DONE] prints it so "found the sector" and "delivered the sector"
+   cannot be confused again. */
+static int wd_dbg_pops = 0;
+static int wd_dbg_why  = 0;
+static uint32_t wd_dbg_cmd_t = 0;
+
 /* Finish the command: drop busy, latch the interrupt and let the registers
    read back.  Every path out of the state machine ends here. */
 static void
 wd_finish(wd2791_t *dev)
 {
     if (getenv("PCX_FDCLOG") != NULL)
-        pclog("[DONE] t=%u cmd=%02X bc=%d state=%d\n", plat_get_ticks(),
-              dev->command, dev->byte_count, dev->state);
+        pclog("[DONE] t=%u cmd=%02X bc=%d pops=%d state=%d st=%02X why=%d trk=%d sec=%d side=%d\n",
+              plat_get_ticks(), dev->command, dev->byte_count, wd_dbg_pops, dev->state,
+              dev->status, wd_dbg_why, dev->track_reg, dev->sector_reg, dev->side);
     /* Post-byte gap: CRC and the status phase.  Without it the interrupt lands
        in the same emulated instant as the last data byte, which is the one
        moment a polled driver is not yet listening for it. */
@@ -215,6 +223,9 @@ wd_finish(wd2791_t *dev)
 static void
 wd_done(wd2791_t *dev)
 {
+    if (getenv("PCX_FDCLOG") != NULL)
+        pclog("[WDONE] bc=%d size=%d buf=%d dr=%d state=%d\n", dev->byte_count,
+              dev->sector_size, dev->buf_len, dev->dr_full, dev->state);
     /* Hold the command open until the host has read the bytes still queued
        behind the data register, or a polling driver would see BUSY drop in the
        middle of the sector. */
@@ -381,6 +392,7 @@ wd_buf_pop(wd2791_t *dev)
     dev->data_reg = dev->dr;
     dev->dr_full  = 0;
     dev->drq      = 0;
+    wd_dbg_pops++;
 
     if ((dev->buf_len == 0) && (dev->byte_count >= dev->sector_size)) {
         if (dev->chain_pending) {
@@ -389,7 +401,7 @@ wd_buf_pop(wd2791_t *dev)
             dev->chain_pending = 0;
             wd_chain_next(dev);
         } else if (dev->done_pending) {
-            wd_finish(dev);
+            wd_dbg_why = __LINE__; wd_finish(dev);
         }
     }
 
@@ -428,7 +440,18 @@ wd_data_in(void *priv, uint8_t data, int last)
         dev->id_buf[dev->id_count] = data;
 
     if (dev->fdc.dma) {
+        /* Put the byte where the hardware keeps it while DRQ is asserted: the
+           data register.  The DMA controller fetches it through the source
+           pointer (an I/O read of 0xF903), so without this the channel would
+           read back whatever the port returned on its own. */
+        dev->dr      = data;
+        dev->dr_full = 1;
+        dev->drq     = 1;
         res = dma_channel_write(dev->fdc.dma_ch, data);
+        if (res != DMA_NODATA) {
+            dev->dr_full = 0;
+            dev->drq     = 0;
+        }
         if (getenv("PCX_DMADBG") != NULL) {
             static int n;
             if (n++ < 24)
@@ -439,7 +462,7 @@ wd_data_in(void *priv, uint8_t data, int last)
                data register so a polling driver still gets it. */
             if (!wd_buf_push(dev, data)) {
                 dev->status |= WD_S_LOST;
-                wd_done(dev);
+                wd_dbg_why = __LINE__; wd_done(dev);
                 return -1;
             }
         } else if (res & DMA_OVER) {
@@ -449,13 +472,22 @@ wd_data_in(void *priv, uint8_t data, int last)
     } else {
         if (!wd_buf_push(dev, data)) {
             dev->status |= WD_S_LOST;
-            wd_done(dev);
+            wd_dbg_why = __LINE__; wd_done(dev);
             return -1;
         }
     }
 
     dev->byte_count++;
     dev->id_count++;
+
+    if ((dev->byte_count == 1) && (getenv("PCX_FDCLOG") != NULL))
+        pclog("[WD1ST] cmd=%02X dt=%u ms pos=%u state=%d last=%d\n", dev->command,
+              plat_get_ticks() - wd_dbg_cmd_t, d86f_get_track_pos(wd_drive(dev)),
+              dev->state, last);
+
+    if (getenv("PCX_DATALOG") != NULL && ((dev->byte_count & 63) == 0))
+        pclog("[WDIN] bc=%d last=%d size=%d state=%d dma=%d\n", dev->byte_count,
+              last, dev->sector_size, dev->state, dev->fdc.dma);
 
     if (dev->state == WD_ST_READID) {
         /* C, H, R, N and the two CRC bytes. */
@@ -472,7 +504,7 @@ wd_data_in(void *priv, uint8_t data, int last)
                 else if (dev->update)
                     dev->track_reg = (uint8_t) dev->target;
             }
-            wd_done(dev);
+            wd_dbg_why = __LINE__; wd_done(dev);
         }
         return 0;
     }
@@ -481,7 +513,7 @@ wd_data_in(void *priv, uint8_t data, int last)
         /* The drive layer walks the whole track and signals the end with
            last; a track is longer than one sector, so only last finishes. */
         if (last)
-            wd_done(dev);
+            wd_dbg_why = __LINE__; wd_done(dev);
         return last ? -1 : 0;
     }
 
@@ -527,12 +559,12 @@ wd_data_in(void *priv, uint8_t data, int last)
                 return -1;
             }
 
-            wd_done(dev);
+            wd_dbg_why = __LINE__; wd_done(dev);
             return -1;
             /* DRQ still reflects the byte queued behind the register. */
             return -1;
         }
-        wd_done(dev);
+        wd_dbg_why = __LINE__; wd_done(dev);
         return -1;
     }
 
@@ -576,7 +608,7 @@ wd_data_out(void *priv, int last)
         return data & 0xff;
     }
 
-    wd_done(dev);
+    wd_dbg_why = __LINE__; wd_done(dev);
 
     return data & 0xff;
 }
@@ -720,10 +752,21 @@ wd_start_read(wd2791_t *dev)
                   CS, cpu_state.pc, ES, DI);
     }
 
-    /* Start the search where the head is, as the real chip does: rewinding to
-       the index hole made every command wait almost a full revolution, and the
-       driver gives up at about 80 ms. */
+    /* Start at the index hole.  The controller scans from there, and the
+       estimate this used to compute from the track length landed further into
+       the revolution than the driver is willing to wait: with a correct 100000
+       cell track it put the head 78 ms in, while the PC-D read loop gives up
+       after 28 ms and never saw a byte. */
+    d86f_set_track_pos(drv, 0);
+    if (getenv("PCX_FDCLOG") != NULL)
+        pclog("[SEEKPOS] -> pos=%u\n", d86f_get_track_pos(drv));
+
     wd_sector_read(dev, dev->sector_reg);
+
+    /* Two revolutions to find the record; wd_data_in() cancels this the moment
+       the first byte arrives.  Without it a record that is never found leaves
+       BUSY asserted for ever, and the host polls a status that never changes. */
+    timer_set_delay_u64(&dev->timer, 2 * wd_search_us() * TIMER_USEC);
 
     if (drv != NULL)
         timer_set_delay_u64(&dev->byte_timer, fdd_get_byte_period(drv));
@@ -740,7 +783,7 @@ wd_start_write(wd2791_t *dev)
     if (drv->writeprot) {
         dev->status     |= WD_S_WP;
         dev->wp_latched  = 1;
-        wd_done(dev);
+        wd_dbg_why = __LINE__; wd_done(dev);
         return;
     }
 
@@ -791,7 +834,7 @@ wd_rw_sector(wd2791_t *dev, uint8_t val)
 
     if ((drv == NULL) || !fdd_can_read_medium(drv)) {
         dev->status |= WD_S_RNF;
-        wd_done(dev);
+        wd_dbg_why = __LINE__; wd_done(dev);
         return;
     }
 
@@ -820,7 +863,7 @@ wd_read_address(wd2791_t *dev, uint8_t val)
 
     if ((drv == NULL) || !fdd_can_read_medium(drv)) {
         dev->status |= WD_S_RNF;
-        wd_done(dev);
+        wd_dbg_why = __LINE__; wd_done(dev);
         return;
     }
 
@@ -842,7 +885,7 @@ wd_read_track(wd2791_t *dev, uint8_t val)
 
     if ((drv == NULL) || !fdd_can_read_medium(drv)) {
         dev->status |= WD_S_RNF;
-        wd_done(dev);
+        wd_dbg_why = __LINE__; wd_done(dev);
         return;
     }
 
@@ -861,7 +904,7 @@ wd_write_track(wd2791_t *dev, UNUSED(uint8_t val))
     /* Formatting needs the MFM encoder (A1 sync words, gap and CRC layout).
        Until that is written the command completes without touching the
        medium so a formatter that probes the controller does not hang. */
-    wd_done(dev);
+    wd_dbg_why = __LINE__; wd_done(dev);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -880,6 +923,32 @@ wd_force_interrupt(wd2791_t *dev, uint8_t val)
        exactly that pair, 0xd0 then 0xd8, and expects one interrupt from the
        second one (v3 BIOS 0xfcc20). */
     timer_disable(&dev->timer);
+
+    /* Terminating a command has to reach the drive as well.  A Type II read
+       that was left chaining into the next record keeps the bitstream engine
+       spinning; it keeps searching, and the command it belongs to is gone, so
+       the guest's next read starts on top of a record already in flight. */
+    if (dev->busy) {
+        fdd_drive_t *drv = wd_drive(dev);
+
+        if (drv != NULL)
+            fdd_stop(drv);
+
+        if (getenv("PCX_FDCLOG") != NULL)
+            pclog("[ABORT] cmd=%02X state=%d bc=%d buf=%d chain=%d multi=%d\n",
+                  dev->command, dev->state, dev->byte_count, dev->buf_len,
+                  dev->chain_pending, dev->multi);
+
+        dev->chain_pending = 0;
+        dev->done_pending  = 0;
+        dev->multi         = 0;
+        dev->buf_len       = 0;
+        dev->buf_head      = 0;
+        dev->buf_tail      = 0;
+        dev->dr_full       = 0;
+        /* No post-byte gap: this is an abort, not the end of a record. */
+        dev->latched       = 1;
+    }
 
     /* Force Interrupt is the one command that does not set BUSY.  If a command
        was executing it is terminated and the remaining status bits are left
@@ -906,6 +975,19 @@ static void
 wd2791_command(wd2791_t *dev, uint8_t val)
 {
 
+    /* A command written while the previous one is still running terminates it
+       (WD279X-02 data sheet).  The drive's bitstream engine has to be stopped
+       with it: left spinning it reaches the end of the record it was fetching
+       and reports the completion through fdc_track_finishread(), which lands on
+       whichever command is busy by then -- and that command ends with status 0
+       and no data, looking like a successful read of nothing. */
+    {
+        fdd_drive_t *drv = wd_drive(dev);
+
+        if (drv != NULL)
+            fdd_stop(drv);
+    }
+
     /* A new command abandons whatever the previous one left in the buffer. */
     dev->buf_head     = 0;
     dev->buf_tail     = 0;
@@ -923,7 +1005,9 @@ wd2791_command(wd2791_t *dev, uint8_t val)
        not inherit it, or every read on a write-protected disk reports WP. */
     dev->wp_latched = 0;
 
-    dev->command = val;
+    dev->command  = val;
+    wd_dbg_pops   = 0;
+    wd_dbg_cmd_t  = plat_get_ticks();
     dev->busy    = 1;
     dev->status &= ~(WD_S_CRC | WD_S_RNF | WD_S_LOST);
 
@@ -1026,8 +1110,42 @@ wd2791_reg_read(uint16_t port, UNUSED(void *priv))
 
         default:
 
-            if (wd_buf_pop(dev) < 0)
-                return dev->data_reg;
+            {
+                static int l = -1;
+                int        r;
+
+                if (l < 0)
+                    l = getenv("PCX_DATALOG") ? 1 : 0;
+                r = wd_buf_pop(dev);
+                if (l) {
+                    static int once;
+                    if (!once) {
+                        unsigned k;
+                        uint16_t sss = (uint16_t) cpu_state.seg_ss.seg;
+                        uint16_t ssp = (uint16_t) cpu_state.regs[4].w;
+                        uint16_t bpp = (uint16_t) cpu_state.regs[5].w;
+
+                        once = 1;
+                        pclog("[DATAFRAME] sp=%04X bp=%04X\n", ssp, bpp);
+                        for (k = 0; k < 8; k++) {
+                            uint32_t a = ((uint32_t) sss << 4) + ((ssp + k * 2) & 0xffff);
+                            pclog("[DATAFRAME] sp+%02X = %04X\n", k * 2,
+                                  (uint16_t) readmembl(a) | (uint16_t) (readmembl(a + 1) << 8));
+                        }
+                        for (k = 0; k < 8; k++) {
+                            uint32_t a = ((uint32_t) sss << 4) + ((bpp + k * 2) & 0xffff);
+                            pclog("[DATAFRAME] bp+%02X = %04X\n", k * 2,
+                                  (uint16_t) readmembl(a) | (uint16_t) (readmembl(a + 1) << 8));
+                        }
+                    }
+                }
+                if (l)
+                    pclog("[DATARD] pop=%d data=%02X st=%02X ES:DI=%04X:%04X @%04X:%04X\n", r,
+                          dev->data_reg, dev->status, (uint16_t) cpu_state.seg_es.seg,
+                          (uint16_t) cpu_state.regs[7].w, (uint16_t) cpu_state.temp_CS,
+                          (uint16_t) cpu_state.temp_pc);
+                (void) r;
+            }
             return dev->data_reg;
     }
 }
@@ -1044,8 +1162,9 @@ wd2791_reg_write(uint16_t port, uint8_t val, UNUSED(void *priv))
     switch (port & 3) {
         case 0x00:
             if (getenv("PCX_FDCLOG") != NULL)
-                pclog("[CMD] t=%u %02X C=%d H=%d R=%d N=%d\n", plat_get_ticks(), val, dev->track_reg, dev->side,
-                      dev->sector_reg, wd_size_code(dev));
+                pclog("[CMD] t=%u %02X C=%d H=%d R=%d N=%d @%04X:%04X\n", plat_get_ticks(), val, dev->track_reg, dev->side,
+                      dev->sector_reg, wd_size_code(dev),
+                      (uint16_t) cpu_state.temp_CS, (uint16_t) cpu_state.temp_pc);
             wd2791_command(dev, val);
             break;
 
@@ -1106,12 +1225,12 @@ wd2791_timer(void *priv)
     }
 
     if (dev->state == WD_ST_WRITE_END) {
-        wd_done(dev);
+        wd_dbg_why = __LINE__; wd_done(dev);
         return;
     }
 
     if (dev->state == WD_ST_LATCH) {
-        wd_finish(dev);
+        wd_dbg_why = __LINE__; wd_finish(dev);
         return;
     }
 
@@ -1121,7 +1240,7 @@ wd2791_timer(void *priv)
         if (getenv("PCX_FDCLOG"))
             pclog("[WRIDLE] bytes=%d\n", dev->byte_count);
         dev->drq = 0;
-        wd_done(dev);
+        wd_dbg_why = __LINE__; wd_done(dev);
         return;
     }
 
@@ -1138,7 +1257,7 @@ wd2791_timer(void *priv)
         if (getenv("PCX_FDCLOG") != NULL)
             pclog("[TIMEOUT] sec=%d bc=%d buf=%d\n", dev->sector_reg, dev->byte_count, dev->buf_len);
         dev->status |= WD_S_RNF;
-        wd_done(dev);
+        wd_dbg_why = __LINE__; wd_done(dev);
         return;
     }
 }
@@ -1162,7 +1281,7 @@ wd_noidam(void *priv)
         return;
 
     dev->status |= WD_S_RNF;
-    wd_done(dev);
+    wd_dbg_why = __LINE__; wd_done(dev);
 }
 
 /* Every error the drive layer reports for a data-phase command.  The generic
@@ -1176,14 +1295,21 @@ wd_ext_error(void *priv, int st5, int st6)
     if ((dev->type1) || (!dev->busy))
         return;
 
+    /* fdc_error() carries the uPD765 numbering: 0x01 is "no ID address mark"
+       and 0x04 is "ID marks found but not the sector asked for".  Both mean
+       RNF to this chip, and leaving 0x04 unmapped made a read of a missing
+       record finish with status 0 -- a successful transfer of nothing, which
+       the guest then treated as a loaded boot area. */
     if (st5 & 0x01)
+        dev->status |= WD_S_RNF;
+    if (st5 & 0x04)
         dev->status |= WD_S_RNF;
     if (st5 & 0x10)
         dev->status |= WD_S_CRC;
     if (st6 & 0x20)
         dev->status |= WD_S_CRC;
 
-    wd_done(dev);
+    wd_dbg_why = __LINE__; wd_done(dev);
 }
 
 static void
@@ -1329,6 +1455,7 @@ wd2791_init(void)
     dev->fdc.irq    = WD2791_IRQ;
     dev->fdc.dma    = 1;
     dev->fdc.dma_ch = WD2791_DMA;
+
     dev->fdc.bus    = 0;
 
     /* The WD279x has no DTL register: when the ID says the sector is 128 bytes
