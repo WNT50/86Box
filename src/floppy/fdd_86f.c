@@ -3352,6 +3352,12 @@ d86f_write_track(void *priv, FILE **fp, const int side, uint16_t *da0, uint16_t 
 {
     fdd_drive_t *  drv             = (fdd_drive_t *) priv;
     const uint32_t array_size      = d86f_get_array_size(drv, side, 0);
+
+    if (getenv("D86F_EXPORT_DBG") != NULL)
+        pclog("[XPORT] side=%d raw=%u arr=%u side_flags=%02X extra=%d\n", side,
+              (unsigned) d86f_get_raw_size(drv, side), (unsigned) array_size,
+              drv->d86f_handler.side_flags(drv),
+              (int) drv->d86f_handler.extra_bit_cells(drv, side));
     uint16_t       side_flags      = drv->d86f_handler.side_flags(drv);
     uint32_t       extra_bit_cells = drv->d86f_handler.extra_bit_cells(drv, side);
 
