@@ -766,7 +766,7 @@ wd_data_out(void *priv, int last)
         dev->sector_reg = (uint8_t) (dev->sector_reg + 1);
         dev->byte_count = 0;
         fdd_writesector(wd_drive(dev), dev->sector_reg, dev->track_reg,
-                        dev->side, dev->fdc.rate, dev->sector_size);
+                        dev->side, dev->fdc.rate, wd_size_code(dev));
         return data & 0xff;
     }
 
@@ -1039,6 +1039,10 @@ wd_start_write(wd2791_t *dev)
                                           dev->side, dev->sector_reg);
         if (n >= 0)
             dev->sector_size = 128 << n;
+        if (getenv("PCX_FDCLOG") != NULL)
+            pclog("[SIDW] C=%d H=%d R=%d -> n=%d size=%d dma=%d\n",
+                  dev->track_reg, dev->side, dev->sector_reg, n, dev->sector_size,
+                  dev->fdc.dma);
     }
     wd_ts("ev=wstart R=%d size=%d multi=%d dma=%d", dev->sector_reg,
           dev->sector_size, dev->multi, dev->fdc.dma);
@@ -1772,6 +1776,11 @@ wd2791_reset(void)
     dev->id_count   = 0;
 
     dev->sector_size = WD_SECTOR_SIZE;
+
+    /* The rate is part of the controller state: leaving it at zero told
+       d86f_export this was a 500 kbps medium, and the exported image then
+       described tracks twice as long as the ones the drive actually turns. */
+    wd2791_update_rate(dev);
 }
 
 void
