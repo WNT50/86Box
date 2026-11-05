@@ -447,14 +447,14 @@ hp_hil_kbd_frame(uint16_t frame)
             break;
 
         case HIL_IDD:
-            /* ID byte, then the Describe record (Appendix C): header, the
-               16-bit resolution that follows a non-zero axis count, and the
-               I/O descriptor byte announcing the buttons. */
+            /* ID byte, then the Describe record: the header, and the 16-bit
+               resolution that follows a non-zero axis count.  Four frames,
+               exactly what hle_hp_46060b_device::hil_idd() sends; an extra
+               frame here leaves the link one byte out of step. */
             hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, dev->kbd_id));
             hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, HIL_MOUSE_DESCR));
-            hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, 0xb4)); /* 180 counts/m, low */
-            hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, 0x00)); /* high */
-            hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, 0x03)); /* two buttons */
+            hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, 0xc2)); /* resolution, low */
+            hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, 0x1e)); /* resolution, high */
             break;
 
         case HIL_ACF + 0:
