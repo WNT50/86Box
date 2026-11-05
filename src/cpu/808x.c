@@ -2207,6 +2207,20 @@ execx86_instruction(void)
         }
     }
 
+    /* PCX_REGS=1: the state the moment control lands in the loader's buffer. */
+    {
+        static int rr = -1, shown;
+
+        if (rr < 0)
+            rr = getenv("PCX_REGS") ? 1 : 0;
+        if (rr && !shown && (CS == 0x0070) && (cpu_state.pc <= 0x0002)) {
+            shown = 1;
+            pclog("[REGS] AX=%04X BX=%04X CX=%04X DX=%04X SI=%04X DI=%04X "
+                  "BP=%04X SP=%04X DS=%04X ES=%04X SS=%04X FL=%04X\n",
+                  AX, BX, CX, DX, SI, DI, BP, SP, DS, ES, SS, cpu_state.flags);
+        }
+    }
+
     /* PCX_TR2=1: ring buffer of the last instructions executed before the
        kernel's floppy driver falls into its HLT loop at 1000:03A4. */
     {
