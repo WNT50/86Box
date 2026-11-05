@@ -1171,6 +1171,13 @@ d86f_get_bit(void *priv, const int side)
         }
     } else
         dev->last_word[side] |= current_bit;
+
+    if (getenv("PCX_FDCLOG") != NULL) {
+        static unsigned n;
+        if ((n++ % 1000) == 0)
+            pclog("[86FBIT] n=%u side=%d word=%04X pos=%u\n", n, side,
+                  dev->last_word[side], (unsigned) dev->track_pos);
+    }
 }
 
 void
@@ -1409,6 +1416,11 @@ d86f_find_address_mark_mfm(void *priv, const int side, find_t *find,
     d86f_get_bit(drv, side);
 
     if (dev->last_word[side] == 0x4489) {
+        static unsigned a1;
+        a1++;
+        if (getenv("PCX_FDCLOG") != NULL && ((a1 % 20) == 0))
+            pclog("[86FA1] count=%u pos=%u state=%02X\n", a1,
+                  (unsigned) dev->track_pos, dev->state);
         find->sync_marks++;
         find->sync_pos = dev->track_pos;
         return;
@@ -1424,7 +1436,12 @@ d86f_find_address_mark_mfm(void *priv, const int side, find_t *find,
     }
 
     if ((dev->last_word[side] == req_am) && (find->sync_marks >= 3)) {
-        if (d86f_word_is_aligned(drv, side, find->sync_pos)) {
+        int al = d86f_word_is_aligned(drv, side, find->sync_pos);
+        if (getenv("PCX_FDCLOG") != NULL)
+            pclog("[86FAM] pos=%u state=%02X sync=%d aligned=%d syncpos=%u\n",
+                  (unsigned) dev->track_pos, dev->state, (int) find->sync_marks,
+                  al, (unsigned) find->sync_pos);
+        if (al) {
             dev->calc_crc.word = 0xcdb4;
             crc16_calc(dev->crc_table, decodefm(drv, dev->last_word[side]),
                        &(dev->calc_crc));
@@ -1490,6 +1507,9 @@ d86f_write_find_address_mark_mfm(void *priv, const int side, find_t *find)
         find->sync_marks++;
         find->sync_pos = dev->track_pos;
         if (find->sync_marks == 3) {
+            if (getenv("PCX_FDCLOG") != NULL)
+                pclog("[86FSYNC] pos=%u state=%02X\n", (unsigned) dev->track_pos,
+                      dev->state);
             dev->calc_crc.word       = 0xcdb4;
             dev->preceding_bit[side] = 1;
             find->sync_marks         = 0;
@@ -1571,6 +1591,14 @@ d86f_read_sector_id(void *priv, const int side, const int match)
                        different sector size report "record not found" (SINIX
                        track 1 holds 256-byte sectors, the driver asked for
                        512). */
+                    if (getenv("PCX_FDCLOG") != NULL)
+                        pclog("[86FID] found %d/%d/%d/%d req %d/%d/%d/%d match=%d state=%d\n",
+                              dev->last_sector.id.c, dev->last_sector.id.h,
+                              dev->last_sector.id.r, dev->last_sector.id.n,
+                              dev->req_sector.id.c, dev->req_sector.id.h,
+                              dev->req_sector.id.r, dev->req_sector.id.n,
+                              match, dev->state);
+
                     if (((dev->last_sector.id.c == dev->req_sector.id.c) &&
                          (dev->last_sector.id.h == dev->req_sector.id.h) &&
                          (dev->last_sector.id.r == dev->req_sector.id.r)) || !match) {
@@ -1610,6 +1638,26 @@ d86f_read_sector_id(void *priv, const int side, const int match)
                             }
                         }
 
+                        if (getenv("PCX_FDCLOG") != NULL)
+                            pclog("[86FMISS] %d/%d/%d -> state %02X->%02X idx=%u pos=%u\n",
+                                  dev->last_sector.id.c, dev->last_sector.id.h,
+                                  dev->last_sector.id.r, dev->state,
+                                  (unsigned) (dev->state - 1), (unsigned) dev->index_count,
+                                  (unsigned) dev->track_pos);
+
+                        /* Going back to the find-ID state with the byte counters
+                           still at "ID complete" made the decoder treat the next
+                           address mark's bytes as the CRC of the rejected ID, so
+                           no further sector was ever latched and the command ran
+                           into its two-revolution limit.  A rejected ID has to
+                           leave the detector exactly as a fresh scan needs it. */
+                        dev->id_find.sync_marks    = 0;
+                        dev->id_find.bits_obtained = 0;
+                        dev->id_find.bytes_obtained = 0;
+                        dev->id_find.sync_pos      = 0xffffffff;
+                        /* EXPERIMENT: re-align the MFM word decoder */
+                        dev->preceding_bit[side] = 1;
+                        dev->last_word[side]     = 0;
                         dev->state--;
                     }
                 }
@@ -2733,6 +2781,13 @@ d86f_poll(void *priv)
         case STATE_0C_FIND_ID:
         case STATE_11_FIND_ID:
         case STATE_16_FIND_ID:
+            if (getenv("PCX_FDCLOG") != NULL) {
+                static unsigned n;
+                if ((n++ % 2000) == 0)
+                    pclog("[86FSCAN] n=%u state=%02X idx=%u pos=%u sync=%d\n",
+                          n, dev->state, (unsigned) dev->index_count,
+                          (unsigned) dev->track_pos, (int) dev->id_find.sync_marks);
+            }
             if (mfm)
                 d86f_find_address_mark_mfm(drv, side, &(dev->id_find),0x5554, 0,
                                            0, 0);
@@ -3336,7 +3391,13 @@ d86f_write_track(void *priv, FILE **fp, const int side, uint16_t *da0, uint16_t 
         uint16_t     code = (fdc != NULL) ? (uint16_t) (fdc->rate & 7) : 2;
 
         side_flags      = (uint16_t) ((side_flags & 0x18) | code);
-        extra_bit_cells = (uint32_t) kbps[code] * 200;    /* 60/300 of a second */
+        /* The reader turns this field into the track length in bit cells by
+           dividing by four, and one revolution at 250 kbit and 300 rpm holds
+           100000 cells -- 50000 data bits, two cells each.  Writing
+           kbps * 200 here (50000) declared an eighth of a track, so the
+           index hole fired every 1/8 revolution and a search for anything
+           past the second sector ran out of its two revolutions first. */
+        extra_bit_cells = (uint32_t) kbps[code] * 200 * 8;
     }
     /* The index hole marks where a revolution starts.  A synthesized track
        begins with the pre-track gap, so the hole sits at its end, not at
@@ -3506,6 +3567,9 @@ d86f_common_command(void *priv, const int sector, const int track, const int sid
     dev->req_sector.id.n = sector_size;
 
     if (fdd_get_head(drv) && (d86f_get_sides(drv) == 1)) {
+        if (getenv("PCX_FDCLOG") != NULL)
+            pclog("[86F] bail: head=%d sides=%d sec=%d trk=%d side=%d\n",
+                  fdd_get_head(drv), d86f_get_sides(drv), sector, track, side);
         fdc_noidam(drv->fdc);
         dev->state       = STATE_IDLE;
         dev->index_count = 0;
@@ -3533,6 +3597,12 @@ d86f_readsector(void *priv, const int sector, const int track, const int side,
     ret = d86f_common_command(drv, sector, track, side, rate, sector_size);
     if (!ret)
         return;
+
+    if (getenv("PCX_FDCLOG") != NULL)
+        pclog("[86F] rd sec=%d trk=%d side=%d size=%d densel=%d mfm_fdc=%d mfm_img=%d head=%d sides=%d\n",
+              sector, track, side, sector_size, d86f_wrong_densel(drv) ? 1 : 0,
+              fdc_is_mfm(drv->fdc) ? 1 : 0, d86f_is_mfm(drv) ? 1 : 0,
+              fdd_get_head(drv), d86f_get_sides(drv));
 
     if (d86f_wrong_densel(drv)) {
         dev->state = STATE_SECTOR_NOT_FOUND;
