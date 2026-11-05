@@ -195,6 +195,10 @@ typedef struct fdc_t {
     int (*ext_data)(void *ext, uint8_t data, int last);
     int (*ext_getdata)(void *ext, int last);
     void (*ext_noidam)(void *ext);
+    /* The record length of a read is taken from the ID the controller matches,
+       not from the density assumption: an FM track may hold 512 byte sectors.
+       Controllers that need it install this hook to hear the matched ID. */
+    void (*ext_sectorid)(void *ext, uint8_t c, uint8_t h, uint8_t r, uint8_t n);
     /* Some controllers do not drive the generic stat machine at all; this hook
        hands them every error the drive layer reports so they can finish the
        command themselves instead of leaving BUSY asserted. */

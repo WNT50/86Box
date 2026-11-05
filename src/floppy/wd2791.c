@@ -733,6 +733,18 @@ wd_start_read(wd2791_t *dev)
     if (drv == NULL)
         return;
 
+    /* The density latch on this board does not describe the medium: the same
+       value (0x05) boots an MFM DOS disk on the PC-D and an FM SINIX disk on
+       the PC-X, and MAME boots both.  Take the encoding from the image -- that
+       is what the head will actually find -- instead of from the latch, which
+       only says what the last write put there. */
+    if (drv->d86f_handler.side_flags != NULL) {
+        int mfm = ((drv->d86f_handler.side_flags(drv) & 0x18) == 0x08);
+
+        dev->fdc.mfm = mfm;
+        dev->dden    = mfm ? 0 : 1;
+    }
+
     dev->byte_count  = 0;
     dev->state       = WD_ST_READ;
     /* The record length the command asks for follows N (or the medium, in
@@ -1287,6 +1299,25 @@ wd_noidam(void *priv)
 /* Every error the drive layer reports for a data-phase command.  The generic
    path rewrites fdc->stat, which this controller never looks at, so without
    this hook a chained sector that fails left the command busy for ever. */
+/* The record length of a read comes from the ID the controller matched, not
+   from the density: an FM track can perfectly well hold 512 byte sectors, and
+   assuming 128 for every FM sector cut the transfer short on the SINIX boot
+   disk. */
+static void
+wd_ext_sectorid(void *priv, uint8_t c, uint8_t h,
+                uint8_t r, uint8_t n)
+{
+    wd2791_t *dev = (wd2791_t *) priv;
+
+    if (n > 7)
+        return;
+
+    if (getenv("PCX_FDCLOG") != NULL)
+        pclog("[WDSID] id %d/%d/%d/%d -> size=%d\n", c, h, r, n, 128 << n);
+
+    dev->sector_size = 128 << n;
+}
+
 static void
 wd_ext_error(void *priv, int st5, int st6)
 {
@@ -1468,6 +1499,7 @@ wd2791_init(void)
     dev->fdc.ext_data     = wd_data_in;
     dev->fdc.ext_getdata  = wd_data_out;
     dev->fdc.ext_noidam   = wd_noidam;
+    dev->fdc.ext_sectorid = wd_ext_sectorid;
     dev->fdc.ext_error    = wd_ext_error;
     dev->fdc.ext_seek_done = wd_seek_complete;
     dev->fdc.ext_diskchange = wd_diskchange;

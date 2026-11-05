@@ -1594,6 +1594,17 @@ d86f_read_sector_id(void *priv, const int side, const int match)
                        different sector size report "record not found" (SINIX
                        track 1 holds 256-byte sectors, the driver asked for
                        512). */
+                    {
+                        fdc_t *fdc_match = (fdc_t *) drv->fdc;
+
+                        if (fdc_match->ext_sectorid != NULL)
+                            fdc_match->ext_sectorid(fdc_match->ext,
+                                                    dev->last_sector.id.c,
+                                                    dev->last_sector.id.h,
+                                                    dev->last_sector.id.r,
+                                                    dev->last_sector.id.n);
+                    }
+
                     if (getenv("PCX_FDCLOG") != NULL)
                         pclog("[86FID] found %d/%d/%d/%d req %d/%d/%d/%d match=%d state=%d\n",
                               dev->last_sector.id.c, dev->last_sector.id.h,
@@ -2825,6 +2836,14 @@ d86f_poll(void *priv)
         case STATE_06_FIND_DATA:
         case STATE_11_FIND_DATA:
         case STATE_16_FIND_DATA:
+            if (getenv("PCX_FDCLOG") != NULL) {
+                static unsigned dn;
+
+                if ((dn++ % 200) == 0)
+                    pclog("[86FDATA] n=%u state=%02X pos=%u last=%04X sync=%d\n",
+                          dn, dev->state, (unsigned) dev->track_pos,
+                          dev->last_word[side], (int) dev->data_find.sync_marks);
+            }
             if (mfm)
                 d86f_find_address_mark_mfm(drv, side, &(dev->data_find), 0x5545,
                                            0x554a, 0x5554,
