@@ -285,6 +285,15 @@ wd_status(wd2791_t *dev)
            buffer is reachable at the very next read: keep the two in step. */
         if (dev->drq || (dev->buf_len > 0))
             ret |= WD_S_DRQ;
+
+        if (getenv("PCX_FDCLOG") != NULL && (ret & WD_S_DRQ) &&
+            !dev->dr_full && (dev->buf_len <= 0)) {
+            static unsigned gh;
+            if ((gh++ % 20) == 0)
+                pclog("[DRQGHOST] n=%u bc=%d drq=%d full=%d len=%d state=%d\n",
+                      gh, dev->byte_count, dev->drq, dev->dr_full,
+                      dev->buf_len, dev->state);
+        }
     }
 
     if (dev->busy)
@@ -306,6 +315,10 @@ wd_buf_push(wd2791_t *dev, uint8_t data)
     dev->buf[dev->buf_head] = data;
     dev->buf_head           = (dev->buf_head + 1) % (int) sizeof(dev->buf);
     dev->buf_len++;
+
+    if (getenv("PCX_FDCLOG") != NULL && (dev->byte_count <= 8))
+        pclog("[Q] push %02X head=%d tail=%d len=%d bc=%d\n",
+              data, dev->buf_head, dev->buf_tail, dev->buf_len, dev->byte_count);
 
     return 1;
 }
@@ -354,6 +367,7 @@ wd_chain_next(wd2791_t *dev)
         pclog("[CHAIN] next=%d bc=%d len=%d size=%d busy=%d\n",
               dev->sector_reg + 1, dev->byte_count, dev->buf_len,
               dev->sector_size, dev->busy);
+    dev->chain_follow = 1;
     dev->sector_reg = (uint8_t) (dev->sector_reg + 1);
     timer_set_delay_u64(&dev->timer, wd_search_us() * TIMER_USEC);
     wd_sector_read(dev, dev->sector_reg);
@@ -372,19 +386,10 @@ wd_byte_tick(void *priv)
         (dev->state != WD_ST_READTRACK))
         return;
 
-    /* No byte is lost while the record buffer has room: the byte that finds
-       the data register occupied waits there in order.  This model runs the
-       bit engine faster than the driver can poll, so reporting LOST DATA on
-       every such overlap made the SINIX loader abort a read whose data was
-       in fact complete. */
-    if (!dev->dr_full && (dev->buf_len > 0)) {
-        dev->dr        = dev->buf[dev->buf_tail];
-        dev->buf_tail  = (dev->buf_tail + 1) % (int) sizeof(dev->buf);
-        dev->buf_len--;
-        dev->dr_full   = 1;
-        dev->drq       = 1;
-    }
-
+    /* The byte timer does not move bytes any more.  Two places promoting a
+       byte into the data register consumed them out of order: the medium
+       delivered "VOL1S", the guest received "VL1SN" and the SINIX POST
+       rejected the disk.  wd_buf_pop() is the only reader of the queue. */
     timer_set_delay_u64(&dev->byte_timer,
                         (drv != NULL) ? fdd_get_byte_period(drv) : (32ULL * TIMER_USEC));
 }
@@ -408,6 +413,21 @@ wd_buf_pop(wd2791_t *dev)
         dev->buf_len--;
         dev->dr_full   = 1;
         dev->drq       = 1;
+
+        if (getenv("PCX_FDCLOG") != NULL && (dev->byte_count <= 8))
+            pclog("[Q] fill %02X head=%d tail=%d len=%d bc=%d\n",
+                  dev->dr, dev->buf_head, dev->buf_tail, dev->buf_len,
+                  dev->byte_count);
+    }
+
+    if (getenv("PCX_FDCLOG") != NULL) {
+        static unsigned seq;
+        static unsigned lim = 400;
+
+        if (dev->byte_count <= 8)
+            pclog("[POP] seq=%u data=%02X bc=%d state=%d\n", seq, dev->dr,
+                  dev->byte_count, dev->state);
+        seq++;
     }
 
     dev->data_reg = dev->dr;
@@ -448,6 +468,14 @@ wd_data_in(void *priv, uint8_t data, int last)
     wd2791_t *dev = (wd2791_t *) priv;
     int       res;
 
+    /* A record starts with an empty data register.  Since the medium only
+       queues bytes now, whatever the register held belongs to the previous
+       record and handing it to the host shifted this one by a byte. */
+    if ((dev->byte_count == 0) && !last) {
+        dev->dr_full = 0;
+        dev->drq     = 0;
+    }
+
     if (getenv("PCX_DATADUMP") != NULL) {
         static int  n;
         static char line[160];
@@ -460,8 +488,12 @@ wd_data_in(void *priv, uint8_t data, int last)
     }
 
     if ((dev->state != WD_ST_READ) && (dev->state != WD_ST_READID) &&
-        (dev->state != WD_ST_READTRACK))
+        (dev->state != WD_ST_READTRACK)) {
+        if (getenv("PCX_FDCLOG") != NULL && (dev->byte_count < 8))
+            pclog("[DROP] data=%02X last=%d state=%d bc=%d\n",
+                  data, last, dev->state, dev->byte_count);
         return -1;
+    }
 
     timer_disable(&dev->timer);
 
@@ -508,16 +540,21 @@ wd_data_in(void *priv, uint8_t data, int last)
             dev->tc_seen = 1;
         }
     } else {
-        if (!dev->dr_full) {
-            dev->dr        = data;
-            dev->dr_full   = 1;
-            dev->drq       = 1;
-        } else if (!wd_buf_push(dev, data)) {
+        /* One entry for the byte stream: the record buffer.  Letting the
+           medium write the data register directly while the buffer held an
+           older byte delivered them out of order -- the SINIX POST received
+           "VL1SN" instead of "VOL1S". */
+        if (!wd_buf_push(dev, data)) {
             dev->status |= WD_S_LOST;
             wd_dbg_why = __LINE__; wd_done(dev);
             return -1;
         }
+        dev->drq = 1;
     }
+
+    if (getenv("PCX_FDCLOG") != NULL && (dev->byte_count < 6))
+        pclog("[BYTES-IN] n=%d data=%02X last=%d drfull=%d len=%d\n",
+              dev->byte_count, data, last, dev->dr_full, dev->buf_len);
 
     dev->byte_count++;
     dev->id_count++;
@@ -576,6 +613,8 @@ wd_data_in(void *priv, uint8_t data, int last)
                       dev->track_reg, dev->side, dev->sector_reg,
                       dev->byte_count, dev->sector_size, last);
         }
+        dev->rec_done++;
+
         if (dev->multi) {
             dev->byte_count = 0;
 
@@ -695,6 +734,19 @@ wd_seek_finish(wd2791_t *dev)
     wd_irq_raise(dev, "type1");
 }
 
+
+/* Record Not Found, with the site that raised it: eight places set it and the
+   boot path depends on which one did. */
+static void
+wd_rnf(wd2791_t *dev, int line)
+{
+    if (getenv("PCX_FDCLOG") != NULL)
+        pclog("[RNFSET] line=%d cmd=%02X state=%d bc=%d busy=%d chain=%d\n",
+              line, dev->command, dev->state, dev->byte_count, dev->busy,
+              dev->chain_follow);
+    dev->status |= WD_S_RNF;
+}
+
 static void
 wd_type1(wd2791_t *dev, uint8_t val)
 {
@@ -709,7 +761,7 @@ wd_type1(wd2791_t *dev, uint8_t val)
 
     drv = wd_drive(dev);
     if ((drv == NULL) || !fdd_can_read_medium(drv)) {
-        dev->status |= WD_S_RNF;
+        wd_rnf(dev, __LINE__);
         dev->track_reg = dev->track_reg;
         dev->busy      = 0;
         wd_irq_raise(dev, "nomedium");
@@ -778,6 +830,18 @@ static void
 wd_start_read(wd2791_t *dev)
 {
     fdd_drive_t *drv = wd_drive(dev);
+
+    dev->chain_follow = 0;
+    dev->rec_done     = 0;
+
+    /* A command starts with an empty data path.  Bytes the guest never took
+       from the previous command stayed queued and moved the new record one
+       byte out of step, which is what made the SINIX POST read the volume
+       label shifted by one. */
+    dev->dr_full  = 0;
+    dev->drq      = 0;
+    dev->buf_len  = 0;
+    dev->buf_head = dev->buf_tail = 0;
 
     if (drv == NULL)
         return;
@@ -905,7 +969,7 @@ wd_rw_sector(wd2791_t *dev, uint8_t val)
     dev->fdc.deleted = dev->deleted ? 3 : 0;
 
     if ((drv == NULL) || !fdd_can_read_medium(drv)) {
-        dev->status |= WD_S_RNF;
+        wd_rnf(dev, __LINE__);
         wd_dbg_why = __LINE__; wd_done(dev);
         return;
     }
@@ -934,7 +998,7 @@ wd_read_address(wd2791_t *dev, uint8_t val)
     dev->settle = (val & 0x04) ? 1 : 0;
 
     if ((drv == NULL) || !fdd_can_read_medium(drv)) {
-        dev->status |= WD_S_RNF;
+        wd_rnf(dev, __LINE__);
         wd_dbg_why = __LINE__; wd_done(dev);
         return;
     }
@@ -956,7 +1020,7 @@ wd_read_track(wd2791_t *dev, uint8_t val)
     dev->settle = (val & 0x04) ? 1 : 0;
 
     if ((drv == NULL) || !fdd_can_read_medium(drv)) {
-        dev->status |= WD_S_RNF;
+        wd_rnf(dev, __LINE__);
         wd_dbg_why = __LINE__; wd_done(dev);
         return;
     }
@@ -1011,7 +1075,15 @@ wd_force_interrupt(wd2791_t *dev, uint8_t val)
                   dev->command, dev->state, dev->byte_count, dev->buf_len,
                   dev->chain_pending, dev->multi);
 
+        /* A multi record read the host cuts short with Force Interrupt did
+           not finish its last record; the chip reports Record Not Found.  The
+           PC-X POST takes exactly that answer as "this is not a DOS boot
+           sector" and falls back to the sector 7 check used by SINIX disks. */
+        if (dev->multi && (dev->rec_done >= 2))
+            wd_rnf(dev, __LINE__);
+
         dev->chain_pending = 0;
+        dev->chain_follow  = 0;
         dev->done_pending  = 0;
         dev->multi         = 0;
         dev->buf_len       = 0;
@@ -1188,6 +1260,12 @@ wd2791_reg_read(uint16_t port, UNUSED(void *priv))
 
                 if (l < 0)
                     l = getenv("PCX_DATALOG") ? 1 : 0;
+                /* The driver is polling the data register, so this transfer
+                   is PIO: leaving the DMA path armed as well fed the same
+                   record to two consumers and every byte after the first
+                   arrived shifted by one. */
+                dev->fdc.dma = 0;
+
                 r = wd_buf_pop(dev);
                 if (l) {
                     static int once;
@@ -1330,7 +1408,7 @@ wd2791_timer(void *priv)
 
         if (getenv("PCX_FDCLOG") != NULL)
             pclog("[TIMEOUT] sec=%d bc=%d buf=%d\n", dev->sector_reg, dev->byte_count, dev->buf_len);
-        dev->status |= WD_S_RNF;
+        wd_rnf(dev, __LINE__);
         wd_dbg_why = __LINE__; wd_done(dev);
         return;
     }
@@ -1354,11 +1432,24 @@ wd_noidam(void *priv)
     if ((dev->type1) || (!dev->busy))
         return;
 
-    dev->status |= WD_S_RNF;
+    /* A multi record read that has already transferred at least one sector
+       ends the operation when the next sector is not on the track; only a
+       command that found nothing at all reports Record Not Found. */
+    if (dev->chain_follow) {
+        if (getenv("PCX_FDCLOG") != NULL)
+            pclog("[CHAINEND] sec=%d bc=%d\n", dev->sector_reg, dev->byte_count);
+        dev->chain_follow = 0;
+        wd_done(dev);
+        return;
+    }
+
+    wd_rnf(dev, __LINE__);
     if (getenv("PCX_FDCLOG") != NULL)
-        pclog("[RNFAT] cmd=%02X sec=%d state=%d pos=%u bc=%d\n", dev->command,
-              dev->sector_reg, dev->state,
-              d86f_get_track_pos(wd_drive(dev)), dev->byte_count);
+        pclog("[RNFAT] cmd=%02X sec=%d state=%d pos=%u raw=%u bc=%d chain=%d type1=%d drive=%d\n",
+              dev->command, dev->sector_reg, dev->state,
+              d86f_get_track_pos(wd_drive(dev)),
+              d86f_get_raw_size(wd_drive(dev), dev->side),
+              dev->byte_count, dev->chain_follow, dev->type1, dev->drive);
     wd_dbg_why = __LINE__; wd_done(dev);
 }
 
@@ -1392,15 +1483,32 @@ wd_ext_error(void *priv, int st5, int st6)
     if ((dev->type1) || (!dev->busy))
         return;
 
+    if (getenv("PCX_FDCLOG") != NULL)
+        pclog("[EXTERR] st5=%02X st6=%02X chain=%d bc=%d sec=%d\n",
+              st5, st6, dev->chain_follow, dev->byte_count, dev->sector_reg);
+
+    /* A multi record read that already transferred a whole sector and then
+       found no such record after it has finished its job: the WD279x only
+       reports Record Not Found when nothing was transferred.  The SINIX POST
+       asks for sector 1 with m=1, took a bare RNF here and retried the boot
+       for ever. */
+    if (dev->chain_follow) {
+        if (getenv("PCX_FDCLOG") != NULL)
+            pclog("[CHAINEND] sec=%d bc=%d\n", dev->sector_reg, dev->byte_count);
+        dev->chain_follow = 0;
+        wd_done(dev);
+        return;
+    }
+
     /* fdc_error() carries the uPD765 numbering: 0x01 is "no ID address mark"
        and 0x04 is "ID marks found but not the sector asked for".  Both mean
        RNF to this chip, and leaving 0x04 unmapped made a read of a missing
        record finish with status 0 -- a successful transfer of nothing, which
        the guest then treated as a loaded boot area. */
     if (st5 & 0x01)
-        dev->status |= WD_S_RNF;
+        wd_rnf(dev, __LINE__);
     if (st5 & 0x04)
-        dev->status |= WD_S_RNF;
+        wd_rnf(dev, __LINE__);
     if (st5 & 0x10)
         dev->status |= WD_S_CRC;
     if (st6 & 0x20)
@@ -1496,6 +1604,8 @@ wd2791_set_dskctl(wd2791_t *dev, uint8_t val)
        and 0x06 for drive B (0xfde1c: 1 << drive, or 0x04 for the motor), so
        reading the pair as a binary number picked drive B whenever A was
        asked for and every boot read ended in Record Not Found. */
+    int         prev_drive = dev->drive;
+
     dev->drive  = (val & 0x01) ? 0 : ((val & 0x02) ? 1 : 0);
     dev->side   = (val & 0x08) ? 1 : 0;
     /* The 0xf904 latch selects single density when bit 4 is set: the POST
@@ -1506,6 +1616,14 @@ wd2791_set_dskctl(wd2791_t *dev, uint8_t val)
     if (getenv("PCX_DSKLOG") != NULL)
         pclog("[DSKSET] val=%02X -> drive=%d side=%d dden=%d\n", val,
               dev->drive, dev->side, dev->dden);
+
+    if ((prev_drive != dev->drive) && (getenv("PCX_DSKLOG") != NULL)) {
+        fdd_drive_t *nd = wd_drive(dev);
+        pclog("[DRVSEL] %d -> %d med=%d pos=%u trk=%d\n", prev_drive,
+              dev->drive, (nd != NULL) ? fdd_can_read_medium(nd) : 0,
+              (nd != NULL) ? d86f_get_track_pos(nd) : 0,
+              (dev->track_reg & 0xFF));
+    }
 
     /* The latch cannot select the density for these machines: the same value
        (0x05) boots an MFM disk on the PC-D and an FM disk on the PC-X.  For

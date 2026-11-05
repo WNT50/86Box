@@ -127,6 +127,8 @@ typedef struct wd2791_t {
     pc_timer_t byte_timer;
     int     done_pending;
     int     chain_pending;
+    int     chain_follow;  /* a chained read is looking for its next sector */
+    int     rec_done;      /* records this command has completed */
     int     tc_seen;      /* the DMA channel reported terminal count */
 
     pc_timer_t timer;

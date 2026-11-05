@@ -1616,6 +1616,12 @@ d86f_read_sector_id(void *priv, const int side, const int match)
                     if (((dev->last_sector.id.c == dev->req_sector.id.c) &&
                          (dev->last_sector.id.h == dev->req_sector.id.h) &&
                          (dev->last_sector.id.r == dev->req_sector.id.r)) || !match) {
+                        if (getenv("PCX_FDCLOG") != NULL)
+                            pclog("[86FMATCH] r=%d state=%d side=%d drvhead=%d mfm=%d req=%d\n",
+                                  dev->last_sector.id.r, dev->state, side,
+                                  fdd_get_head(drv), d86f_is_mfm(drv),
+                                  dev->req_sector.id.r);
+
                         drv->d86f_handler.set_sector(drv, side,
                                                      dev->last_sector.id.c,
                                                      dev->last_sector.id.h,
@@ -3587,6 +3593,11 @@ d86f_common_command(void *priv, const int sector, const int track, const int sid
     else
         dev->req_sector.id.r = sector;
     dev->req_sector.id.n = sector_size;
+
+    if (getenv("PCX_FDCLOG") != NULL)
+        pclog("[REQ] arg=%d -> req %d/%d/%d/%d size=%d state=%d\n",
+              sector, dev->req_sector.id.c, dev->req_sector.id.h,
+              dev->req_sector.id.r, dev->req_sector.id.n, sector_size, dev->state);
 
     if (fdd_get_head(drv) && (d86f_get_sides(drv) == 1)) {
         if (getenv("PCX_FDCLOG") != NULL)
