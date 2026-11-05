@@ -1205,20 +1205,8 @@ pic3_int(uint8_t line, int set)
     if (set)
         pic3.irr |= (uint8_t) (1 << line);
 
-    if (getenv("EPOCH_HIL_TRACE"))
-        pclog("PIC3: line=%u set=%d irr=%02X imr=%02X isr=%02X | m-irr=%02X m-imr=%02X m-isr=%02X\n",
-              line, set, pic3.irr, pic3.imr, pic3.isr, pic.irr, pic.imr, pic.isr);
-    if (getenv("EPOCH_HIL_TRACE"))
-        pclog("PIC3 dbg: state=%d icw2=%02X at=%d wired=%d registered=%d at_updater=%d\n",
-              pic3.state, pic3.icw2, pic3.at, pic3.master_irq,
-              pic.slaves[pic3.master_irq] == &pic3,
-              update_pending == pic_update_pending_at);
-
     pic_notify();
 
-    if (getenv("EPOCH_HIL_TRACE"))
-        pclog("PIC3 after: irr=%02X isr=%02X pend=%d | m-irr=%02X m-isr=%02X m-pend=%d\n",
-              pic3.irr, pic3.isr, pic3.int_pending, pic.irr, pic.isr, pic.int_pending);
 }
 
 static void
