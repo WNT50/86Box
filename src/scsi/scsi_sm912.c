@@ -425,3 +425,27 @@ scsi_sm912_init(uint16_t base, scsi_sm912_irq_t irq, void *irq_priv)
 
     return dev;
 }
+
+/* Descriptor only: the adapter is brought up by the machine's own init, but
+   the SCSI bus planner has to be told how many buses it takes, or it reports
+   the machine's settings as having none. */
+static uint32_t
+sm912_scsi_buses(const device_t *dev)
+{
+    return 1;
+}
+
+const device_t scsi_sm912_device = {
+    .name          = "Siemens SM912",
+    .internal_name = "sm912",
+    .flags         = 0,
+    .local         = 0,
+    .init          = NULL,
+    .close         = NULL,
+    .reset         = NULL,
+    .available     = NULL,
+    .speed_changed = NULL,
+    .force_redraw  = NULL,
+    .config        = NULL,
+    .scsi_buses    = sm912_scsi_buses
+};

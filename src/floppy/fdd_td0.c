@@ -1157,14 +1157,6 @@ td0_seek(void *priv, int track)
         int       sector_adjusted = 0;
 
         if (!xdf_type) {
-            if (getenv("TD0_DBG") != NULL) {
-                pclog("[TD0] t=%d s=%d spt=%d flags=%02X sizes:", track, side,
-                      dev->track_spt[track][side], dev->current_side_flags[side]);
-                for (int q = 0; q < dev->track_spt[track][side]; q++)
-                    pclog(" %d/%d", dev->sects[track][side][q].sector,
-                          dev->sects[track][side][q].size);
-                pclog("\n");
-            }
             for (sector = 0; sector < dev->track_spt[track][side]; sector++) {
                 if (interleave_type == 0) {
                     real_sector   = dev->sects[track][side][sector].sector;
@@ -1184,10 +1176,6 @@ td0_seek(void *priv, int track)
                     ssize = 3;
                 else
                     ssize = 128 << ((uint32_t) id[3]);
-                if (getenv("TD0_DBG") != NULL)
-                    pclog("[TD0SEC] t=%d s=%d r=%d n=%d ssize=%d pos=%d gap3=%d turbo=%d\n",
-                          track, side, id[2], id[3], ssize, current_pos, track_gap3,
-                          fdd_get_turbo(drv));
                 current_pos = d86f_prepare_sector(drv, side, current_pos, id, dev->sects[track][side][actual_sector].data, ssize, track_gap2, track_gap3, dev->sects[track][side][actual_sector].flags);
 
                 if (sector_adjusted == 0)

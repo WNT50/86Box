@@ -845,8 +845,6 @@ fdd_load(void *priv, char *fn)
                 }
                 d86f_setup(drv);
                 loaders[c].load(drv, drv->image_path + offs);
-                if (getenv("TD0EXPORT") != NULL)
-                    d86f_export(drv, (char *) getenv("TD0EXPORT"));
                 drv->empty = 0;
                 fdd_forced_seek(drv, 0);
                 drv->changed = 1;

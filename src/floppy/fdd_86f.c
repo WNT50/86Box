@@ -1546,11 +1546,6 @@ d86f_read_sector_id(void *priv, const int side, const int match)
                     } else if (dev->state == STATE_0A_READ_ID)
                         dev->state--;
                     else {
-                        if (getenv("PCX_IDLOG") != NULL)
-                            pclog("[IDBAD] C=%d H=%d R=%d N=%d want R=%d\n",
-                                  dev->last_sector.id.c, dev->last_sector.id.h,
-                                  dev->last_sector.id.r, dev->last_sector.id.n,
-                                  dev->req_sector.id.r);
                         dev->error_condition |= 1; /* Mark that there was an ID CRC error. */
                         dev->state++;
                     }
@@ -1568,12 +1563,6 @@ d86f_read_sector_id(void *priv, const int side, const int match)
                     dev->id_find.sync_marks = dev->id_find.bits_obtained =
                     dev->id_find.bytes_obtained = 0;
                     dev->id_found |= 1;
-                    if (getenv("PCX_IDLOG") != NULL)
-                        pclog("[ID] found C=%d H=%d R=%d N=%d | want C=%d H=%d R=%d N=%d\n",
-                              dev->last_sector.id.c, dev->last_sector.id.h,
-                              dev->last_sector.id.r, dev->last_sector.id.n,
-                              dev->req_sector.id.c, dev->req_sector.id.h,
-                              dev->req_sector.id.r, dev->req_sector.id.n);
                     /* The datasheet lists what has to match: track number,
                        sector number, side number and a good CRC -- the sector
                        length byte is not among them, and the length that is
@@ -2700,20 +2689,6 @@ d86f_poll(void *priv)
 {
     fdd_drive_t *drv = (fdd_drive_t *) priv;
 
-    if (getenv("D86F_RATE") != NULL) {
-        static uint64_t npolls;
-        static uint32_t tprev;
-
-        npolls++;
-        uint32_t tnow = plat_get_ticks();
-        if ((tnow - tprev) >= 5000) {
-            if (tprev != 0)
-                pclog("[POLL] %llu polls in %u ms\n",
-                      (unsigned long long) npolls, tnow - tprev);
-            tprev = tnow;
-            npolls = 0;
-        }
-    }
     d86f_t *     dev = (d86f_t *) drv->d86f_priv;
 
     int side = fdd_get_head(drv);
@@ -2866,14 +2841,6 @@ d86f_poll(void *priv)
        any other controller the idle state means nothing is pending, so the
        check stays as it was. */
     if ((dev->index_count == 2) && ((dev->state != STATE_IDLE) || (((fdc_t *) drv->fdc)->ext_noidam != NULL))) {
-        if (getenv("PCX_RNFLOG") != NULL)
-            pclog("[RNFABORT] state=%02X pos=%u hole=%u last C=%d H=%d R=%d N=%d want C=%d H=%d R=%d\n",
-                  dev->state, dev->track_pos,
-                  drv->d86f_handler.index_hole_pos(drv, side),
-                  dev->last_sector.id.c, dev->last_sector.id.h,
-                  dev->last_sector.id.r, dev->last_sector.id.n,
-                  dev->req_sector.id.c, dev->req_sector.id.h,
-                  dev->req_sector.id.r);
         switch (dev->state) {
             case STATE_0A_FIND_ID:
             case STATE_SECTOR_NOT_FOUND:
@@ -3265,18 +3232,8 @@ d86f_read_track(void *priv, const int track, const int thin_track, const int sid
         const int array_size = d86f_get_array_size(drv, side, 0);
         /* 4x oversampled cells: the stored byte count is the authority on how
            long the track really is, whatever the rate field claims. */
-        {
-            const char *sc = getenv("D86F_RAW_SCALE");
-            dev->raw_override[side] = (uint32_t) array_size *
-                                      (sc ? (uint32_t) atoi(sc) : 2);
-        }
-        {
-            size_t got = fread(da, 1, array_size, dev->fp);
-            if (getenv("D86FDBG") != NULL)
-                pclog("[86F] track=%d side=%d array=%d got=%d extra=%d idx=%u\n",
-                      logical_track, side, array_size, (int) got,
-                      (int) dev->extra_bit_cells[side], dev->index_hole_pos[side]);
-        }
+        dev->raw_override[side] = (uint32_t) array_size * 2;
+        (void) !fread(da, 1, array_size, dev->fp);
         if (d86f_has_surface_desc(drv))
             (void) !fread(sa, 1, array_size, dev->fp);
     } else {
@@ -3357,29 +3314,6 @@ d86f_seek(void *priv, int track)
     }
 
     dev->state = STATE_IDLE;
-    if (getenv("D86FDUMP") != NULL) {
-        char path[256];
-        FILE *fp;
-
-        pclog("[SEEK] t=%d idx0=%u extra0=%d sf0=%02X df=%04X arr=%d\n", track,
-              drv->d86f_handler.index_hole_pos(drv, 0),
-              (int) drv->d86f_handler.extra_bit_cells(drv, 0),
-              drv->d86f_handler.side_flags(drv),
-              drv->d86f_handler.disk_flags(drv),
-              d86f_get_array_size(drv, 0, 0));
-        pclog("[SEEK] raw0=%u raw1=%u\n", d86f_get_raw_size(drv, 0), d86f_get_raw_size(drv, 1));
-
-        snprintf(path, sizeof(path), "/tmp/d86f_%s_t%02d.bin", getenv("D86FDUMP"), track);
-        fp = plat_fopen(path, "wb");
-        if (fp != NULL) {
-            int arr = d86f_get_array_size(drv, 0, 0);
-            for (int sd = 0; sd < sides; sd++)
-                fwrite(dev->track_encoded_data[sd], 1,
-                       (arr > 30000) ? 30000 : arr, fp);
-            fclose(fp);
-        }
-    }
-
 }
 
 void
@@ -3388,27 +3322,6 @@ d86f_write_track(void *priv, FILE **fp, const int side, uint16_t *da0, uint16_t 
     fdd_drive_t *  drv             = (fdd_drive_t *) priv;
     const uint32_t array_size      = d86f_get_array_size(drv, side, 0);
 
-    if (getenv("D86F_SRC_DUMP") != NULL) {
-        char   path[256];
-        FILE * dfp;
-
-        const d86f_t *sdev = (d86f_t *) drv->d86f_priv;
-
-        snprintf(path, sizeof(path), "/tmp/src_%s_t%02d_s%d.bin",
-                 getenv("D86F_SRC_DUMP"), sdev->cur_track, side);
-        dfp = plat_fopen(path, "wb");
-        if (dfp != NULL) {
-            fwrite(da0, 1, (size_t) array_size, dfp);
-            fclose(dfp);
-        }
-    }
-
-    if (getenv("D86F_EXPORT_DBG") != NULL)
-        pclog("[XPORT] side=%d raw=%u arr=%u side_flags=%02X extra=%d ds40=%d single=%d\n", side,
-              (unsigned) d86f_get_raw_size(drv, side), (unsigned) array_size,
-              drv->d86f_handler.side_flags(drv),
-              (int) drv->d86f_handler.extra_bit_cells(drv, side),
-              fdd_doublestep_40(drv));
     uint16_t       side_flags      = drv->d86f_handler.side_flags(drv);
     uint32_t       extra_bit_cells = drv->d86f_handler.extra_bit_cells(drv, side);
 
@@ -3424,25 +3337,11 @@ d86f_write_track(void *priv, FILE **fp, const int side, uint16_t *da0, uint16_t 
 
         side_flags      = (uint16_t) ((side_flags & 0x18) | code);
         extra_bit_cells = (uint32_t) kbps[code] * 200;    /* 60/300 of a second */
-
-        if (getenv("D86F_RATE_CODE") != NULL)
-            side_flags = (uint16_t) ((side_flags & 0x18) |
-                                     (uint16_t) atoi(getenv("D86F_RATE_CODE")));
-        if (getenv("D86F_CELLS") != NULL)
-            extra_bit_cells = (uint32_t) atoi(getenv("D86F_CELLS"));
-    } else if (getenv("D86F_TRUE_RAW") != NULL)
-        extra_bit_cells = d86f_get_raw_size(drv, side);
+    }
     /* The index hole marks where a revolution starts.  A synthesized track
        begins with the pre-track gap, so the hole sits at its end, not at
        byte zero; the caller can pin it while the layout is being verified. */
     uint32_t index_hole_pos = drv->d86f_handler.index_hole_pos(drv, side);
-
-    if (d86f_export_disk_flags != 0) {
-        const char *ip = getenv("D86F_INDEX_WORDS");
-
-        if (ip != NULL)
-            index_hole_pos = (uint32_t) atoi(ip) * 16;
-    }
 
     fwrite(&side_flags, 1, 2, *fp);
 
@@ -3651,10 +3550,6 @@ d86f_readsector(void *priv, const int sector, const int track, const int side,
         dev->index_count = 0;
         fdc_noidam(drv->fdc);
     } else if (sector == SECTOR_FIRST) {
-        if (getenv("PCX_RNFLOG") != NULL)
-            pclog("[RNFSTART] pos=%u hole=%u want C=%d H=%d R=%d\n", dev->track_pos,
-                  drv->d86f_handler.index_hole_pos(drv, side),
-                  dev->req_sector.id.c, dev->req_sector.id.h, dev->req_sector.id.r);
         dev->state = STATE_02_SPIN_TO_INDEX;
     }
     else if (sector == SECTOR_NEXT)
