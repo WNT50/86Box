@@ -973,6 +973,11 @@ fdd_set_motor_enable(void *priv, int motor_enable)
     drv->motoron = motor_enable;
 }
 
+/* Bit cells the drive's engine steps per poll tick.  One cell per byte-time
+   turned the medium sixteen times too slowly for a 250 kbit track (see the
+   comment inside fdd_poll); eight keeps up on a 2 vCPU host. */
+#define FDD_CELLS_PER_POLL 8
+
 static void
 fdd_poll(void *priv)
 {
@@ -984,8 +989,16 @@ fdd_poll(void *priv)
 
     timer_advance_u64(&drv->poll_time, fdd_byteperiod((void *) drv));
 
-    if (drv->poll)
-        drv->poll((void *) drv);
+    /* The bit engine steps one bit cell per call, so one call per byte time
+       turned the medium sixteen times too slowly and a 512 byte read needed
+       1.7 s of drive time -- the PC-D loader abandons it after 28 ms.  Step it
+       a byte's worth of cells per tick instead; running the timer itself
+       sixteen times faster starves the host of timer callbacks and the guest
+       clock runs away from the drive instead. */
+    if (drv->poll) {
+        for (int i = 0; i < FDD_CELLS_PER_POLL; i++)
+            drv->poll((void *) drv);
+    }
 
     if (fdd_notfound) {
         fdd_notfound--;
@@ -1074,6 +1087,9 @@ fdd_readsector(void *priv, const int sector, const int track, const int side,
     if (fdd_defer_op(drv)) {
         fdd_log("Seek in progress on drive %d, deferring READ (trk=%d->%d, side=%d, sec=%d)\n",
                 drv->id, drv->track, track, side, sector);
+        if (getenv("PCX_FDCLOG") != NULL)
+            pclog("[FDEFER] read sec=%d trk=%d->%d side=%d (seek in progress)\n",
+                  sector, drv->track, track, side);
         drv->pending = (fdd_pending_op_t) {
             .pending     = 1,
             .op          = FDD_OP_READ,

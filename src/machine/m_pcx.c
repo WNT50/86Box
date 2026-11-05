@@ -412,6 +412,8 @@ pcx_dskctl_write(UNUSED(uint16_t port), uint8_t val, UNUSED(void *priv))
        in pcd.cpp:190-214.  The controller latches what it needs for drive,
        side and density; the byte is also kept for a read back. */
     pcx.dskctl = val;
+    if (getenv("PCX_DSKLOG") != NULL)
+        pclog("[DSK] dskctl=%02X @%04X:%04X\n", val, CS, cpu_state.pc);
     wd2791_set_dskctl(pcx.fdc, val);
 }
 

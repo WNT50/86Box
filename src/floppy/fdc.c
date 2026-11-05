@@ -2602,6 +2602,8 @@ fdc_data(fdc_t *fdc, uint8_t data, int last)
 void
 fdc_track_finishread(fdc_t *fdc, int condition)
 {
+    if (getenv("PCX_FDCLOG") != NULL)
+        pclog("[TRKFIN] cond=%d\n", condition);
     fdc->stat = 0x10;
     fdc->satisfying_sectors |= condition;
     fdc_callback(fdc);
