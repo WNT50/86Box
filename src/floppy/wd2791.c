@@ -218,7 +218,7 @@ wd_done(wd2791_t *dev)
     /* Hold the command open until the host has read the bytes still queued
        behind the data register, or a polling driver would see BUSY drop in the
        middle of the sector. */
-    if (dev->buf_len > 0) {
+    if ((dev->buf_len > 0) || dev->dr_full) {
         dev->done_pending = 1;
         return;
     }
