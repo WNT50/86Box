@@ -1437,11 +1437,16 @@ wd2791_set_dskctl(wd2791_t *dev, uint8_t val)
        360k medium. */
     dev->dden   = (val & 0x10) ? 1 : 0;
 
-    /* The drive layer has to know which density the controller asked for: the
-       bitstream layer refuses a sector with "wrong densel" when it does not
-       match the medium, which is what turned every boot read into Record Not
-       Found. */
-    fdd_set_densel(dev->fdc.bus, dev->dden);
+    /* The latch cannot select the density for these machines: the same value
+       (0x05) boots an MFM disk on the PC-D and an FM disk on the PC-X.  For
+       bitstream media the encoding belongs to the image, and handing the latch
+       to the drive layer changed the synthesised track length under a running
+       scan -- the same track then measured 50000 cells on one command and
+       100000 on the next.  Only controllers without a bitstream handler still
+       need the latch. */
+    drv = wd_drive(dev);
+    if ((drv == NULL) || (drv->d86f_handler.side_flags == NULL))
+        fdd_set_densel(dev->fdc.bus, dev->dden);
     wd2791_update_rate(dev);
 
     for (int i = 0; i < 2; i++) {
