@@ -116,7 +116,6 @@ typedef struct hp_disc_t {
     uint8_t  data_lo;
     uint8_t  data_hi;
 
-    uint8_t  debug;
     int      trace_ops;
     int      data_ready;
     uint8_t  unit;
@@ -138,6 +137,12 @@ typedef struct hp_disc_t {
 static void
 hp_disc_raise_irq(hp_disc_t *dev)
 {
+    /* HP_DISC_NOIRQ breaks the line for debugging: the option ROM polls
+       status, but a guest that never reads it would otherwise leave the
+       PIC line asserted and storm IRQ7 */
+    if (getenv("HP_DISC_NOIRQ"))
+        return;
+
     dev->irqs++;
     picint(1 << dev->irq);
 }
@@ -169,7 +174,7 @@ hp_disc_complete(void *priv)
     if (dev->tracing)
         pclog("hp_disc: command %02x completed, status %02x\n", dev->cmd, dev->status);
 
-    if (!getenv("HP_DISC_NOIRQ")) hp_disc_raise_irq(dev);
+    hp_disc_raise_irq(dev);
 }
 
 
@@ -263,7 +268,10 @@ hp_disc_floppy_media(void)
     }
 
     {
-        const char *fn = config_get_string("General", "fdd_01_fn", "");
+        /* the section moved between 86Box versions; accept both */
+        const char *fn = config_get_string("Floppy and CD-ROM drives", "fdd_01_fn", "");
+        if ((fn == NULL) || (fn[0] == '\0'))
+            fn = config_get_string("General", "fdd_01_fn", "");
         return (fn != NULL) && (fn[0] != '\0');
     }
 }
@@ -505,7 +513,9 @@ hp_disc_in(uint16_t addr, void *priv)
             }
             return 0xff;
         case 7:
-            return dev->debug;
+            /* live: the option ROM's int19 asks this right before it decides
+               whether to chain to the BIOS (A: bootable) or boot the MBR */
+            return hp_disc_floppy_media() ? 0x01 : 0x00;
         default:
             break;
     }
@@ -647,10 +657,6 @@ hp_disc_out(uint16_t addr, uint8_t val, void *priv)
                     dev->phase      = HP_PHASE_IDLE;
                     dev->packet_pos = 0;
                     dev->status     = 0x00;
-                    /* 给选项 ROM 的 int19 用：base+7 bit0 = A: 是否挂了镜像。
-                       BIOS 的 BDA 40:10 只要配了软驱就恒为 1，不能用来判断
-                       有没有可启动的盘，所以由宿主告诉它。 */
-                    dev->debug = hp_disc_floppy_media() ? 0x01 : 0x00;
                     break;
 
                 case 0x01:
@@ -810,19 +816,21 @@ hp_disc_out(uint16_t addr, uint8_t val, void *priv)
             break;
 
         case 7:
-            dev->debug = val;
-            if (dev->tracing)
-                pclog("hp_disc: trace %02x\n", val);
+            /* base+7 doubles as the "A: mounted" status the option ROM reads
+               before it picks a bootstrap device, so a write here must not
+               clobber what the read side reports. */
             break;
 
         case 6: {
-            uint32_t idx = 0;
-
-            if (dev->buffer_pos + idx < dev->buffer_len)
-                dev->buffer[dev->buffer_pos + idx] = val;
-            if (idx == 1) {
+            /* The data port is 16-bit: the option ROM's `rep outsw` and the
+               OS/2 driver both move one word per access, so the byte pair
+               goes to wpos and wpos+1. */
+            if (dev->buffer_pos + 1 < dev->buffer_len) {
+                dev->buffer[dev->buffer_pos]     = (uint8_t) (val & 0xff);
+                dev->buffer[dev->buffer_pos + 1] = (uint8_t) (val >> 8);
                 dev->buffer_pos += 2;
-                if ((dev->buffer_pos >= dev->buffer_len) && (dev->cmd == HP_DISC_CMD_WRITE)) {
+                if ((dev->buffer_pos >= dev->buffer_len) &&
+                    (dev->cmd == HP_DISC_CMD_WRITE)) {
                     if (dev->hdd_id >= 0)
                         hdd_image_write((uint8_t) dev->hdd_id, dev->lba,
                                         dev->buffer_len / 512, dev->buffer);
