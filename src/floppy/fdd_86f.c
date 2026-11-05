@@ -2699,6 +2699,21 @@ void
 d86f_poll(void *priv)
 {
     fdd_drive_t *drv = (fdd_drive_t *) priv;
+
+    if (getenv("D86F_RATE") != NULL) {
+        static uint64_t npolls;
+        static uint32_t tprev;
+
+        npolls++;
+        uint32_t tnow = plat_get_ticks();
+        if ((tnow - tprev) >= 5000) {
+            if (tprev != 0)
+                pclog("[POLL] %llu polls in %u ms\n",
+                      (unsigned long long) npolls, tnow - tprev);
+            tprev = tnow;
+            npolls = 0;
+        }
+    }
     d86f_t *     dev = (d86f_t *) drv->d86f_priv;
 
     int side = fdd_get_head(drv);
@@ -3412,6 +3427,8 @@ d86f_write_track(void *priv, FILE **fp, const int side, uint16_t *da0, uint16_t 
            the rate table is what we are trying to repair. */
         const uint32_t raw  = (uint32_t) array_size * 8;
         const double   rpm  = 300.0;
+        /* The rate field describes the bit cell clock, and the image stores
+           four cells per data bit, so a 250 kbit track runs at 1 MHz here. */
         const double   kbit = (double) raw * rpm / 60000.0;
         uint16_t       rate;
 
