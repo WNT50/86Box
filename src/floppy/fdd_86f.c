@@ -3447,7 +3447,17 @@ d86f_write_track(void *priv, FILE **fp, const int side, uint16_t *da0, uint16_t 
 
         side_flags = (uint16_t) ((side_flags & 0x18) | rate);
     }
-    const uint32_t index_hole_pos  = drv->d86f_handler.index_hole_pos(drv, side);
+    /* The index hole marks where a revolution starts.  A synthesized track
+       begins with the pre-track gap, so the hole sits at its end, not at
+       byte zero; the caller can pin it while the layout is being verified. */
+    uint32_t index_hole_pos = drv->d86f_handler.index_hole_pos(drv, side);
+
+    if (d86f_export_disk_flags != 0) {
+        const char *ip = getenv("D86F_INDEX_WORDS");
+
+        if (ip != NULL)
+            index_hole_pos = (uint32_t) atoi(ip) * 16;
+    }
 
     fwrite(&side_flags, 1, 2, *fp);
 
