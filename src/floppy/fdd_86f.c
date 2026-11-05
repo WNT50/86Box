@@ -3340,7 +3340,7 @@ d86f_write_track(void *priv, FILE **fp, const int side, uint16_t *da0, uint16_t 
     }
     /* The index hole marks where a revolution starts.  A synthesized track
        begins with the pre-track gap, so the hole sits at its end, not at
-       byte zero; the caller can pin it while the layout is being verified. */
+       byte zero: take the position the handler reports for this track. */
     uint32_t index_hole_pos = drv->d86f_handler.index_hole_pos(drv, side);
 
     fwrite(&side_flags, 1, 2, *fp);
