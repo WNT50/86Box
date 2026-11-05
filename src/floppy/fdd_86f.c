@@ -3418,9 +3418,17 @@ d86f_write_track(void *priv, FILE **fp, const int side, uint16_t *da0, uint16_t 
        believes each sector is twice as far away and every read has to scan the
        whole (double) track.  Recording the true length makes the image
        self-describing. */
-    if (d86f_export_disk_flags != 0)
-        /* Sixteen cells per word, two bytes per word. */
-        extra_bit_cells = (uint32_t) array_size * 8;
+    if (d86f_export_disk_flags != 0) {
+        /* Sixteen cells per word, two bytes per word.  The array is four times
+           larger than the track really is, so the source's own cell count --
+           when it has one -- describes the length that matters. */
+        const char *rm = getenv("D86F_RAW_MODE");
+
+        if (rm != NULL)
+            extra_bit_cells = d86f_get_raw_size(drv, side);
+        else
+            extra_bit_cells = (uint32_t) array_size * 8;
+    }
     else if (getenv("D86F_TRUE_RAW") != NULL)
         extra_bit_cells = d86f_get_raw_size(drv, side);
 
