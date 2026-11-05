@@ -870,10 +870,17 @@ d86f_get_data_len(void *priv)
     return ret;
 }
 
+static uint16_t d86f_export_disk_flags = 0;
+
 uint32_t
 d86f_has_extra_bit_cells(void *priv)
 {
     fdd_drive_t *drv = (fdd_drive_t *) priv;
+
+    /* While exporting we always describe the track length explicitly, so the
+       reader never has to guess it from the bit rate. */
+    if (d86f_export_disk_flags != 0)
+        return 1;
 
     return (drv->d86f_handler.disk_flags(drv) >> 7) & 1;
 }
@@ -3388,7 +3395,10 @@ d86f_write_track(void *priv, FILE **fp, const int side, uint16_t *da0, uint16_t 
        believes each sector is twice as far away and every read has to scan the
        whole (double) track.  Recording the true length makes the image
        self-describing. */
-    if (getenv("D86F_TRUE_RAW") != NULL)
+    if (d86f_export_disk_flags != 0)
+        /* Sixteen cells per word, two bytes per word. */
+        extra_bit_cells = (uint32_t) array_size * 8;
+    else if (getenv("D86F_TRUE_RAW") != NULL)
         extra_bit_cells = d86f_get_raw_size(drv, side);
 
     /* A sector image has no side flags of its own either.  Its handler reports
@@ -3864,7 +3874,11 @@ d86f_export(void *priv, char *fn)
     const int      tracks     = 86;
     const uint32_t magic      = 0x46423638;
     const uint16_t version    = 0x020C;
-    const uint16_t disk_flags = drv->d86f_handler.disk_flags(drv);
+    /* Bit 7 says a per track cell count follows, bit 12 says that count is the
+       whole track rather than a correction.  The result is a file whose track
+       length does not depend on how the reader interprets the rate bits. */
+    d86f_export_disk_flags = drv->d86f_handler.disk_flags(drv) | 0x1080;
+    const uint16_t disk_flags = d86f_export_disk_flags;
     int            inc        = 1;
     uint32_t       tt[512];
     FILE *         fp;
@@ -3916,6 +3930,8 @@ d86f_export(void *priv, char *fn)
     /* Restore the drive from temp. */
     memcpy(dev, temp86, sizeof(d86f_t));
     free(temp86);
+
+    d86f_export_disk_flags = 0;
 
     return 1;
 }
