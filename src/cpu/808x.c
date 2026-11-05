@@ -2051,6 +2051,8 @@ cpu_outw(uint16_t port, uint16_t val)
     resub_cycles(old_cycles);
 }
 
+void pcx_ring_dump(void);
+
 /* PCX_RING=1: instruction ring the video model can dump on demand, used to
    see which code path leads up to a particular character written to the
    terminal board. */
@@ -3569,6 +3571,7 @@ execx86_instruction(void)
                                                  ? mem_machine_translate(lin, 0)
                                                  : lin;
 
+                        pcx_ring_dump();
                         pclog("[HLTMEM] lin=%05X ph=%05X bytes:", lin, ph);
                         for (int q = 0; q < 16; q++)
                             pclog(" %02X", pcx_peek(lin + (uint32_t) q));
