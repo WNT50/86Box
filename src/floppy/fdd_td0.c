@@ -747,6 +747,10 @@ td0_initialize(void *priv)
                                           (dev->imagebuf[offset + 2] & 0x80); /* ? */
         dev->side_flags[track][head]    = dev->default_track_flags | (fm ? 0 : 8);
         dev->track_in_file[track][head] = 1;
+        if (getenv("PCX_FDCLOG") != NULL)
+            pclog("[TD0LD] t=%d h=%d spt=%d fm=%d default=%02X flags=%04X\n",
+                  track, head, track_spt, fm, dev->default_track_flags,
+                  dev->side_flags[track][head]);
         offset += 4;
         track_size = fm ? 73 : 146;
         if (density == 2)
@@ -825,9 +829,14 @@ td0_initialize(void *priv)
             }
 
             if (getenv("TD0DUMP") != NULL)
-                pclog("[TD0SEC] c=%d h=%d r=%d n=%d off=%u size=%d\n",
+                pclog("[TD0SEC] c=%d h=%d r=%d n=%d off=%u size=%d enc=%d d0=%02X%02X%02X%02X%02X%02X\n",
                       track, head, hs[2], hs[3],
-                      (unsigned) ((uintptr_t) (dbuf - dev->processed_buf)), size);
+                      (unsigned) ((uintptr_t) (dbuf - dev->processed_buf)), size,
+                      (int) hs[8], dbuf[0], dbuf[1], dbuf[2], dbuf[3], dbuf[4], dbuf[5]);
+            if (getenv("TD0DUMP") != NULL)
+                pclog("[TD0RAW] %02X %02X %02X %02X %02X %02X | %02X %02X %02X %02X %02X %02X %02X %02X\n",
+                      hs[0], hs[1], hs[2], hs[3], hs[4], hs[5],
+                      hs[6], hs[7], hs[8], hs[9], hs[10], hs[11], hs[12], hs[13]);
 
             dbuf += size;
             total_size += size;
@@ -950,6 +959,16 @@ side_flags(void *priv)
     side   = fdd_get_head(drv);
     sflags = dev->current_side_flags[side];
 
+    if (getenv("PCX_FDCLOG") != NULL) {
+        static uint16_t prev[2];
+
+        if (prev[side] != sflags) {
+            pclog("[TD0SF] dev=%p drv=%p side=%d flags %04X -> %04X\n",
+                  (void *) dev, (void *) drv, side, prev[side], sflags);
+            prev[side] = sflags;
+        }
+    }
+
     return sflags;
 }
 
@@ -1028,6 +1047,8 @@ track_is_xdf(void *priv, const int side, const int track)
 
             if ((high_sectors == expected_high_count) && (low_sectors == expected_low_count)) {
                 dev->current_side_flags[side] = (dev->track_spt[track][side] == 19) ? 0x08 : 0x28;
+                if (getenv("PCX_FDCLOG") != NULL)
+                    pclog("[TD0FMT] A spt=%d -> %04X\n", dev->track_spt[track][side], dev->current_side_flags[side]);
                 return ((dev->track_spt[track][side] == 19) ? 2 : 1);
             }
         }
@@ -1052,11 +1073,15 @@ track_is_xdf(void *priv, const int side, const int track)
 
         if ((effective_sectors == 3) && (xdf_sectors == 3)) {
             dev->current_side_flags[side] = 0x28;
+            if (getenv("PCX_FDCLOG") != NULL)
+                pclog("[TD0FMT] B 5.25 XDF\n");
             return 1; /* 5.25" 2HD XDF */
         }
 
         if ((effective_sectors == 4) && (xdf_sectors == 4)) {
             dev->current_side_flags[side] = 0x08;
+            if (getenv("PCX_FDCLOG") != NULL)
+                pclog("[TD0FMT] C 3.5 XDF\n");
             return 2; /* 3.5" 2HD XDF */
         }
     }
@@ -1113,6 +1138,9 @@ td0_seek(void *priv, int track)
 
     if (dev->fp == NULL)
         return;
+
+    if (getenv("PCX_FDCLOG") != NULL)
+        pclog("[TD0SK] seek t=%d (fdc track %d)\n", track, fdd_current_track(drv));
 
     if (!dev->track_width && fdd_doublestep_40(drv))
         track /= 2;

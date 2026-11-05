@@ -281,7 +281,9 @@ wd_status(wd2791_t *dev)
             ret |= dev->status & WD_S_WP;
         if (dev->deleted)
             ret |= WD_S_RECTYPE;
-        if (dev->drq)
+        /* DRQ describes the data register, and a byte waiting in the record
+           buffer is reachable at the very next read: keep the two in step. */
+        if (dev->drq || (dev->buf_len > 0))
             ret |= WD_S_DRQ;
     }
 
@@ -348,6 +350,10 @@ wd_sector_read(wd2791_t *dev, int sector)
 static void
 wd_chain_next(wd2791_t *dev)
 {
+    if (getenv("PCX_FDCLOG") != NULL)
+        pclog("[CHAIN] next=%d bc=%d len=%d size=%d busy=%d\n",
+              dev->sector_reg + 1, dev->byte_count, dev->buf_len,
+              dev->sector_size, dev->busy);
     dev->sector_reg = (uint8_t) (dev->sector_reg + 1);
     timer_set_delay_u64(&dev->timer, wd_search_us() * TIMER_USEC);
     wd_sector_read(dev, dev->sector_reg);
@@ -366,10 +372,12 @@ wd_byte_tick(void *priv)
         (dev->state != WD_ST_READTRACK))
         return;
 
-    if (dev->dr_full)
-        dev->status |= WD_S_LOST;
-
-    if (dev->buf_len > 0) {
+    /* No byte is lost while the record buffer has room: the byte that finds
+       the data register occupied waits there in order.  This model runs the
+       bit engine faster than the driver can poll, so reporting LOST DATA on
+       every such overlap made the SINIX loader abort a read whose data was
+       in fact complete. */
+    if (!dev->dr_full && (dev->buf_len > 0)) {
         dev->dr        = dev->buf[dev->buf_tail];
         dev->buf_tail  = (dev->buf_tail + 1) % (int) sizeof(dev->buf);
         dev->buf_len--;
@@ -385,14 +393,37 @@ static int
 wd_buf_pop(wd2791_t *dev)
 {
     if (!dev->dr_full) {
-        dev->drq = 0;
-        return -1;
+        if (dev->buf_len <= 0) {
+            dev->drq = 0;
+            return -1;
+        }
+
+        /* The byte is already in the record buffer; the data register is
+           empty only because the byte timer has not moved it across yet.  A
+           polled driver reads the moment DRQ says there is data, so hand the
+           byte over here: otherwise it read an empty register, saw LOST DATA
+           and aborted the boot read. */
+        dev->dr        = dev->buf[dev->buf_tail];
+        dev->buf_tail  = (dev->buf_tail + 1) % (int) sizeof(dev->buf);
+        dev->buf_len--;
+        dev->dr_full   = 1;
+        dev->drq       = 1;
     }
 
     dev->data_reg = dev->dr;
     dev->dr_full  = 0;
     dev->drq      = 0;
     wd_dbg_pops++;
+
+    /* A chained record clears byte_count when it ends, so waiting for
+       byte_count to reach sector_size here never fired and the command stayed
+       busy for ever.  The pending flag is the whole condition. */
+    if (dev->chain_pending && (dev->buf_len == 0)) {
+        dev->chain_pending = 0;
+        wd_chain_next(dev);
+
+        return dev->data_reg;
+    }
 
     if ((dev->buf_len == 0) && (dev->byte_count >= dev->sector_size)) {
         if (dev->chain_pending) {
@@ -458,9 +489,16 @@ wd_data_in(void *priv, uint8_t data, int last)
                 pclog("[DMADBG] ch=%d data=%02X res=%d\n", dev->fdc.dma_ch, data, res);
         }
         if (res == DMA_NODATA) {
-            /* The guest has not armed the DMA channel: queue the byte for the
-               data register so a polling driver still gets it. */
-            if (!wd_buf_push(dev, data)) {
+            /* The guest has not armed the DMA channel: put the byte where a
+               polling driver looks for it.  Filling the data register here,
+               as the part does when the byte leaves the shifter, keeps the
+               register in step with the media; queueing it for a byte timer
+               put the driver a byte period behind and it read empty. */
+            if (!dev->dr_full) {
+                dev->dr        = data;
+                dev->dr_full   = 1;
+                dev->drq       = 1;
+            } else if (!wd_buf_push(dev, data)) {
                 dev->status |= WD_S_LOST;
                 wd_dbg_why = __LINE__; wd_done(dev);
                 return -1;
@@ -470,7 +508,11 @@ wd_data_in(void *priv, uint8_t data, int last)
             dev->tc_seen = 1;
         }
     } else {
-        if (!wd_buf_push(dev, data)) {
+        if (!dev->dr_full) {
+            dev->dr        = data;
+            dev->dr_full   = 1;
+            dev->drq       = 1;
+        } else if (!wd_buf_push(dev, data)) {
             dev->status |= WD_S_LOST;
             wd_dbg_why = __LINE__; wd_done(dev);
             return -1;
@@ -485,9 +527,11 @@ wd_data_in(void *priv, uint8_t data, int last)
               plat_get_ticks() - wd_dbg_cmd_t, d86f_get_track_pos(wd_drive(dev)),
               dev->state, last);
 
-    if (getenv("PCX_DATALOG") != NULL && ((dev->byte_count & 63) == 0))
-        pclog("[WDIN] bc=%d last=%d size=%d state=%d dma=%d\n", dev->byte_count,
-              last, dev->sector_size, dev->state, dev->fdc.dma);
+    if (getenv("PCX_DATALOG") != NULL &&
+        (((dev->byte_count & 63) == 0) || (dev->byte_count <= 8)))
+        pclog("[WDIN] bc=%d last=%d size=%d state=%d dma=%d pos=%u\n", dev->byte_count,
+              last, dev->sector_size, dev->state, dev->fdc.dma,
+              d86f_get_track_pos(wd_drive(dev)));
 
     if (dev->state == WD_ST_READID) {
         /* C, H, R, N and the two CRC bytes. */
@@ -516,6 +560,11 @@ wd_data_in(void *priv, uint8_t data, int last)
             wd_dbg_why = __LINE__; wd_done(dev);
         return last ? -1 : 0;
     }
+
+    if (getenv("PCX_FDCLOG") != NULL && (last || (dev->byte_count >= dev->sector_size)))
+        pclog("[LASTB] bc=%d size=%d last=%d multi=%d tc=%d chainp=%d donep=%d len=%d\n",
+              dev->byte_count, dev->sector_size, last, dev->multi, dev->tc_seen,
+              dev->chain_pending, dev->done_pending, dev->buf_len);
 
     if (last || (dev->byte_count >= dev->sector_size)) {
         {
@@ -741,8 +790,19 @@ wd_start_read(wd2791_t *dev)
     if (drv->d86f_handler.side_flags != NULL) {
         int mfm = ((drv->d86f_handler.side_flags(drv) & 0x18) == 0x08);
 
+        if (getenv("PCX_FDCLOG") != NULL)
+            pclog("[WDENC] flags=%04X mfm=%d side=%d head=%d\n",
+                  drv->d86f_handler.side_flags(drv), mfm, dev->side,
+                  fdd_get_head(drv));
+
         dev->fdc.mfm = mfm;
         dev->dden    = mfm ? 0 : 1;
+        /* The rate fields were last computed from the latch.  Setting the
+           encoding here without recomputing them left the controller's bit
+           cell period disagreeing with the medium's, and the drive layer
+           refuses a command whose two bit cell periods differ -- the read
+           died at position 0 without scanning a single cell. */
+        wd2791_update_rate(dev);
     }
 
     dev->byte_count  = 0;
@@ -757,8 +817,8 @@ wd_start_read(wd2791_t *dev)
         if (fl < 0)
             fl = (getenv("PCX_FDCLOG") != NULL);
         if (fl)
-            pclog("[FDC] read C=%d H=%d R=%d drv_track=%d pos=%u raw=%u rate=%d cmd=%02X size=%d n=%d from %04X:%04X dst=%04X:%04X dden=%d\n",
-                  dev->track_reg, dev->side, dev->sector_reg, fdd_current_track(drv),
+            pclog("[FDC] read drv=%d C=%d H=%d R=%d drv_track=%d pos=%u raw=%u rate=%d cmd=%02X size=%d n=%d from %04X:%04X dst=%04X:%04X dden=%d\n",
+                  dev->drive, dev->track_reg, dev->side, dev->sector_reg, fdd_current_track(drv),
                   d86f_get_track_pos(drv), d86f_get_raw_size(drv, dev->side),
                   dev->fdc.rate, dev->command, dev->sector_size, wd_sector_size_code(dev),
                   CS, cpu_state.pc, ES, DI, dev->dden);
@@ -769,9 +829,9 @@ wd_start_read(wd2791_t *dev)
        the revolution than the driver is willing to wait: with a correct 100000
        cell track it put the head 78 ms in, while the PC-D read loop gives up
        after 28 ms and never saw a byte. */
-    d86f_set_track_pos(drv, 0);
     if (getenv("PCX_FDCLOG") != NULL)
-        pclog("[SEEKPOS] -> pos=%u\n", d86f_get_track_pos(drv));
+        pclog("[SEEKPOS] pos=%u (left where the drive is)\n",
+              d86f_get_track_pos(drv));
 
     wd_sector_read(dev, dev->sector_reg);
 
@@ -1152,8 +1212,10 @@ wd2791_reg_read(uint16_t port, UNUSED(void *priv))
                     }
                 }
                 if (l)
-                    pclog("[DATARD] pop=%d data=%02X st=%02X ES:DI=%04X:%04X @%04X:%04X\n", r,
-                          dev->data_reg, dev->status, (uint16_t) cpu_state.seg_es.seg,
+                    pclog("[DATARD] pop=%d data=%02X st=%02X drq=%d full=%d len=%d bc=%d ES:DI=%04X:%04X @%04X:%04X\n", r,
+                          dev->data_reg, dev->status, dev->drq, dev->dr_full,
+                          dev->buf_len, dev->byte_count,
+                          (uint16_t) cpu_state.seg_es.seg,
                           (uint16_t) cpu_state.regs[7].w, (uint16_t) cpu_state.temp_CS,
                           (uint16_t) cpu_state.temp_pc);
                 (void) r;
@@ -1293,6 +1355,10 @@ wd_noidam(void *priv)
         return;
 
     dev->status |= WD_S_RNF;
+    if (getenv("PCX_FDCLOG") != NULL)
+        pclog("[RNFAT] cmd=%02X sec=%d state=%d pos=%u bc=%d\n", dev->command,
+              dev->sector_reg, dev->state,
+              d86f_get_track_pos(wd_drive(dev)), dev->byte_count);
     wd_dbg_why = __LINE__; wd_done(dev);
 }
 
@@ -1436,6 +1502,10 @@ wd2791_set_dskctl(wd2791_t *dev, uint8_t val)
        reads the boot sector with the latch at 0x05, which has to be MFM on a
        360k medium. */
     dev->dden   = (val & 0x10) ? 1 : 0;
+
+    if (getenv("PCX_DSKLOG") != NULL)
+        pclog("[DSKSET] val=%02X -> drive=%d side=%d dden=%d\n", val,
+              dev->drive, dev->side, dev->dden);
 
     /* The latch cannot select the density for these machines: the same value
        (0x05) boots an MFM disk on the PC-D and an FM disk on the PC-X.  For
