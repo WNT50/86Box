@@ -951,6 +951,12 @@ fdd_byteperiod(void *priv)
     return ret;
 }
 
+uint64_t
+fdd_get_byte_period(void *priv)
+{
+    return fdd_byteperiod(priv);
+}
+
 void
 fdd_set_motor_enable(void *priv, int motor_enable)
 {

@@ -293,7 +293,6 @@ wd_buf_push(wd2791_t *dev, uint8_t data)
     dev->buf[dev->buf_head] = data;
     dev->buf_head           = (dev->buf_head + 1) % (int) sizeof(dev->buf);
     dev->buf_len++;
-    dev->drq = 1;
 
     return 1;
 }
@@ -343,20 +342,47 @@ wd_chain_next(wd2791_t *dev)
     wd_sector_read(dev, dev->sector_reg);
 }
 
+/* One byte time has passed.  The chip moves the next byte of the record into
+   the data register and raises DRQ; if the host has not taken the previous
+   one, that byte is lost and S2 says so (WD279X-02, Read Sector). */
+static void
+wd_byte_tick(void *priv)
+{
+    wd2791_t    *dev = (wd2791_t *) priv;
+    fdd_drive_t *drv = wd_drive(dev);
+
+    if ((dev->state != WD_ST_READ) && (dev->state != WD_ST_READID) &&
+        (dev->state != WD_ST_READTRACK))
+        return;
+
+    if (dev->dr_full)
+        dev->status |= WD_S_LOST;
+
+    if (dev->buf_len > 0) {
+        dev->dr        = dev->buf[dev->buf_tail];
+        dev->buf_tail  = (dev->buf_tail + 1) % (int) sizeof(dev->buf);
+        dev->buf_len--;
+        dev->dr_full   = 1;
+        dev->drq       = 1;
+    }
+
+    timer_set_delay_u64(&dev->byte_timer,
+                        (drv != NULL) ? fdd_get_byte_period(drv) : (32ULL * TIMER_USEC));
+}
+
 static int
 wd_buf_pop(wd2791_t *dev)
 {
-    if (dev->buf_len <= 0) {
+    if (!dev->dr_full) {
         dev->drq = 0;
         return -1;
     }
 
-    dev->data_reg = dev->buf[dev->buf_tail];
-    dev->buf_tail = (dev->buf_tail + 1) % (int) sizeof(dev->buf);
-    dev->buf_len--;
-    dev->drq = (dev->buf_len > 0);
+    dev->data_reg = dev->dr;
+    dev->dr_full  = 0;
+    dev->drq      = 0;
 
-    if (dev->buf_len == 0) {
+    if ((dev->buf_len == 0) && (dev->byte_count >= dev->sector_size)) {
         if (dev->chain_pending) {
             /* The host has taken the last byte of this record, so the next one
                can be searched for. */
@@ -698,6 +724,9 @@ wd_start_read(wd2791_t *dev)
        the index hole made every command wait almost a full revolution, and the
        driver gives up at about 80 ms. */
     wd_sector_read(dev, dev->sector_reg);
+
+    if (drv != NULL)
+        timer_set_delay_u64(&dev->byte_timer, fdd_get_byte_period(drv));
 }
 
 static void
@@ -881,6 +910,7 @@ wd2791_command(wd2791_t *dev, uint8_t val)
     dev->buf_head     = 0;
     dev->buf_tail     = 0;
     dev->buf_len      = 0;
+    dev->dr_full      = 0;
     dev->done_pending  = 0;
     dev->chain_pending = 0;
 
@@ -1187,6 +1217,7 @@ wd2791_reset(void)
     dev->buf_head     = 0;
     dev->buf_tail     = 0;
     dev->buf_len      = 0;
+    dev->dr_full      = 0;
     dev->done_pending  = 0;
     dev->chain_pending = 0;
 
@@ -1315,6 +1346,7 @@ wd2791_init(void)
     dev->fdc.ext_diskchange = wd_diskchange;
 
     timer_add(&dev->timer, wd2791_timer, dev, 0);
+    timer_add(&dev->byte_timer, wd_byte_tick, dev, 0);
 
     io_sethandler(0xf900, 4, wd2791_reg_read, NULL, NULL,
                   wd2791_reg_write, NULL, NULL, dev);

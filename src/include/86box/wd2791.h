@@ -118,6 +118,13 @@ typedef struct wd2791_t {
     int     buf_head;
     int     buf_tail;
     int     buf_len;
+    /* The data register proper: one byte, filled from the medium at the byte
+       rate and emptied by the host.  A whole sector must not pile up in front
+       of it -- the 279x raises DRQ per byte and reports Lost Data when the
+       host misses one. */
+    uint8_t dr;
+    int     dr_full;
+    pc_timer_t byte_timer;
     int     done_pending;
     int     chain_pending;
     int     tc_seen;      /* the DMA channel reported terminal count */
