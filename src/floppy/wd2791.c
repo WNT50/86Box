@@ -377,6 +377,16 @@ wd_data_in(void *priv, uint8_t data, int last)
     wd2791_t *dev = (wd2791_t *) priv;
     int       res;
 
+    if (getenv("PCX_DATADUMP") != NULL) {
+        static int  n;
+        static char line[160];
+        int         k = n % 16;
+
+        snprintf(&line[k * 3], 4, "%02X ", data);
+        n++;
+        if ((n % 16) == 0)
+            pclog("[DATA] %s st=%d\n", line, dev->state);
+    }
 
     if ((dev->state != WD_ST_READ) && (dev->state != WD_ST_READID) &&
         (dev->state != WD_ST_READTRACK))

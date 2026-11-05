@@ -3346,7 +3346,7 @@ d86f_write_track(void *priv, FILE **fp, const int side, uint16_t *da0, uint16_t 
 {
     fdd_drive_t *  drv             = (fdd_drive_t *) priv;
     const uint32_t array_size      = d86f_get_array_size(drv, side, 0);
-    const uint16_t side_flags      = drv->d86f_handler.side_flags(drv);
+    uint16_t       side_flags      = drv->d86f_handler.side_flags(drv);
     uint32_t       extra_bit_cells = drv->d86f_handler.extra_bit_cells(drv, side);
 
     /* A sector image has no bit cells of its own: it reports 0 and lets the
@@ -3357,6 +3357,36 @@ d86f_write_track(void *priv, FILE **fp, const int side, uint16_t *da0, uint16_t 
        self-describing. */
     if (getenv("D86F_TRUE_RAW") != NULL)
         extra_bit_cells = d86f_get_raw_size(drv, side);
+
+    /* A sector image has no side flags of its own either.  Its handler reports
+       whatever the drive defaults to, and that value claims 300 kbit at
+       360 rpm for a disk that really holds 250 kbit at 300 rpm.  The reader
+       then decodes the flux at the wrong clock and spends whole revolutions
+       hunting for sync.  Derive the flags from the track that is being
+       written: the cells and the rotation are what the medium actually has. */
+    {
+        /* 4x oversampled cells per stored byte: the data is the truth here,
+           the rate table is what we are trying to repair. */
+        const uint32_t raw  = (uint32_t) array_size * 2;
+        const double   rpm  = 300.0;
+        const double   kbit = (double) raw * rpm / 60000.0;
+        uint16_t       rate;
+
+        if (kbit < 200.0)
+            rate = 4;
+        else if (kbit < 275.0)
+            rate = 2;
+        else if (kbit < 400.0)
+            rate = 1;
+        else if (kbit < 750.0)
+            rate = 0;
+        else if (kbit < 1500.0)
+            rate = 3;
+        else
+            rate = 5;
+
+        side_flags = (uint16_t) ((side_flags & 0x18) | rate);
+    }
     const uint32_t index_hole_pos  = drv->d86f_handler.index_hole_pos(drv, side);
 
     fwrite(&side_flags, 1, 2, *fp);
