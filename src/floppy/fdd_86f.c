@@ -178,6 +178,9 @@ typedef struct d86f_t {
     uint8_t          id_found;
     uint16_t         version;
     uint16_t         disk_flags;
+    /* Bit cells actually present in an image file, when its rate field does
+       not agree with the data it stores. */
+    uint32_t         raw_override[2];
     uint16_t         satisfying_bytes;
     uint16_t         turbo_pos;
     uint16_t         cur_track;
@@ -462,6 +465,7 @@ uint32_t
 common_get_raw_size(void *priv, int const side)
 {
     fdd_drive_t *  drv      = (fdd_drive_t *) priv;
+    const d86f_t *dev      = (d86f_t *) drv->d86f_priv;
     double         rate     = 0.0;
     double         size     = 100000.0;
     uint32_t       extra_bc = 0;
@@ -471,6 +475,12 @@ common_get_raw_size(void *priv, int const side)
     double         rpm_diff = 1.0;
     const int      rm       = d86f_get_rpm_mode(drv);
     const int      ssd      = d86f_get_speed_shift_dir(drv);
+
+    /* An image file that stores its own cells wins over the rate table: the
+       tables describe the drive, and a sector image converted to flux can
+       carry a rate code that halves or doubles the real length. */
+    if ((dev != NULL) && (dev->raw_override[side] != 0))
+        return dev->raw_override[side];
 
     /* 0% speed shift and shift direction 1: special case where extra bit cells are the entire track size. */
     if (!rm && ssd)
@@ -3212,7 +3222,16 @@ d86f_read_track(void *priv, const int track, const int thin_track, const int sid
             fseek(dev->fp, (off_t) dev->track_offset[logical_track] +
                                          d86f_track_header_size(drv), SEEK_SET);
         const int array_size = d86f_get_array_size(drv, side, 0);
-        (void) !fread(da, 1, array_size, dev->fp);
+        /* 4x oversampled cells: the stored byte count is the authority on how
+           long the track really is, whatever the rate field claims. */
+        dev->raw_override[side] = (uint32_t) array_size * 2;
+        {
+            size_t got = fread(da, 1, array_size, dev->fp);
+            if (getenv("D86FDBG") != NULL)
+                pclog("[86F] track=%d side=%d array=%d got=%d extra=%d idx=%u\n",
+                      logical_track, side, array_size, (int) got,
+                      (int) dev->extra_bit_cells[side], dev->index_hole_pos[side]);
+        }
         if (d86f_has_surface_desc(drv))
             (void) !fread(sa, 1, array_size, dev->fp);
     } else {
@@ -3293,6 +3312,29 @@ d86f_seek(void *priv, int track)
     }
 
     dev->state = STATE_IDLE;
+    if (getenv("D86FDUMP") != NULL) {
+        char path[256];
+        FILE *fp;
+
+        pclog("[SEEK] t=%d idx0=%u extra0=%d sf0=%02X df=%04X arr=%d\n", track,
+              drv->d86f_handler.index_hole_pos(drv, 0),
+              (int) drv->d86f_handler.extra_bit_cells(drv, 0),
+              drv->d86f_handler.side_flags(drv),
+              drv->d86f_handler.disk_flags(drv),
+              d86f_get_array_size(drv, 0, 0));
+        pclog("[SEEK] raw0=%u raw1=%u\n", d86f_get_raw_size(drv, 0), d86f_get_raw_size(drv, 1));
+
+        snprintf(path, sizeof(path), "/tmp/d86f_%s_t%02d.bin", getenv("D86FDUMP"), track);
+        fp = plat_fopen(path, "wb");
+        if (fp != NULL) {
+            int arr = d86f_get_array_size(drv, 0, 0);
+            for (int sd = 0; sd < sides; sd++)
+                fwrite(dev->track_encoded_data[sd], 1,
+                       (arr > 30000) ? 30000 : arr, fp);
+            fclose(fp);
+        }
+    }
+
 }
 
 void
@@ -3301,7 +3343,16 @@ d86f_write_track(void *priv, FILE **fp, const int side, uint16_t *da0, uint16_t 
     fdd_drive_t *  drv             = (fdd_drive_t *) priv;
     const uint32_t array_size      = d86f_get_array_size(drv, side, 0);
     const uint16_t side_flags      = drv->d86f_handler.side_flags(drv);
-    const uint32_t extra_bit_cells = drv->d86f_handler.extra_bit_cells(drv, side);
+    uint32_t       extra_bit_cells = drv->d86f_handler.extra_bit_cells(drv, side);
+
+    /* A sector image has no bit cells of its own: it reports 0 and lets the
+       reader recompute the track length from the rate bits.  That recomputation
+       gives twice the real length for a 250 kbit track, so the playback then
+       believes each sector is twice as far away and every read has to scan the
+       whole (double) track.  Recording the true length makes the image
+       self-describing. */
+    if (getenv("D86F_TRUE_RAW") != NULL)
+        extra_bit_cells = d86f_get_raw_size(drv, side);
     const uint32_t index_hole_pos  = drv->d86f_handler.index_hole_pos(drv, side);
 
     fwrite(&side_flags, 1, 2, *fp);
