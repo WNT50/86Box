@@ -45,7 +45,10 @@ extern dma_t dma[8];
 extern uint8_t dma_m;
 extern void vaxmate_video_dump(int w, int h);
 
-#define VAXMATE_BIOS "roms/machines/vaxmate/vaxmate_310_311.bin"
+/* The 64 KB BIOS is two 32 KB EPROMs on a 16-bit bus: the 3.10 device holds
+   the low (even) byte, the 3.11 device the high (odd) byte. */
+#define VAXMATE_BIOS_EVEN "roms/machines/vaxmate/vaxmate_310E6_even.bin"
+#define VAXMATE_BIOS_ODD  "roms/machines/vaxmate/vaxmate_311E6_odd.bin"
 
 /*
  * System CSR 1 (0x0C00) - bit-serial port to the 256-bit NVM (TRM Vol.1 p7-23,
@@ -312,7 +315,7 @@ machine_at_vaxmate_init(const machine_t *model)
 {
     int ret;
 
-    ret = bios_load_linear(VAXMATE_BIOS, 0x000f0000, 65536, 0);
+    ret = bios_load_interleaved(VAXMATE_BIOS_EVEN, VAXMATE_BIOS_ODD, 0x000f0000, 65536, 0);
     if (bios_only || !ret)
         return ret;
 
