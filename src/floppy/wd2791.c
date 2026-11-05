@@ -401,6 +401,11 @@ wd_data_in(void *priv, uint8_t data, int last)
 
     if (dev->fdc.dma) {
         res = dma_channel_write(dev->fdc.dma_ch, data);
+        if (getenv("PCX_DMADBG") != NULL) {
+            static int n;
+            if (n++ < 24)
+                pclog("[DMADBG] ch=%d data=%02X res=%d\n", dev->fdc.dma_ch, data, res);
+        }
         if (res == DMA_NODATA) {
             /* The guest has not armed the DMA channel: queue the byte for the
                data register so a polling driver still gets it. */
