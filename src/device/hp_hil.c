@@ -86,12 +86,28 @@
    0x68-0x6A mailbox), so the only device on the HP-HIL link is the mouse.
    Relative positioners are 60..6Fh; 68h is the HP Mouse 46060A. */
 #define HIL_MOUSE_ID    0x68
+#define HIL_KBD_ID      0x00   /* Vectra 46030A: 00..1Fh, low 5 bits = nationality */
 /* Leading byte of a poll record: keycode set 1, relative coordinates. */
 /* Poll header bits 1-0: 00 none, 01 X, 10 X and Y, 11 X, Y and Z. */
 #define HIL_POL_AXES_XY 0x02
 #define HIL_POL_RECORD  0x40
 /* Describe header: 8-bit relative X and Y, I/O descriptor byte follows. */
 #define HIL_MOUSE_DESCR 0x12
+
+/* One device on the link.  SLC = the Link Control state machine: a device in
+   Loop-Back mirrors every frame back to the System, a device in Pass-Thru
+   retransmits it to the next device (TRM 45918A 4.2/4.3). */
+typedef struct {
+    uint8_t addr; /* match address, 0 = not configured */
+    uint8_t id;   /* device ID byte, appendix B */
+    uint8_t pt;   /* Pass-Thru Mode */
+    uint8_t pwr;  /* Power-Up Mode: cleared by IFC */
+    uint8_t kbd;  /* 1 = key device, 0 = relative positioner */
+} hil_dev_t;
+
+#define HIL_KBD  0 /* nearest the System */
+#define HIL_PTR  1
+#define HIL_NDEV 2
 
 typedef struct hp_hil_t {
     /* MLC state. */
@@ -105,10 +121,8 @@ typedef struct hp_hil_t {
     uint8_t  r3;
     uint8_t  loop; /* Loop-Back Mode: frames come straight back */
 
-    /* Keyboard on the link. */
-    uint8_t kbd_addr;     /* 0 = not configured yet */
-    uint8_t kbd_id;
-    uint8_t kbd_passthru;
+    /* The devices on the link, in chain order. */
+    hil_dev_t dev[HIL_NDEV];
     uint8_t  scan_reported;
     uint32_t ready_ctx;   /* context already told the link is up */
     int8_t   dx;
@@ -231,7 +245,7 @@ hp_hil_pointer_tick(void *priv)
        and then expects the link to raise INT when the mouse has something
        to report.  So the gate is "device addressed and link out of loop",
        not the pass-through mode. */
-    if ((dev->kbd_addr != 0) && !dev->loop) {
+    if ((dev->dev[HIL_PTR].addr != 0) && !dev->loop) {
         /* Auto Poll: every AP strobe makes the MLC issue a POL and the answer
            carries whatever the device has.  There is no AP source in the
            model and this ROM never sets W3.APE, so the pointer sampler doubles
@@ -254,7 +268,7 @@ hp_hil_pointer_tick(void *priv)
             /* Poll this device directly: a broadcast poll is answered by the
                first device in the chain, and OS/2's HIL.SYS keeps its own
                idea of which address the mouse got. */
-            dev->w1 = (uint8_t) (0x08 | (dev->kbd_addr & 0x07));
+            dev->w1 = (uint8_t) (0x08 | (dev->dev[HIL_PTR].addr & 0x07));
             hp_hil_transmit(HIL_POL);
         }
         /* Motion is not pushed here: the record is the device's answer to a
@@ -277,15 +291,15 @@ hp_hil_poll_link(void)
 {
     hp_hil_t *dev = hp_hil_dev;
 
-    if ((dev == NULL) || !dev->kbd_passthru)
+    if ((dev == NULL) || !dev->dev[HIL_PTR].pt)
         return;
 
     /* Displacement reports are raised by hp_hil_pointer_tick(); a poll only
        hands back whatever is still queued here. */
     if (dev->dx || dev->dy) {
-        hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, HIL_POL_AXES_XY));
-        hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, (uint8_t) dev->dx));
-        hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, (uint8_t) dev->dy));
+        hp_hil_fifo_push(hp_hil_reply(dev->dev[HIL_PTR].addr, HIL_POL_AXES_XY));
+        hp_hil_fifo_push(hp_hil_reply(dev->dev[HIL_PTR].addr, (uint8_t) dev->dx));
+        hp_hil_fifo_push(hp_hil_reply(dev->dev[HIL_PTR].addr, (uint8_t) dev->dy));
         dev->dx = 0;
         dev->dy = 0;
     }
@@ -294,7 +308,7 @@ hp_hil_poll_link(void)
 int
 hp_hil_link_up(void)
 {
-    return (hp_hil_dev != NULL) && hp_hil_dev->kbd_passthru;
+    return (hp_hil_dev != NULL) && hp_hil_dev->dev[HIL_PTR].pt;
 }
 
 void
@@ -309,7 +323,7 @@ hp_hil_link_scan(void)
     /* A device answered the scan (the mouse is on the link), so the link is
        up.  The "link ready" event itself comes from hp_hil_link_ready(). */
     ctx = hp_hil_driver_ctx();
-    if ((ctx != 0) && (dev->kbd_id != 0x00)) {
+    if ((ctx != 0) && (dev->dev[HIL_PTR].id != 0x00)) {
         /* The driver asks the 8041 for the link right before it starts
            waiting; that is when a real 8041 reports the link is up. */
         hp_hil_link_ready(dev);
@@ -373,182 +387,205 @@ hp_hil_reply(uint8_t addr, uint8_t data)
  * EPT takes it out of loop-back and from then on it answers as a device.
  */
 static void
+hp_hil_dev_idd(hp_hil_t *dev, int i)
+{
+    hil_dev_t *d = &dev->dev[i];
+
+    /* ID byte, then the Describe record.  The keyboard answers with a single
+       byte (axis count bits 1-0 = 0, no I/O descriptor); the pointer sends
+       the header plus the 16-bit resolution, four frames in all - what
+       hle_hp_46060b_device::hil_idd() sends (TRM 45918A appendix C). */
+    hp_hil_fifo_push(hp_hil_reply(d->addr, d->id));
+    if (d->kbd) {
+        hp_hil_fifo_push(hp_hil_reply(d->addr, 0x00));
+        return;
+    }
+    hp_hil_fifo_push(hp_hil_reply(d->addr, HIL_MOUSE_DESCR));
+    hp_hil_fifo_push(hp_hil_reply(d->addr, 0xc2)); /* resolution, low */
+    hp_hil_fifo_push(hp_hil_reply(d->addr, 0x1e)); /* resolution, high */
+}
+
+static void
+hp_hil_dev_poll(hp_hil_t *dev, int i)
+{
+    hil_dev_t *d = &dev->dev[i];
+
+    /* Poll record (TRM appendix E): header bits 1-0 say which axes follow.
+       A device with nothing to report answers with no record at all. */
+    if (d->kbd || (!dev->dx && !dev->dy))
+        return;
+
+    hp_hil_fifo_push(hp_hil_reply(d->addr, HIL_POL_AXES_XY));
+    hp_hil_fifo_push(hp_hil_reply(d->addr, (uint8_t) dev->dx));
+    hp_hil_fifo_push(hp_hil_reply(d->addr, (uint8_t) dev->dy));
+    dev->dx = 0;
+    dev->dy = 0;
+}
+
+/*
+ * Walk a command frame down the link.
+ *
+ * The chain order matters: a frame only reaches device i when every device
+ * before it is in Pass-Thru Mode, and a device in Loop-Back mirrors whatever
+ * it gets, which is what the System's link self test looks for.  This is the
+ * whole of the configuration loop in TRM 45918A 4.3:
+ *
+ *   ACF 09  -> keyboard takes 1, mirrors it back as 0Ah (device 2 not reached)
+ *   IDD @1  -> keyboard describes itself
+ *   EPT @1  -> keyboard goes pass-thru, device 2 mirrors the frame back, so the
+ *              System knows the chain continues
+ *   IFC     -> device 2 clears Power-Up and returns the frame
+ *   ACF 09  -> keyboard keeps 1 and passes 0Ah on, device 2 takes 2 and answers
+ *              0Bh, which is how the System learns there are two devices
+ *   IDD @2  -> pointer describes itself
+ *   EPT @2  -> last device, the frame runs off the end and nothing comes back
+ */
+static void
 hp_hil_kbd_frame(uint16_t frame)
 {
     hp_hil_t *dev = hp_hil_dev;
     uint8_t   addr;
     uint8_t   data;
+    int       i;
     int       command;
 
     data    = (uint8_t) (frame & 0xff);
     addr    = (uint8_t) ((frame >> 8) & 0x07);
     command = (frame >> 11) & 1;
 
-    /* Loop-Back Mode closes the end of the link: whatever arrives is handed
-       straight back, which is what the System's self test looks for.  A
-       Device Hard Reset is the exception - it is link-wide, every device acts
-       on it, and handing it back would make the System read its own reset as
-       a reply (and send another one, forever). */
-    /* Anything outside the command set is a link test (the System sends A5h
-       and 5Ah frames and expects to see them again, and 80h the same way).
-       Those are answered no matter what mode the device is in or which
-       address they carry. */
-    if (command && (data != HIL_DHR) && (data > 0x46)) {
-        hp_hil_fifo_push(frame);
-        return;
-    }
-
-    /* A loop-back device hands link-wide frames back; a frame addressed to
-       somebody else is only passed on, and one addressed to this device is
-       answered instead of echoed. */
-    if (dev->loop && command && (addr != 0) && (addr != dev->kbd_addr)) {
-        hp_hil_fifo_push(frame);
-        return;
-    }
-
     if (!command) {
-        if (dev->loop && (addr == 0))
-            hp_hil_fifo_push(frame);
+        hp_hil_fifo_push(frame);
         return;
     }
-    if ((addr != 0) && (addr != dev->kbd_addr))
-        return;
 
-    /* A configured device only listens on its own address: address 0 is the
-       broadcast the System uses to look for further devices, and only the
-       link-wide commands are for everybody.  Leaving the frame unanswered is
-       what makes the System time out at F000:38B7 and end the enumeration. */
-    /* Only the enumeration commands are refused once this device has an
-       address: ACF is how the System walks the chain, and IDD asks the next
-       device further down.  Everything else broadcast on the link - IFC, DSR,
-       DHR, ELB, EPT, POL, the register commands and the link tests - is for
-       every device, and swallowing them leaves the driver thinking the device
-       vanished (OS/2 resets it with DSR before every re-enumeration). */
-    if ((dev->kbd_addr != 0) && (addr == 0) &&
-        ((data == HIL_IDD) || ((data >= HIL_ACF) && (data <= (HIL_ACF + 0x07)))))
+    /* Anything outside the command set is a link test (the System sends A5h
+       and 5Ah frames, and 80h, and expects to see them again).  Those are
+       answered no matter which mode or address they carry. */
+    if ((data != HIL_DHR) && (data > 0x46)) {
+        hp_hil_fifo_push(frame);
         return;
+    }
 
     hp_hil_trace("HIL: device <= %03X (addr %d, op %02X)\n", frame, addr, data);
 
-    switch (data) {
-        case HIL_IFC:
-            /* Interface Clear clears the link, not the device's configured
-               address: only DSR (0x04) resets an address assignment
-               (MAME: hlebase.cpp, HPHIL_IFC only clears m_powerup). */
-            break;
+    /* Link-wide, and never handed back: every device acts, and the last
+       device (which goes pass-thru) sends the frame off the end.  A hard reset
+       restarts the device but KEEPS its address - MOUSEHP1.SYS issues a bare
+       DHR in the PM phase and would lose the pointer otherwise (MAME
+       hlebase.cpp keeps m_device_id across HPHIL_DHR). */
+    if (data == HIL_DHR) {
+        for (i = 0; i < HIL_NDEV; i++)
+            dev->dev[i].pt = 0;
+        dev->loop      = 1;
+        dev->ready_ctx = 0;
+        return;
+    }
 
-        case HIL_EPT:
-            /* Enter Poll Transfer: the link is no longer a mirror, commands
-               now reach this device and it is expected to answer them. */
-            dev->kbd_passthru = 1;
-            dev->loop         = 0;
-            hp_hil_trace("HIL: link leaves loop-back (EPT)\n");
+    /* Device Soft Reset does clear the addresses, and it is not returned
+       either: the last device sends it off the end (TRM 45918A 4.4). */
+    if (data == HIL_DSR) {
+        for (i = 0; i < HIL_NDEV; i++) {
+            dev->dev[i].pt   = 0;
+            dev->dev[i].addr = 0;
+            dev->dev[i].pwr  = 1;
+        }
+        dev->loop = 1;
+        return;
+    }
 
-            break;
+    for (i = 0; i < HIL_NDEV; i++) {
+        hil_dev_t *d = &dev->dev[i];
 
-        case HIL_ELB:
-            dev->kbd_passthru = 0;
-            dev->loop         = 1;
-            hp_hil_trace("HIL: link back in loop-back (ELB)\n");
-            break;
+        /* A device in pass-thru hands on the frame it received, which is not
+           necessarily the one the System wrote (ACF is incremented on the
+           way down), so re-read the fields for every device. */
+        data = (uint8_t) (frame & 0xff);
+        addr = (uint8_t) ((frame >> 8) & 0x07);
 
-        case HIL_DSR:
-            dev->kbd_addr = 0;
-            break;
-
-        case HIL_PST:
-            hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, 0x00));
-            break;
-
-        case HIL_IDD:
-            /* ID byte, then the Describe record: the header, and the 16-bit
-               resolution that follows a non-zero axis count.  Four frames,
-               exactly what hle_hp_46060b_device::hil_idd() sends; an extra
-               frame here leaves the link one byte out of step. */
-            hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, dev->kbd_id));
-            hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, HIL_MOUSE_DESCR));
-            hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, 0xc2)); /* resolution, low */
-            hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, 0x1e)); /* resolution, high */
-            break;
-
-        case HIL_ACF + 0:
-        case HIL_ACF + 1:
-        case HIL_ACF + 2:
-        case HIL_ACF + 3:
-        case HIL_ACF + 4:
-        case HIL_ACF + 5:
-        case HIL_ACF + 6:
-        case HIL_ACF + 7:
-            /* The low three bits of the opcode are the address handed out.
-               The frame goes back with the next address in it, which is how
-               the System learns where the chain ends (F000:3782 reads the
-               byte, subtracts 8 and uses the result as the address for the
-               next command). */
-            /* Already configured: this ACF is looking for the next device
-               further down the link, and answering re-runs the whole
-               enumeration from F000:3734. */
-            if (dev->kbd_addr != 0)
+        if (addr != 0) {
+            /* Addressed frame: it travels until it meets its device. */
+            if (addr != d->addr) {
+                if (d->pt)
+                    continue;      /* retransmitted to the next device */
+                hp_hil_fifo_push(frame); /* loop-back mirrors it back */
                 return;
-            dev->kbd_addr = data & 0x07;
-            hp_hil_trace("HIL: mouse configured as address %d\n", dev->kbd_addr);
-            if (dev->loop && (addr == 0))
-                hp_hil_fifo_push((uint16_t) ((frame & 0xff00) |
-                                             (((dev->kbd_addr + 1) & 0x07) | HIL_ACF)));
-            return;
-
-        case HIL_DHR:
-            /* Link-wide: every device acts on it and none hands it back.
-               A hard reset restarts the device but KEEPS its address: the
-               System does not re-run ACF afterwards, and MOUSEHP1.SYS in the
-               PM phase issues a bare DHR, so clearing the address here makes
-               the mouse permanently unaddressed (MAME: hlebase.cpp keeps
-               m_device_id across HPHIL_DHR; only HPHIL_DSR clears it). */
-            dev->kbd_passthru = 0;
-            dev->ready_ctx     = 0;
-            /* The 8041 reports the link to the driver shortly after the
-               reset, and the driver waits for it at F000:92AB. */
-            return;
-
-        default:
-            if ((data >= HIL_POL) && (data <= (HIL_POL + 0x0f))) {
-                /* Poll record (TRM appendix E): the header says which axes
-                   follow in bits 1-0, and a device with nothing to report
-                   answers with no record at all - only the poll command
-                   comes back. */
-                if (dev->dx || dev->dy) {
-                    hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr,
-                                                  HIL_POL_AXES_XY));
-                    hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, (uint8_t) dev->dx));
-                    hp_hil_fifo_push(hp_hil_reply(dev->kbd_addr, (uint8_t) dev->dy));
-                    dev->dx = 0;
-                    dev->dy = 0;
-                }
-            } else if ((data >= HIL_RPL) && (data <= (HIL_RPL + 0x0f))) {
-                /* RePoll: an empty record is just the incremented command. */
             }
-            break;
-    }
 
-    /* The command frame goes back down the link after the reply: that is how
-       the System learns the device is there and what it answered
-       (F000:3820 drains until it sees the command come back, F000:37F5 uses
-       it as a link test). */
-    if ((data >= HIL_POL) && (data <= (HIL_POL + 0x0f))) {
-        /* The record ends with the poll command incremented, so the next
-           device on the link sees its own address. */
-        /* Hand the poll to the next device in the chain, not back to the
-           address it came from: a broadcast poll (address 0) belongs to the
-           first device, and re-addressing it to 0+1 pointed it at this device
-           again, so the System never saw the end of the chain. */
-        hp_hil_fifo_push((uint16_t) ((frame & ~0x0700) |
-                                     ((((dev->kbd_addr ? dev->kbd_addr : addr) + 1) & 0x07) << 8)));
-    } else {
+            switch (data) {
+                case HIL_EPT:
+                    d->pt    = 1;
+                    d->pwr   = 0;
+                    dev->loop = 0;
+                    hp_hil_trace("HIL: device %d pass-thru (EPT)\n", i);
+                    continue;      /* retransmitted down the chain */
+
+                case HIL_ELB:
+                    d->pt     = 0;
+                    dev->loop = 1;
+                    break;
+
+                case HIL_IFC:
+                    d->pwr = 0;
+                    break;
+
+                case HIL_IDD:
+                    hp_hil_dev_idd(dev, i);
+                    break;
+
+                default:
+                    if ((data >= HIL_POL) && (data <= (HIL_POL + 0x0f)))
+                        hp_hil_dev_poll(dev, i);
+                    break;
+            }
+            hp_hil_fifo_push(frame);
+            hp_hil_link_ready(dev);
+            return;
+        }
+
+        /* Universal address. */
+        if ((data >= HIL_ACF) && (data <= (HIL_ACF + 0x07))) {
+            d->addr = (uint8_t) (data & 0x07);
+            d->pwr  = 0;
+            /* The device takes the address, increments it and passes the
+               frame on; the System reads the incremented opcode that comes
+               back from the end of the link. */
+            frame = (uint16_t) ((frame & 0xff00) |
+                                ((((data & 0x07) + 1) & 0x07) | HIL_ACF));
+            if (d->kbd)
+                hp_hil_trace("HIL: keyboard configured as address %d\n", d->addr);
+            else
+                hp_hil_trace("HIL: mouse configured as address %d\n", d->addr);
+            if (d->pt && (i < (HIL_NDEV - 1)))
+                continue;
+            hp_hil_fifo_push(frame);
+            hp_hil_link_ready(dev);
+            return;
+        }
+
+        /* Everything else with the universal address is for every device. */
+        switch (data) {
+            case HIL_IFC:
+                d->pwr = 0;
+                break;
+
+            case HIL_ELB:
+                d->pt     = 0;
+                dev->loop = 1;
+                break;
+
+            default:
+                if ((data >= HIL_POL) && (data <= (HIL_POL + 0x0f)))
+                    hp_hil_dev_poll(dev, i);
+                break;
+        }
+        if (d->pt && (i < (HIL_NDEV - 1)))
+            continue;
         hp_hil_fifo_push(frame);
+        hp_hil_link_ready(dev);
+        return;
     }
 
-    /* The 8041 watches the link: while the driver is parked in its wait
-       loop, the next frame is also what makes it report "link up". */
-    hp_hil_link_ready(dev);
+    /* The frame ran off the end of the link: nothing comes back. */
 }
 
 /* The System wrote W0: the frame is complete, put it on the link. */
@@ -695,7 +732,9 @@ hp_hil_init(const device_t *info)
     hp_hil_dev       = dev;
 
     dev->loop   = 1; /* the adapter powers up in loop-back */
-    dev->kbd_id = HIL_MOUSE_ID;
+    dev->dev[HIL_KBD].id  = HIL_KBD_ID;
+    dev->dev[HIL_KBD].kbd = 1;
+    dev->dev[HIL_PTR].id  = HIL_MOUSE_ID;
 
     io_sethandler(0x006c, 4, hp_hil_read, NULL, NULL, hp_hil_write, NULL, NULL, dev);
 
@@ -732,9 +771,16 @@ hp_hil_reset(void *priv)
     dev->r2           = 0;
     dev->r3           = 0;
     dev->loop         = 1; /* the adapter starts in loop-back, like the MLC */
-    dev->kbd_addr     = 0;
-    dev->kbd_id       = HIL_MOUSE_ID;
-    dev->kbd_passthru = 0;
+    dev->dev[HIL_KBD].addr = 0;
+    dev->dev[HIL_KBD].id   = HIL_KBD_ID;
+    dev->dev[HIL_KBD].pt   = 0;
+    dev->dev[HIL_KBD].pwr  = 1;
+    dev->dev[HIL_KBD].kbd  = 1;
+    dev->dev[HIL_PTR].addr = 0;
+    dev->dev[HIL_PTR].id   = HIL_MOUSE_ID;
+    dev->dev[HIL_PTR].pt   = 0;
+    dev->dev[HIL_PTR].pwr  = 1;
+    dev->dev[HIL_PTR].kbd  = 0;
     dev->scan_reported = 0;
     dev->ready_ctx    = 0;
     dev->dx           = 0;
