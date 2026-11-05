@@ -797,6 +797,10 @@ i8018x_pcb_write_word(struct i8018x_pcb_t *dev, uint16_t off, uint16_t val)
         (dev->regs[off / 2] & I8018X_DMA_ST))
         i8018x_pcb_dma_freerun(dev, (off == I8018X_DMA_CTRL(0)) ? 0 : 1);
 
+    if ((off == I8018X_DMA_CTRL(1)) && (getenv("PCX_DMALOG") != NULL))
+        pclog("[DMACTRL] =%04X old=%04X @%04X:%04X\n", val,
+              dev->regs[off / 2], CS, cpu_state.pc);
+
     /* Writing the status register sets or clears the individual timer request
        bits (270788-001 Figure 26) -- the ROM forces a request with 0x8001 and
        clears them again with 0x8000. */
@@ -1233,8 +1237,36 @@ i8018x_pcb_dma_write(int channel, uint16_t val, void *priv)
     struct i8018x_pcb_t *dev  = (struct i8018x_pcb_t *) priv;
     int           slot = i8018x_pcb_dma_slot(dev, channel);
 
-    if ((slot < 0) || !i8018x_pcb_dma_armed(dev, slot))
+    if ((slot < 0) || !i8018x_pcb_dma_armed(dev, slot)) {
+        static int nk = -1;
+        if (nk < 0)
+            nk = getenv("PCX_DMALOG") ? 1 : 0;
+        if (nk)
+            pclog("[DMANAK] ch=%d slot=%d ctrl=%04X status=%04X dst=%05X\n", channel, slot,
+                  (slot >= 0) ? dev->regs[I8018X_DMA_CTRL(slot) / 2] : 0xffff,
+                  dev->regs[I8018X_ICU_STATUS / 2],
+                  (slot >= 0) ? i8018x_pcb_dma_ptr(dev, slot, 1) : 0);
         return DMA_NODATA;
+    }
+
+    {
+        /* Fetch cycle: the M/IO bit of the control word says whether the
+           source pointer addresses memory or an I/O port (270788-001 section
+           8.1).  A peripheral on the I/O bus holds the byte in its register and
+           asks for a transfer, so the fetch is a port read of the source
+           pointer, not the value the device happened to pass along. */
+        uint16_t ctrl = dev->regs[I8018X_DMA_CTRL(slot) / 2];
+        uint32_t src  = i8018x_pcb_dma_ptr(dev, slot, 0);
+
+        if (ctrl & I8018X_DMA_SRC_MIO) {
+            if (i8018x_dma_xlate(&src, 0))
+                val = mem_readb_phys(src);
+            else
+                val = 0xff;
+        } else {
+            val = (uint16_t) inb((uint16_t) src);
+        }
+    }
 
     {
         uint32_t a = i8018x_pcb_dma_ptr(dev, slot, 1);
