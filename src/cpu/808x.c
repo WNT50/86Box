@@ -3563,6 +3563,23 @@ execx86_instruction(void)
                     static int hn;
                     if (!(hn++ % 200))
                         pclog("[HLT] %04X:%04X n=%d\n", CS, cpu_state.pc, hn);
+                    if ((hn == 1) && (CS == 0x0070)) {
+                        const uint32_t lin = ((uint32_t) CS << 4) + cpu_state.pc;
+                        uint32_t       ph  = mem_machine_translate
+                                                 ? mem_machine_translate(lin, 0)
+                                                 : lin;
+
+                        pclog("[HLTMEM] lin=%05X ph=%05X bytes:", lin, ph);
+                        for (int q = 0; q < 16; q++)
+                            pclog(" %02X", pcx_peek(lin + (uint32_t) q));
+                        pclog("\n[HLTMEM] phys 0x10000:");
+                        for (int q = 0; q < 16; q++)
+                            pclog(" %02X", mem_readb_phys(0x10000u + (uint32_t) q));
+                        pclog("\n[HLTMEM] phys 0x700:");
+                        for (int q = 0; q < 16; q++)
+                            pclog(" %02X", mem_readb_phys(0x700u + (uint32_t) q));
+                        pclog("\n");
+                    }
                     repeating = 1;
                     completed = 0;
                     clock_end();
