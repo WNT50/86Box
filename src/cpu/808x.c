@@ -2056,7 +2056,7 @@ void pcx_ring_dump(void);
 /* PCX_RING=1: instruction ring the video model can dump on demand, used to
    see which code path leads up to a particular character written to the
    terminal board. */
-#define PCX_RING_SIZE 512
+#define PCX_RING_SIZE 4096
 static struct {
     uint16_t rcs, rip;
 } pcx_ring[PCX_RING_SIZE];
