@@ -116,6 +116,7 @@ typedef struct cga_t {
        the same layout as the HP 45981A character ROM. When NULL, the IBM CGA
        font in fontdat[] is used. */
     const uint8_t *font16;
+    int      font_row_major;  /* 1 = the pointer targets a row plane character ROM */
 
     uint8_t charbuffer[256];
 

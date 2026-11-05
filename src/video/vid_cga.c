@@ -56,6 +56,10 @@
 #define DEVICE_VRAM      0x4000
 #define DEVICE_VRAM_MASK 0x3fff
 
+/* Row of a 16 row character cell where an 8 row glyph body starts.  Centred
+   so the text does not hug the top of the cell. */
+#define CGA_GLYPH8_TOP_IN_16 4
+
 /* Cards that do not size their own video RAM (the Compaq plasma, the NCR
    and Olivetti CGA derivatives, ...) keep the historical 16K window. */
 static inline uint32_t
@@ -397,20 +401,32 @@ cga_glyph_row(cga_t *cga, uint8_t chr, int row)
     const int rows16 = (cga->crtc[CGA_CRTC_MAX_SCANLINE_ADDR] & 0x1f) > 7;
 
     if (cga->font16 != NULL) {
-        /* 16 row character cells (400 line modes) use the whole cell; 8 row
-           cells use rows 1-8, which is where the HP glyph body sits. */
+        /* Row plane ROM (the HP 45981A character generator): row 0 of all 256
+           glyphs comes first, then row 1 and so on, and the height bit (the
+           monitor's cell height, CRTC R9) picks the 8 row or the 16 row block.
+           See os2drv/mk_45981a_chargen.py for the placement of each block. */
+        if (cga->font_row_major)
+            return cga->font16[(rows16 ? 0x1000 : 0) + ((row & (rows16 ? 15 : 7)) << 8) + chr];
+
+        /* 16 row character cells (400 line modes) use the whole cell.  8 row
+           cells take the cap height body, which the 45981A chargen image
+           built by os2drv/mk_45981a_chargen.py places on rows 4-11. */
         if (rows16)
             return cga->font16[(chr << 4) + (row & 15)];
 
-        return cga->font16[(chr << 4) + (row & 7) + 1];
+        return cga->font16[(chr << 4) + (row & 7) + CGA_GLYPH8_TOP_IN_16];
     }
 
-    /* The built-in IBM font is an 8 row cell.  A 16 row cell keeps the glyph
-       body on rows 1-8 and leaves the rest blank, the same layout the card's
-       own character generator uses; masking the row with & 7 here repeats
-       every glyph twice inside one 16 row cell (visible as doubled text). */
+    /* The built-in IBM font is an 8 row cell.  Placing that body on rows 1-8
+       of a 16 row cell leaves it hugging the top of the cell (the text reads
+       as sitting high, with seven blank lines underneath), so the body is
+       centred instead: four blank lines above and below.  Masking the row
+       with & 7 would repeat every glyph twice inside one cell. */
     if (rows16)
-        return ((row >= 1) && (row <= 8)) ? fontdat[chr + cga->fontbase][row - 1] : 0x00;
+        return ((row >= CGA_GLYPH8_TOP_IN_16) &&
+                (row < (CGA_GLYPH8_TOP_IN_16 + 8)))
+                   ? fontdat[chr + cga->fontbase][row - CGA_GLYPH8_TOP_IN_16]
+                   : 0x00;
 
     return fontdat[chr + cga->fontbase][row & 7];
 }
@@ -603,6 +619,12 @@ cga_render_process(cga_t *cga, int line)
         x = (cga->crtc[CGA_CRTC_HDISP] * 8) + 16;
     else
         x = (cga->crtc[CGA_CRTC_HDISP] * 16) + 16;
+
+    /* Composite_Process() renders into a fixed 2048 + 10 sample line buffer
+       ("2048x1536 is the maximum we can possibly support"); an out of range
+       HDISP during a mode change would run off the end of it. */
+    if (x > 2040)
+        x = 2040;
 
     if (cga->composite) {
         border = ((cga->cgamode & highres_graphics_flag) == highres_graphics_flag) ? 0 : (cga->cgacol & 0b1111);
@@ -1001,11 +1023,6 @@ cga_poll(void *priv)
                        一倍（实测窗口 640x800 而内容是 640x400）。 */
                     ys_temp = (cga->lastline - cga->firstline) <<
                               (cga->double_type ? 1 : 0);
-                    if (getenv("CGA_GEOM_TRACE"))
-                        fprintf(stderr, "[GEOM] first=%d last=%d dbl=%d gfx400=%d cmode=%02x R4=%02x R6=%02x R9=%02x ys=%d\n",
-                                cga->firstline, cga->lastline, cga->double_type, cga->gfx400,
-                                cga->cgamode, cga->crtc[CGA_CRTC_VTOTAL], cga->crtc[CGA_CRTC_VDISP],
-                                cga->crtc[CGA_CRTC_MAX_SCANLINE_ADDR], ys_temp);
 
                     if ((xs_temp > 0) && (ys_temp > 0)) {
                         if (xs_temp < 64)
@@ -1028,8 +1045,14 @@ cga_poll(void *priv)
                                 cga, xs_temp, ys_temp, force_resize)) {
                             xsize = xs_temp;
                             ysize = ys_temp;
+                            /* The blit copies frame buffer rows
+                               [firstline, lastline), so the buffer has to be
+                               tall enough for lastline, not just for the
+                               visible height: a mode whose picture starts a
+                               few rows down otherwise runs the blit off the
+                               end of the buffer. */
                             set_screen_size(xsize,
-                                            ysize +
+                                            cga->lastline +
                                                 (enable_overscan ? 16 : 0));
 
                             if (force_resize)
@@ -1082,7 +1105,16 @@ cga_poll(void *priv)
             cga->scanline == ((cga->crtc[CGA_CRTC_CURSOR_START] & 0b11111) >> 1)))
             cga->cursorvisible = 1;
         if (cga->cgadispon && (cga->cgamode & CGA_MODE_FLAG_HIGHRES)) {
-            for (x = 0; x < (cga->crtc[CGA_CRTC_HDISP] << 1); x++)
+            /* charbuffer holds one 80 column row (160 bytes, 256 allocated).
+               HDISP is an 8 bit CRTC register and a mode set can leave 0xFF
+               in it for a frame; copying HDISP * 2 bytes then runs straight
+               through the following fields of cga_t - composite, revision,
+               double_type - and the card silently switches itself into the
+               composite renderer.  Clamp to the buffer. */
+            int n = cga->crtc[CGA_CRTC_HDISP] << 1;
+            if (n > (int) sizeof(cga->charbuffer))
+                n = sizeof(cga->charbuffer);
+            for (x = 0; x < n; x++)
                 cga->charbuffer[x] = cga->vram[((cga->memaddr << 1) + x) & cga_vram_mask(cga)];
         }
     }

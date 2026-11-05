@@ -107,7 +107,7 @@ typedef struct hp45981a_t {
     uint8_t gc_regs[9];   /* 3CF: 0=SetReset 1=EnableSR 3=DataRotate 5=Mode 8=BitMask */
     uint8_t ext_ctrl;  /* 3DD, write only */
     uint8_t monitor25k; /* W2 jumper: 0 = 15 kHz monitor, 1 = 25 kHz */
-    uint8_t font_rom[0x1000];
+    uint8_t font_rom[0x4000];   /* four sets: STD 8x8/16x8, HP 8x8/14x8 */
     int     font_loaded;
 } hp45981a_t;
 
@@ -123,23 +123,6 @@ hp45981a_clk400(void)
     return (uint64_t) ((cpuclock / (22440000.0 / 8.0)) * (double) (1ULL << 32));
 }
 
-/* Test aid: program the CRTC the way a 400 line aware application would, so
-   the 16 row rendering path can be exercised from the host.  The vertical
-   registers of a 200 line mode are not translated by this model (the card's
-   translation ROM has never been dumped). */
-static void
-hp45981a_program_400(UNUSED(hp45981a_t *dev))
-{
-    static const uint8_t regs[16] = { 0x6f, 0x4f, 0x51, 0x0f, 0x19, 0x00, 0x19, 0x19,
-                                      0x00, 0x0f, 0x0e, 0x0f, 0x00, 0x00, 0x00, 0x00 };
-    int i;
-
-    for (i = 0; i < 16; i++) {
-        cga_out(0x3d4, (uint8_t) i, &dev->cga);
-        cga_out(0x3d5, regs[i], &dev->cga);
-    }
-}
-
 static void
 hp45981a_set_ext_ctrl(hp45981a_t *dev, uint8_t val)
 {
@@ -149,10 +132,17 @@ hp45981a_set_ext_ctrl(hp45981a_t *dev, uint8_t val)
 
     dev->cga.vram_mask = (dev->ext_ctrl & HP45981A_EXT_32K) ? HP45981A_VRAM_MASK32 : HP45981A_VRAM_MASK16;
 
-    if (dev->font_loaded && (dev->ext_ctrl & HP45981A_EXT_HPFONT))
-        dev->cga.font16 = dev->font_rom;
-    else
-        dev->cga.font16 = NULL;
+    /* The character ROM holds four sets (manual p.85): A13 picks the standard
+       or the HP pair, A12 the 8 row or the 16 row block inside it.  A12 is the
+       monitor's cell height and is applied by the CGA core from CRTC R9. */
+    if (dev->font_loaded) {
+        dev->cga.font16         = dev->font_rom +
+                                  ((dev->ext_ctrl & HP45981A_EXT_HPFONT) ? 0x2000 : 0x0000);
+        dev->cga.font_row_major = 1;
+    } else {
+        dev->cga.font16         = NULL;
+        dev->cga.font_row_major = 0;
+    }
 
     dev->cga.clk    = (dev->ext_ctrl & HP45981A_EXT_400LINE) ? hp45981a_clk400() : CGACONST;
     /* Two sources select the 400 line mode: the extended control bit and the
@@ -251,10 +241,41 @@ hp45981a_out(uint16_t addr, uint8_t val, void *priv)
             /* Board ID is read only. */
             return;
 
+        case 0x03d8:
+            /* Mode control register.  Table 7.8 of the 45981A manual uses the
+               same bit encoding as the IBM CGA mode register, but this board
+               only ever drives an RGB monitor (the 25 kHz Multi-Mode display),
+               so the composite colour machinery of the CGA core has nothing to
+               do here - and it is the only reason the core's cga16 worker
+               thread gets woken from an I/O write.  Handle the register
+               locally instead of going through cga_out(). */
+            /* Six bit register (Table 7.8); the drivers set bit 7 as the
+               "do not translate" marker, which must not reach the renderer. */
+            dev->cga.cgamode = val & 0x3f;
+            dev->cga.gfx400  = ((dev->ext_ctrl & HP45981A_EXT_400LINE) ||
+                                (dev->cga.cgamode & CGA_MODE_FLAG_HIGHRES)) ? 1 : 0;
+
+            cga_recalctimings(&dev->cga);
+            return;
+
+        case 0x03d9:
+            /* Colour select register, six bits as well. */
+            dev->cga.cgacol = val & 0x3f;
+            return;
+
         default:
             /* 3D0-3D7 (CRTC, mirrored four times), 3D8, 3D9 and 3DB/3DC are
-               all handled by the CGA core. */
-            cga_out(addr, val, &dev->cga);
+               all handled by the CGA core.  With the 25 kHz monitor the card
+               sits behind its translation ROM, and HP's drivers mark a value
+               as "already in 25 kHz form, do not translate" by setting bit 7
+               (e.g. R1 = 0xA8 for a 40 character line).  The ROM passes the
+               value on with the marker stripped, so mask it here; storing
+               0xA8 as a horizontal display width made the renderer draw a
+               2704 pixel line. */
+            if (dev->monitor25k && (val & 0x80))
+                cga_out(addr, val & 0x7f, &dev->cga);
+            else
+                cga_out(addr, val, &dev->cga);
 
             /* Data writes to the CRTC go through the translation logic when a
                25 kHz monitor is connected (W2 jumper); values with bit 7 set
@@ -263,13 +284,6 @@ hp45981a_out(uint16_t addr, uint8_t val, void *priv)
                 ((addr == 0x03d1) || (addr == 0x03d3) || (addr == 0x03d5) || (addr == 0x03d7)))
                 hp45981a_translate_crtc(dev);
 
-            if (addr == 0x03d8) {
-                dev->cga.gfx400 = ((dev->ext_ctrl & HP45981A_EXT_400LINE) ||
-                                   (dev->cga.cgamode & CGA_MODE_FLAG_HIGHRES)) ? 1 : 0;
-
-                if ((dev->ext_ctrl & HP45981A_EXT_400LINE) && (getenv("HP45981A_CRTC400") != NULL))
-                    hp45981a_program_400(dev);
-            }
             return;
     }
 }
@@ -291,19 +305,6 @@ hp45981a_in(uint16_t addr, void *priv)
 
         case 0x03df: {
             /* Board ID register (read only): 41h identifies a 45981A. */
-            static int vd = -1;
-            if (vd < 0)
-                vd = (getenv("HP45981A_VDUMP") != NULL) ? 1 : 0;
-            if (vd) {
-                vd = 0;   /* 只打一次，避免把日志刷爆 */
-                pclog("HPVRAM ext=%02x crtc=", dev->ext_ctrl);
-                for (int i = 0; i < 16; i++)
-                    pclog("%02x ", dev->cga.crtc[i]);
-                pclog("\nvram0:");
-                for (int i = 0; i < 32; i++)
-                    pclog(" %02x", dev->cga.vram[i]);
-                pclog("\n");
-            }
             return HP45981A_BOARD_ID;
         }
 
@@ -332,15 +333,6 @@ hp45981a_write(uint32_t addr, uint8_t val, void *priv)
         uint32_t off = addr & (HP45981A_VRAM_SIZE - 1);
         uint8_t  o   = dev->vram[off];
         val = (uint8_t) ((o & ~dev->gc_regs[8]) | (val & dev->gc_regs[8]));
-    }
-
-    {
-        static int xt = -1;
-        if (xt < 0)
-            xt = (getenv("HP45981A_XTRACE") != NULL) ? 1 : 0;
-        if (xt && ((addr == 0x3d8) || (addr == 0x3d9) || (addr == 0x3dd)))
-            pclog("HPCGA %04x <- %02x  cs:ip=%05x:%04x\n", addr, val,
-                  cpu_state.seg_cs.base, cpu_state.pc);
     }
 
     /* The mask inside cga_write applies the 16K/32K wrap. */
@@ -425,20 +417,14 @@ hp45981a_init(UNUSED(const device_t *info))
     dev->cga.double_type = 0;
     cga_interpolate_init();
 
-    if (rom_load_linear(HP45981A_FONT_PATH, 0, 0x1000, 0, dev->font_rom))
+    if (rom_load_linear(HP45981A_FONT_PATH, 0, 0x4000, 0, dev->font_rom))
         dev->font_loaded = 1;
 
-    /* Test hook: force an initial 3DE value (e.g. HP45981A_EXT=04 selects the
-       HP character set) so the extended path can be exercised without guest
-       software. */
-    {
-        const char *ext = getenv("HP45981A_EXT");
-
-        if (ext != NULL)
-            hp45981a_set_ext_ctrl(dev, (uint8_t) strtoul(ext, NULL, 16));
-    }
-
-    dev->monitor25k = (getenv("HP45981A_25KHZ") != NULL);
+    /* The Vectra ships with the HP Multi-Mode display, so the W2 jumper sits
+       in the 25 kHz position: the card reports a 25 kHz monitor on 3DA bit 4
+       and runs the CRTC translation ROM.  HP45981A_15KHZ forces the other
+       jumper position for testing. */
+    dev->monitor25k = (getenv("HP45981A_15KHZ") == NULL);
 
     if (hp45981a_trace < 0)
         hp45981a_trace = (getenv("HP45981A_TRACE") != NULL);
