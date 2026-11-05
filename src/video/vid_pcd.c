@@ -38,6 +38,7 @@
 #include <86box/rom.h>
 #include <86box/video.h>
 #include <86box/plat.h>
+#include "../cpu/cpu.h"
 #include <86box/pcd_vid.h>
 
 #define PCD_VIDEO_XSIZE 640
@@ -56,7 +57,9 @@ typedef struct pcd_video_t {
 
     uint8_t  regs[16];
     int      vram_sw;      /* 0xf9a0 bit 0: 0 = character generator RAM */
-    int      gfx_on;       /* 0x20-group bit 1: the bitmap path */
+    int      gfx_on;       /* command bit 1: the bitmap path */
+    int      display_on;   /* command bit 3: display enable */
+    int      scr1;         /* screen start 1, in character cells */
     int      inverse;      /* 8741 P2 bit 3: whole screen negative */
 
     int          vram_mapped;
@@ -109,8 +112,10 @@ pcd_scan_text(pcd_video_t *dev)
 
     for (row = 0; row < PCD_TERM_ROWS; row++) {
         for (col = 0; col < PCD_TERM_COLS; col++) {
-            ch   = dev->vram[(row * PCD_TERM_COLS + col) * 2];
-            attr = dev->vram[(row * PCD_TERM_COLS + col) * 2 + 1];
+            int cell = ((dev->scr1 + row * PCD_TERM_COLS + col) & 0x1fff) * 2;
+
+            ch   = dev->vram[cell];
+            attr = dev->vram[cell + 1];
 
             fg = dev->inverse ? black : white;
             bg = dev->inverse ? white : black;
@@ -208,12 +213,36 @@ pcd_video_write(uint16_t port, uint8_t val, void *priv)
 
     dev->regs[reg] = val;
 
-    if (reg == 0x02) {
-        /* Command group 0x20: bit 1 picks the graphics path, bit 0 the state. */
-        if (((val & 0xe0) == 0x20) && (val & 0x02)) {
-            dev->gfx_on = (val & 0x01) ? 1 : 0;
-            dev->dirty  = 1;
-        }
+    if (getenv("PCD_VIDLOG") != NULL)
+        pclog("[PCDREG] %02X=%02X @%04X:%04X\n", reg, val, CS, cpu_state.pc);
+
+    switch (reg) {
+        /* The chip's port map is not the plain register file: 0x00 feeds the
+           initialization registers, 0x01 is the command register, 0x02/0x03
+           are the low and high halves of screen start 1 (SCN2674, as MAME
+           models it).  Treating 0x02 as the command register made the ROM's
+           screen-start write look like "graphics on", and the board then drew
+           an empty bitmap where the text should be. */
+        case 0x01:
+            if (val & 0x02)
+                dev->gfx_on = (val & 0x01) ? 1 : 0;
+            if (val & 0x08)
+                dev->display_on = (val & 0x01) ? 1 : 0;
+            dev->dirty = 1;
+            break;
+
+        case 0x02:
+            dev->scr1  = (dev->scr1 & 0x3f00) | val;
+            dev->dirty = 1;
+            break;
+
+        case 0x03:
+            dev->scr1  = (dev->scr1 & 0x00ff) | ((val & 0x3f) << 8);
+            dev->dirty = 1;
+            break;
+
+        default:
+            break;
     }
 }
 
@@ -224,6 +253,8 @@ pcd_vram_sw_write(UNUSED(uint16_t addr), uint8_t val, void *priv)
 
     dev->vram_sw = val & 1;
     dev->dirty   = 1;
+    if (getenv("PCD_VIDLOG") != NULL)
+        pclog("[PCDSW] %02X @%04X:%04X\n", val, CS, cpu_state.pc);
 }
 
 static void *
@@ -246,7 +277,8 @@ pcd_video_init(UNUSED(device_t *dev))
         }
     }
 
-    vid->vram_sw = 1;
+    vid->vram_sw   = 1;
+    vid->display_on = 1;
     vid->inverse = 0;
 
     for (i = 0; i < (PCD_VIDEO_XSIZE * PCD_VIDEO_YSIZE); i++)
