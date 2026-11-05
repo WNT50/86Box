@@ -3782,7 +3782,10 @@ const machine_t machines[] = {
             .max_multi   = 0
         },
         .bus_flags = MACHINE_AT,
-        .flags     = MACHINE_FLAGS_NONE,
+        /* Internal keyboard; the MFM hard disk and the floppy drives come
+           from the HP 45816A controller card, but the status bar keys the
+           MFM disk icon off MACHINE_MFM, not off the controller device. */
+        .flags     = MACHINE_KEYBOARD | MACHINE_MFM,
         .ram       = {
             .min  = 256,
             .max  = 3648,
