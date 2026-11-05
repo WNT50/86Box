@@ -55,7 +55,13 @@ enum {
 
     /* The last data byte of a write has gone in; the drive still needs a
        moment to put it on the track before the command may finish. */
-    WD_ST_WRITE_END
+    WD_ST_WRITE_END,
+
+    /* The data bytes are gone; the chip still shifts out the CRC and latches
+       the status before it lifts INTRQ.  A polled driver that has just read
+       its last byte needs that window to issue Force Interrupt, which clears
+       the line, instead of being interrupted for a command it already owns. */
+    WD_ST_LATCH
 };
 
 typedef struct wd2791_t {
@@ -69,6 +75,10 @@ typedef struct wd2791_t {
     uint8_t sector_reg;/* 0xf902 */
     uint8_t data_reg;  /* 0xf903 */
 
+    /* Microseconds between the last data byte and INTRQ (CRC + status phase).
+       PCX_POST_US overrides it; 0 makes the completion immediate again. */
+    int post_us;
+    int latched;
     uint8_t dskctl;    /* 0xf904 latch: drives, motor, side, DDEN */
 
     int state;

@@ -189,6 +189,16 @@ wd_irq_lower(wd2791_t *dev)
 static void
 wd_finish(wd2791_t *dev)
 {
+    /* Post-byte gap: CRC and the status phase.  Without it the interrupt lands
+       in the same emulated instant as the last data byte, which is the one
+       moment a polled driver is not yet listening for it. */
+    if (dev->post_us && !dev->latched) {
+        dev->latched = 1;
+        dev->state   = WD_ST_LATCH;
+        timer_set_delay_u64(&dev->timer, (uint64_t) dev->post_us * TIMER_USEC);
+        return;
+    }
+
     dev->busy         = 0;
     dev->state        = WD_ST_IDLE;
     dev->drq          = 0;
@@ -663,7 +673,9 @@ wd_start_read(wd2791_t *dev)
                   CS, cpu_state.pc, ES, DI);
     }
 
-    d86f_set_track_pos(drv, 0);
+    /* Start the search where the head is, as the real chip does: rewinding to
+       the index hole made every command wait almost a full revolution, and the
+       driver gives up at about 80 ms. */
     wd_sector_read(dev, dev->sector_reg);
 }
 
@@ -854,6 +866,11 @@ wd2791_command(wd2791_t *dev, uint8_t val)
     /* A command register write clears INTRQ (die behaviour, see MAME
        cmd_w()). */
     wd_irq_lower(dev);
+    dev->latched = 0;
+    /* The write-protect latch belongs to the command that found it: it has to
+       survive until the driver reads the status, but a later read command must
+       not inherit it, or every read on a write-protected disk reports WP. */
+    dev->wp_latched = 0;
 
     dev->command = val;
     dev->busy    = 1;
@@ -1042,6 +1059,11 @@ wd2791_timer(void *priv)
         return;
     }
 
+    if (dev->state == WD_ST_LATCH) {
+        wd_finish(dev);
+        return;
+    }
+
     if (dev->state == WD_ST_WRITE) {
         /* One millisecond without a data byte: the record the drive engine
            wanted is complete, so drop BUSY and let the guest read the status. */
@@ -1158,6 +1180,11 @@ wd2791_reset(void)
     dev->dskctl     = 0x00;
 
     dev->state     = WD_ST_IDLE;
+    dev->latched   = 0;
+    {
+        const char *e = getenv("PCX_POST_US");
+        dev->post_us  = e ? atoi(e) : 100;
+    }
     dev->type1     = 1;
     dev->busy      = 0;
     dev->drq       = 0;
