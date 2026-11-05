@@ -3400,7 +3400,7 @@ d86f_write_track(void *priv, FILE **fp, const int side, uint16_t *da0, uint16_t 
     {
         /* 4x oversampled cells per stored byte: the data is the truth here,
            the rate table is what we are trying to repair. */
-        const uint32_t raw  = (uint32_t) array_size * 2;
+        const uint32_t raw  = (uint32_t) array_size * 8;
         const double   rpm  = 300.0;
         const double   kbit = (double) raw * rpm / 60000.0;
         uint16_t       rate;
