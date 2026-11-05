@@ -134,6 +134,8 @@ typedef struct wd2791_t {
     int     tc_seen;      /* the DMA channel reported terminal count */
 
     pc_timer_t timer;
+    pc_timer_t ts_timer;   /* PCX_CHAINDBG sampler, see wd2791.c */
+    int        in_dma_fetch; /* the data-port read comes from the DMA engine */
 } wd2791_t;
 
 extern wd2791_t *wd2791_init(void);

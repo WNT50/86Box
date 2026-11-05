@@ -25,6 +25,8 @@
  */
 
 #include <stdint.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <86box/86box.h>
@@ -39,6 +41,7 @@
 #include "cpu.h"
 #include <86box/fdd_86f.h>
 #include <86box/fdc.h>
+#include <86box/i8018x.h>
 #include <86box/io.h>
 #include <86box/log.h>
 #include <86box/wd2791.h>
@@ -101,6 +104,49 @@ wd_search_us(void)
 /* Shortest time a command stays BUSY.  Long enough for a polled driver to see
    it, short enough not to slow anything down. */
 #define WD_INSTANT_CMD_US   (200)
+
+/* ------------------------------------------------------------------------- */
+/* C4 R9 time-series probe (PCX_CHAINDBG=1)                                  */
+/*                                                                           */
+/* Answers one question per run: does the host stop taking bytes before the  */
+/* chain runs to the end of the track, or does the chain outrun a host that  */
+/* is still reading?  Every event carries the guest-visible pop count and the */
+/* record counter for the command in progress, so demand and supply can be   */
+/* lined up on the same tick instead of inferred from the [CHAIN] lines.     */
+/* ------------------------------------------------------------------------- */
+static unsigned wd_ts_n;
+static unsigned wd_ts_pops;
+static unsigned wd_ts_recs;
+static unsigned wd_ts_sts;
+static int      wd_ts_prev;
+
+static int
+wd_ts_on(void)
+{
+    static int v = -1;
+
+    if (v < 0)
+        v = (getenv("PCX_CHAINDBG") != NULL);
+
+    return v;
+}
+
+static void
+wd_ts(const char *fmt, ...)
+{
+    char    buf[224];
+    va_list ap;
+
+    if (!wd_ts_on() || (wd_ts_n >= 20000))
+        return;
+
+    wd_ts_n++;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    pclog("[TS] n=%u t=%u %s\n", wd_ts_n, plat_get_ticks(), buf);
+}
+
 
 /* ------------------------------------------------------------------------- */
 /* helpers                                                                   */
@@ -198,6 +244,9 @@ static uint32_t wd_dbg_cmd_t = 0;
 static void
 wd_finish(wd2791_t *dev)
 {
+    wd_ts("ev=fin cmd=%02X pops=%u recs=%u bc=%d st=%02X why=%d state=%d",
+          dev->command, wd_ts_pops, wd_ts_recs, dev->byte_count, dev->status,
+          wd_dbg_why, dev->state);
     if (getenv("PCX_FDCLOG") != NULL)
         pclog("[DONE] t=%u cmd=%02X bc=%d pops=%d state=%d st=%02X why=%d trk=%d sec=%d side=%d\n",
               plat_get_ticks(), dev->command, dev->byte_count, wd_dbg_pops, dev->state,
@@ -367,6 +416,9 @@ wd_chain_next(wd2791_t *dev)
         pclog("[CHAIN] next=%d bc=%d len=%d size=%d busy=%d\n",
               dev->sector_reg + 1, dev->byte_count, dev->buf_len,
               dev->sector_size, dev->busy);
+    wd_ts("ev=chain next=%d pops=%u recs=%u bc=%d len=%d busy=%d",
+          dev->sector_reg + 1, wd_ts_pops, wd_ts_recs, dev->byte_count,
+          dev->buf_len, dev->busy);
     dev->chain_follow = 1;
     dev->sector_reg = (uint8_t) (dev->sector_reg + 1);
     timer_set_delay_u64(&dev->timer, wd_search_us() * TIMER_USEC);
@@ -434,6 +486,11 @@ wd_buf_pop(wd2791_t *dev)
     dev->dr_full  = 0;
     dev->drq      = 0;
     wd_dbg_pops++;
+    wd_ts_pops++;
+    if ((wd_ts_pops % 64) == 0)
+        wd_ts("ev=pop pops=%u R=%d bc=%d len=%d state=%d",
+              wd_ts_pops, dev->sector_reg, dev->byte_count, dev->buf_len,
+              dev->state);
 
     /* A chained record clears byte_count when it ends, so waiting for
        byte_count to reach sector_size here never fired and the command stayed
@@ -510,10 +567,16 @@ wd_data_in(void *priv, uint8_t data, int last)
         dev->dr      = data;
         dev->dr_full = 1;
         dev->drq     = 1;
+        dev->in_dma_fetch = 1;
         res = dma_channel_write(dev->fdc.dma_ch, data);
+        dev->in_dma_fetch = 0;
         if (res != DMA_NODATA) {
             dev->dr_full = 0;
             dev->drq     = 0;
+        } else {
+            /* No descriptor armed: this command is a PIO transfer.  Clearing
+               the flag here keeps every following byte on the queue path. */
+            dev->fdc.dma = 0;
         }
         if (getenv("PCX_DMADBG") != NULL) {
             static int n;
@@ -613,6 +676,12 @@ wd_data_in(void *priv, uint8_t data, int last)
                       dev->track_reg, dev->side, dev->sector_reg,
                       dev->byte_count, dev->sector_size, last);
         }
+        wd_ts("ev=rec R=%d bc=%d pops=%u n=%d size=%d last=%d len=%d "
+              "multi=%d tc=%d chainp=%d",
+              dev->sector_reg, dev->byte_count, wd_ts_pops, dev->rec_done,
+              dev->sector_size, last, dev->buf_len, dev->multi,
+              dev->tc_seen, dev->chain_pending);
+        wd_ts_recs++;
         dev->rec_done++;
 
         if (dev->multi) {
@@ -871,6 +940,17 @@ wd_start_read(wd2791_t *dev)
 
     dev->byte_count  = 0;
     dev->state       = WD_ST_READ;
+    /* Whether the host moves the data with the on-chip DMA or by polling is a
+       property of this command.  The PC-X loader programs DMA channel 1 with
+       0xF903 as the I/O source right before the read command, while the rest
+       of the boot (and the POST) polls the data register.  Ask the controller
+       which kind of descriptor is armed: a memory-to-memory one left over from
+       the POST must not be used to push floppy bytes. */
+    dev->fdc.dma      = 0;
+    if (i8018x_pcb_current != NULL)
+        dev->fdc.dma = (i8018x_pcb_dma_io_port(i8018x_pcb_current,
+                                               WD2791_DMA) == 0xf903);
+    dev->in_dma_fetch = 0;
     /* The record length the command asks for follows N (or the medium, in
        single density); the transfer is that long, not a fixed 512 bytes. */
     dev->sector_size = 128 << wd_sector_size_code(dev);
@@ -1054,6 +1134,12 @@ wd_force_interrupt(wd2791_t *dev, uint8_t val)
 {
     uint8_t cond = val & 0x0f;
 
+    wd_ts("ev=abort cond=%X busy=%d state=%d R=%d pops=%u recs=%u bc=%d "
+          "len=%d chainp=%d multi=%d first=%d",
+          cond, dev->busy, dev->state, dev->sector_reg, wd_ts_pops,
+          wd_ts_recs, dev->byte_count, dev->buf_len, dev->chain_pending,
+          dev->multi, dev->was_first);
+
     /* The low nibble picks what ends the operation: i3 means "interrupt now",
        the others wait for ready/index (which this model does not follow), and
        zero terminates without raising INTRQ at all.  A command write already
@@ -1125,6 +1211,13 @@ wd_force_interrupt(wd2791_t *dev, uint8_t val)
 static void
 wd2791_command(wd2791_t *dev, uint8_t val)
 {
+    wd_ts("ev=cmd val=%02X C=%d H=%d R=%d N=%d first=%d state=%d busy=%d "
+          "pops=%u recs=%u bc=%d len=%d chainp=%d @%04X:%04X",
+          val, dev->track_reg, dev->side, dev->sector_reg,
+          wd_size_code(dev), dev->first_read, dev->state, dev->busy,
+          wd_ts_pops, wd_ts_recs, dev->byte_count, dev->buf_len,
+          dev->chain_pending, (uint16_t) cpu_state.temp_CS,
+          (uint16_t) cpu_state.temp_pc);
 
     /* A command written while the previous one is still running terminates it
        (WD279X-02 data sheet).  The drive's bitstream engine has to be stopped
@@ -1159,6 +1252,10 @@ wd2791_command(wd2791_t *dev, uint8_t val)
     dev->command  = val;
     wd_dbg_pops   = 0;
     wd_dbg_cmd_t  = plat_get_ticks();
+    wd_ts_pops    = 0;
+    wd_ts_recs    = 0;
+    wd_ts_sts     = 0;
+    wd_ts_prev    = -1;
     dev->busy    = 1;
     dev->status &= ~(WD_S_CRC | WD_S_RNF | WD_S_LOST);
 
@@ -1220,6 +1317,17 @@ wd2791_reg_read(uint16_t port, UNUSED(void *priv))
             {
                 uint8_t ret = wd_status(dev);
 
+                wd_ts_sts++;
+                if ((wd_ts_sts <= 4) || (ret != wd_ts_prev)) {
+                    wd_ts("ev=sts %02X reads=%u pops=%u R=%d bc=%d len=%d "
+                          "state=%d @%04X:%04X",
+                          ret, wd_ts_sts, wd_ts_pops, dev->sector_reg,
+                          dev->byte_count, dev->buf_len, dev->state,
+                          (uint16_t) cpu_state.seg_cs.seg,
+                          (uint16_t) cpu_state.pc);
+                    wd_ts_prev = ret;
+                }
+
                 {
                     static int  fl = -1;
                     static int  last = -1;
@@ -1230,6 +1338,10 @@ wd2791_reg_read(uint16_t port, UNUSED(void *priv))
                     n++;
                     if (fl && (ret != last)) {
                         pclog("[STS] %02X n=%ld state=%d intrq=%d\n", ret, n, dev->state, dev->intrq);
+                        wd_ts("ev=sts %02X pops=%u R=%d bc=%d len=%d state=%d cmd=%02X",
+                              ret, wd_ts_pops, dev->sector_reg,
+                              dev->byte_count, dev->buf_len, dev->state,
+                              dev->command);
                         last = ret;
                     }
                 }
@@ -1270,8 +1382,11 @@ wd2791_reg_read(uint16_t port, UNUSED(void *priv))
                 /* The driver is polling the data register, so this transfer
                    is PIO: leaving the DMA path armed as well fed the same
                    record to two consumers and every byte after the first
-                   arrived shifted by one. */
-                dev->fdc.dma = 0;
+                   arrived shifted by one.  A read issued by the DMA engine
+                   itself comes through here too, so only a CPU read may
+                   switch the command over. */
+                if (!dev->in_dma_fetch)
+                    dev->fdc.dma = 0;
 
                 r = wd_buf_pop(dev);
                 if (l) {
@@ -1368,6 +1483,27 @@ wd2791_reg_write(uint16_t port, uint8_t val, UNUSED(void *priv))
 /* timer                                                                     */
 /* ------------------------------------------------------------------------- */
 
+/* Sampler for the C4 R9 probe: tells where the guest actually is after the
+   record has been queued, instead of leaving "no more FDC events" to be
+   interpreted as either a wait or a crash. */
+static void
+wd_ts_sample(void *priv)
+{
+    wd2791_t *dev = (wd2791_t *) priv;
+
+    timer_set_delay_u64(&dev->ts_timer, 20000 * TIMER_USEC);
+
+    if (!wd_ts_on() || (dev->track_reg < 3))
+        return;
+
+    wd_ts("ev=sample cs=%04X ip=%04X state=%d st=%02X pops=%u recs=%u R=%d "
+          "bc=%d len=%d busy=%d multi=%d",
+          (uint16_t) cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc,
+          dev->state, wd_status(dev), wd_ts_pops, wd_ts_recs,
+          dev->sector_reg, dev->byte_count, dev->buf_len, dev->busy,
+          dev->multi);
+}
+
 static void
 wd2791_timer(void *priv)
 {
@@ -1415,6 +1551,9 @@ wd2791_timer(void *priv)
 
         if (getenv("PCX_FDCLOG") != NULL)
             pclog("[TIMEOUT] sec=%d bc=%d buf=%d\n", dev->sector_reg, dev->byte_count, dev->buf_len);
+        wd_ts("ev=searchtimeout R=%d pops=%u recs=%u bc=%d len=%d cf=%d",
+              dev->sector_reg, wd_ts_pops, wd_ts_recs, dev->byte_count,
+              dev->buf_len, dev->chain_follow);
         wd_rnf(dev, __LINE__);
         wd_dbg_why = __LINE__; wd_done(dev);
         return;
@@ -1493,6 +1632,9 @@ wd_ext_error(void *priv, int st5, int st6)
     if (getenv("PCX_FDCLOG") != NULL)
         pclog("[EXTERR] st5=%02X st6=%02X chain=%d bc=%d sec=%d\n",
               st5, st6, dev->chain_follow, dev->byte_count, dev->sector_reg);
+    wd_ts("ev=ext st5=%02X st6=%02X cf=%d R=%d pops=%u recs=%u bc=%d len=%d",
+          st5, st6, dev->chain_follow, dev->sector_reg, wd_ts_pops,
+          wd_ts_recs, dev->byte_count, dev->buf_len);
 
     /* A multi record read that already transferred a whole sector and then
        found no such record after it has finished its job: the WD279x only
@@ -1712,6 +1854,9 @@ wd2791_init(void)
 
     timer_add(&dev->timer, wd2791_timer, dev, 0);
     timer_add(&dev->byte_timer, wd_byte_tick, dev, 0);
+    timer_add(&dev->ts_timer, wd_ts_sample, dev, 0);
+    if (wd_ts_on())
+        timer_set_delay_u64(&dev->ts_timer, 20000 * TIMER_USEC);
 
     io_sethandler(0xf900, 4, wd2791_reg_read, NULL, NULL,
                   wd2791_reg_write, NULL, NULL, dev);

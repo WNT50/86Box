@@ -1030,6 +1030,30 @@ i8018x_pcb_dma_armed(struct i8018x_pcb_t *dev, int slot)
     return !!(dev->regs[I8018X_DMA_CTRL(slot) / 2] & I8018X_DMA_ST);
 }
 
+/* If the channel is armed and takes its source from the I/O bus, return that
+   port; -1 otherwise.  An FDC that shares the channel with a memory-to-memory
+   descriptor (the POST leaves one behind) must not push its bytes through it
+   blindly, or the controller copies RAM into the guest's buffer instead. */
+int
+i8018x_pcb_dma_io_port(struct i8018x_pcb_t *dev, int channel)
+{
+    int      slot;
+    uint16_t ctrl;
+
+    if (dev == NULL)
+        return -1;
+
+    slot = i8018x_pcb_dma_slot(dev, channel);
+    if ((slot < 0) || !i8018x_pcb_dma_armed(dev, slot))
+        return -1;
+
+    ctrl = dev->regs[I8018X_DMA_CTRL(slot) / 2];
+    if (ctrl & I8018X_DMA_SRC_MIO)
+        return -1;
+
+    return (int) i8018x_pcb_dma_ptr(dev, slot, 0);
+}
+
 /* 20-bit pointer the channel transfers through. */
 static uint32_t
 i8018x_pcb_dma_ptr(struct i8018x_pcb_t *dev, int slot, int dst)
