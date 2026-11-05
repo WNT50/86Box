@@ -1157,6 +1157,14 @@ td0_seek(void *priv, int track)
         int       sector_adjusted = 0;
 
         if (!xdf_type) {
+            if (getenv("TD0_DBG") != NULL) {
+                pclog("[TD0] t=%d s=%d spt=%d flags=%02X sizes:", track, side,
+                      dev->track_spt[track][side], dev->current_side_flags[side]);
+                for (int q = 0; q < dev->track_spt[track][side]; q++)
+                    pclog(" %d/%d", dev->sects[track][side][q].sector,
+                          dev->sects[track][side][q].size);
+                pclog("\n");
+            }
             for (sector = 0; sector < dev->track_spt[track][side]; sector++) {
                 if (interleave_type == 0) {
                     real_sector   = dev->sects[track][side][sector].sector;

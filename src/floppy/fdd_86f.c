@@ -3353,6 +3353,21 @@ d86f_write_track(void *priv, FILE **fp, const int side, uint16_t *da0, uint16_t 
     fdd_drive_t *  drv             = (fdd_drive_t *) priv;
     const uint32_t array_size      = d86f_get_array_size(drv, side, 0);
 
+    if (getenv("D86F_SRC_DUMP") != NULL) {
+        char   path[256];
+        FILE * dfp;
+
+        const d86f_t *sdev = (d86f_t *) drv->d86f_priv;
+
+        snprintf(path, sizeof(path), "/tmp/src_%s_t%02d_s%d.bin",
+                 getenv("D86F_SRC_DUMP"), sdev->cur_track, side);
+        dfp = plat_fopen(path, "wb");
+        if (dfp != NULL) {
+            fwrite(da0, 1, (size_t) array_size, dfp);
+            fclose(dfp);
+        }
+    }
+
     if (getenv("D86F_EXPORT_DBG") != NULL)
         pclog("[XPORT] side=%d raw=%u arr=%u side_flags=%02X extra=%d ds40=%d single=%d\n", side,
               (unsigned) d86f_get_raw_size(drv, side), (unsigned) array_size,
