@@ -170,6 +170,9 @@ wd_irq_raise(wd2791_t *dev, const char *why)
                   dev->intrq, dev->byte_count, cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
         }
     }
+    if (dev->intrq && (getenv("PCX_FDCIQ") != NULL))
+        pclog("[FDCIQ] DOUBLE raise why=%s cmd=%02X t=%u @%04X:%04X\n", why,
+              dev->command, plat_get_ticks(), cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
     dev->intrq = 1;
     picint(1 << WD2791_IRQ);
 }
@@ -925,6 +928,21 @@ wd2791_reg_read(uint16_t port, UNUSED(void *priv))
                     if (fl && (ret != last)) {
                         pclog("[STS] %02X n=%ld state=%d intrq=%d\n", ret, n, dev->state, dev->intrq);
                         last = ret;
+                    }
+                }
+
+                {
+                    static int st = -1;
+                    static long sn;
+                    if (st < 0)
+                        st = (getenv("PCX_FDCSTAT") != NULL);
+                    if (st && (sn < 400)) {
+                        sn++;
+                        pclog("[STAT] n=%ld %02X t=%u @%04X:%04X cmd=%02X state=%d intrq=%d busy=%d drq=%d\n",
+                              sn,
+                              ret, plat_get_ticks(), cpu_state.seg_cs.seg,
+                              (uint16_t) cpu_state.pc, dev->command, dev->state,
+                              dev->intrq, dev->busy, dev->drq);
                     }
                 }
 
