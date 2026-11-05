@@ -3813,6 +3813,7 @@ const machine_t machines[] = {
         .vid_device               = NULL,
         .snd_device               = NULL,
         .net_device               = NULL,
+        .scsi_device              = &scsi_sm912_device,
         .aliases                  = { "PC-D", "" }
     },
 
