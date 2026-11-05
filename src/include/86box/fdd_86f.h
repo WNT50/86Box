@@ -56,6 +56,7 @@ extern void     d86f_stop(void *priv);
 extern void     d86f_poll(void *priv);
 extern int      d86f_realtrack(int track, void *priv);
 extern void     d86f_reset(void *priv, int side);
+extern int      d86f_get_sector_size_code(void *priv, int side, int c, int h, int r);
 extern void     d86f_readsector(void *priv, int sector, int track, int side, int rate,
                                 int sector_size);
 extern void     d86f_writesector(void *priv, int sector, int track, int side, int rate,

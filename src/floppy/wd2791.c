@@ -743,8 +743,10 @@ wd_data_out(void *priv, int last)
         if (data == DMA_NODATA) {
             data = dev->data_reg;
         } else {
-            if (data & DMA_OVER)
-                dev->fdc.tc = 1;
+            if (data & DMA_OVER) {
+                dev->fdc.tc  = 1;
+                dev->tc_seen = 1;
+            }
             data &= 0xff;
         }
     } else {
@@ -757,7 +759,10 @@ wd_data_out(void *priv, int last)
     if (!last && (dev->byte_count < dev->sector_size))
         return data & 0xff;
 
-    if (dev->multi) {
+    if (dev->multi && !dev->tc_seen) {
+        wd_ts("ev=wrec R=%d bc=%d size=%d tc=%d dma=%d",
+              dev->sector_reg, dev->byte_count, dev->sector_size,
+              dev->tc_seen, dev->fdc.dma);
         dev->sector_reg = (uint8_t) (dev->sector_reg + 1);
         dev->byte_count = 0;
         fdd_writesector(wd_drive(dev), dev->sector_reg, dev->track_reg,
@@ -949,11 +954,23 @@ wd_start_read(wd2791_t *dev)
     dev->fdc.dma      = 0;
     if (i8018x_pcb_current != NULL)
         dev->fdc.dma = (i8018x_pcb_dma_io_port(i8018x_pcb_current,
-                                               WD2791_DMA) == 0xf903);
+                                               WD2791_DMA, 0) == 0xf903);
     dev->in_dma_fetch = 0;
-    /* The record length the command asks for follows N (or the medium, in
-       single density); the transfer is that long, not a fixed 512 bytes. */
-    dev->sector_size = 128 << wd_sector_size_code(dev);
+    /* The record length comes from the ID the controller will match, not from
+       the command: a Type II command carries no N, and the boot disk mixes
+       128-byte sectors on cylinder 0 with 256-byte ones further in.  Look the
+       sector up by C/H/R and size the transfer from what the track holds. */
+    {
+        int n = d86f_get_sector_size_code(drv, dev->side, dev->track_reg,
+                                          dev->side, dev->sector_reg);
+        if (n < 0)
+            n = wd_sector_size_code(dev);
+        if (getenv("PCX_FDCLOG") != NULL)
+            pclog("[SID] C=%d H=%d R=%d -> n=%d size=%d dma=%d\n",
+                  dev->track_reg, dev->side, dev->sector_reg, n, 128 << n,
+                  dev->fdc.dma);
+        dev->sector_size = 128 << n;
+    }
     dev->was_first   = dev->first_read;
     dev->first_read  = 0;
 
@@ -1007,6 +1024,25 @@ wd_start_write(wd2791_t *dev)
 
     dev->byte_count = 0;
     dev->state      = WD_ST_WRITE;
+
+    /* Same per-command choice as a read: the loader also moves file system
+       blocks to the disk through 80186 channel 1, with 0xF903 as the sink. */
+    dev->fdc.dma = 0;
+    if (i8018x_pcb_current != NULL)
+        dev->fdc.dma = (i8018x_pcb_dma_io_port(i8018x_pcb_current,
+                                               WD2791_DMA, 1) == 0xf903);
+    dev->in_dma_fetch = 0;
+
+    /* Same as a read: the length is whatever the ID says, not a default. */
+    {
+        int n = d86f_get_sector_size_code(drv, dev->side, dev->track_reg,
+                                          dev->side, dev->sector_reg);
+        if (n >= 0)
+            dev->sector_size = 128 << n;
+    }
+    wd_ts("ev=wstart R=%d size=%d multi=%d dma=%d", dev->sector_reg,
+          dev->sector_size, dev->multi, dev->fdc.dma);
+
     /* The 279x raises DRQ as soon as it wants the first data byte; a polled
        driver waits for exactly that bit before it writes 0xf903. */
     dev->drq        = 1;

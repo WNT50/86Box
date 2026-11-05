@@ -1035,7 +1035,7 @@ i8018x_pcb_dma_armed(struct i8018x_pcb_t *dev, int slot)
    descriptor (the POST leaves one behind) must not push its bytes through it
    blindly, or the controller copies RAM into the guest's buffer instead. */
 int
-i8018x_pcb_dma_io_port(struct i8018x_pcb_t *dev, int channel)
+i8018x_pcb_dma_io_port(struct i8018x_pcb_t *dev, int channel, int dst)
 {
     int      slot;
     uint16_t ctrl;
@@ -1048,10 +1048,11 @@ i8018x_pcb_dma_io_port(struct i8018x_pcb_t *dev, int channel)
         return -1;
 
     ctrl = dev->regs[I8018X_DMA_CTRL(slot) / 2];
-    if (ctrl & I8018X_DMA_SRC_MIO)
+    /* dst == 0: the device is the source; dst != 0: the device is the sink. */
+    if (dst ? (ctrl & I8018X_DMA_DST_MIO) : (ctrl & I8018X_DMA_SRC_MIO))
         return -1;
 
-    return (int) i8018x_pcb_dma_ptr(dev, slot, 0);
+    return (int) i8018x_pcb_dma_ptr(dev, slot, dst);
 }
 
 /* 20-bit pointer the channel transfers through. */
