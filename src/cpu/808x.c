@@ -2218,6 +2218,14 @@ execx86_instruction(void)
             pclog("[REGS] AX=%04X BX=%04X CX=%04X DX=%04X SI=%04X DI=%04X "
                   "BP=%04X SP=%04X DS=%04X ES=%04X SS=%04X FL=%04X\n",
                   AX, BX, CX, DX, SI, DI, BP, SP, DS, ES, SS, cpu_state.flags);
+            pclog("[REGS] low 0x60:");
+            for (int q = 0; q < 16; q++)
+                pclog(" %04X", pcx_peekw(0x60u + (uint32_t) (q << 1)));
+            pclog("\n[REGS] stack SS:SP:");
+            for (int q = 0; q < 12; q++)
+                pclog(" %04X", pcx_peekw((((uint32_t) SS) << 4) +
+                                         (((uint32_t) SP + (uint32_t) (q << 1)) & 0xFFFFu)));
+            pclog("\n");
         }
     }
 
