@@ -570,10 +570,6 @@ hp_hil_link_ready(void *priv)
         return;                         /* driver is not waiting */
 
     dev->ready_ctx = ctx;
-    if (getenv("HIL_MOUSE_NUDGE") != NULL) {
-        dev->dx = 1;                /* 实验：让链路上出现一次位移事件 */
-        dev->dy = 0;
-    }
     mem_writew_phys(ctx + 0x10, (uint16_t) (flags | 0x1004));
     pic3_int(HIL_IRQ_LINE, 1);
 }
