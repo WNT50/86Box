@@ -49,6 +49,20 @@
 #include <86box/log.h>
 #include <86box/io.h>
 #include <86box/kbc_siemens.h>
+#include <86box/pic.h>
+
+/* The terminal board's MCU raises PIC2 IR0 (the second 8259's input 0) both
+   when it has a key for the host and when it has taken the host's output byte,
+   the latter being the "transmitter ready" interrupt the tty layer drains its
+   queue on.  MAME wires the same way (pcd_v.cpp: m_pic2->ir0_w).  The machine
+   has no cascade, so bit 8 of picint_common() addresses pic2 directly. */
+static uint8_t kbc_siemens_irq_state;
+
+static void
+kbc_siemens_irq(int on)
+{
+    picint_common(1 << 8, PIC_IRQ_LEVEL, on, &kbc_siemens_irq_state);
+}
 
 #ifdef ENABLE_KBC_SIEMENS_LOG
 int kbc_siemens_do_log = ENABLE_KBC_SIEMENS_LOG;
@@ -109,6 +123,8 @@ kbc_busy_clear(void *priv)
     kbc_siemens_t *dev = (kbc_siemens_t *) priv;
 
     dev->busy = 0;
+    /* The MCU has taken the byte: tell the host it can send the next one. */
+    kbc_siemens_irq(1);
 }
 
 static int
@@ -215,6 +231,8 @@ kbc_siemens_read_data(kbc_siemens_t *dev)
     if (dev == NULL)
         return ret;
 
+    kbc_siemens_irq(0);
+
     if (!kbc_fifo_empty(dev)) {
         ret        = dev->fifo[dev->fifo_head];
         dev->fifo_head = (dev->fifo_head + 1) % KBC_FIFO_SIZE;
@@ -238,6 +256,8 @@ kbc_siemens_read_status(kbc_siemens_t *dev)
     if (dev == NULL)
         return ret;
 
+    kbc_siemens_irq(0);
+
     /* Bit 0: a byte waits at 0xf980 (v3 0xfd9e6 tests exactly this bit).
        Bit 1: busy, i.e. the controller has not taken the last byte.  The
        high level model consumes the stream at once, so it stays clear. */
@@ -260,6 +280,7 @@ kbc_siemens_key(kbc_siemens_t *dev, uint8_t byte)
         return;
 
     kbc_fifo_put(dev, byte);
+    kbc_siemens_irq(1);
     kbc_siemens_log(dev->log, "key %02X\n", byte);
 }
 
