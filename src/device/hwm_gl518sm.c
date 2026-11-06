@@ -37,8 +37,7 @@
 #define GL520SM 0x100
 
 typedef struct gl518sm_t {
-    uint32_t      local;
-    hwm_values_t *values;
+    uint32_t local;
 
     uint16_t regs[32];
     uint8_t  addr_register : 5;
@@ -128,32 +127,32 @@ gl518sm_read(gl518sm_t *dev, uint8_t reg)
 
     switch (reg) {
         case 0x04: /* temperature */
-            ret = (dev->values->temperatures[0] + ((dev->local & GL520SM) ? 130 : 119)) & 0xff;
+            ret = (hwm_get_temperature(0) + ((dev->local & GL520SM) ? 130 : 119)) & 0xff;
             break;
 
         case 0x07: /* fan speeds */
-            ret = GL518SM_RPM_TO_REG(dev->values->fans[0], (dev->regs[0x0f] >> 6) & 0x3) << 8;
-            ret |= GL518SM_RPM_TO_REG(dev->values->fans[1], (dev->regs[0x0f] >> 4) & 0x3);
+            ret = GL518SM_RPM_TO_REG(hwm_get_fan(0), (dev->regs[0x0f] >> 6) & 0x3) << 8;
+            ret |= GL518SM_RPM_TO_REG(hwm_get_fan(1), (dev->regs[0x0f] >> 4) & 0x3);
             break;
 
         case 0x0d: /* VIN3 */
-            ret = GL518SM_VOLTAGE_TO_REG(dev->values->voltages[2]);
+            ret = GL518SM_VOLTAGE_TO_REG(hwm_get_voltage(2));
             break;
 
         case 0x0e: /* temperature 2 */
-            ret = (dev->local & GL520SM) ? ((dev->values->temperatures[1] + 130) & 0xff) : dev->regs[reg];
+            ret = (dev->local & GL520SM) ? ((hwm_get_temperature(1) + 130) & 0xff) : dev->regs[reg];
             break;
 
         case 0x13: /* VIN2 */
-            ret = GL518SM_VOLTAGE_TO_REG(dev->values->voltages[1]);
+            ret = GL518SM_VOLTAGE_TO_REG(hwm_get_voltage(1));
             break;
 
         case 0x14: /* VIN1 */
-            ret = GL518SM_VOLTAGE_TO_REG(dev->values->voltages[0]);
+            ret = GL518SM_VOLTAGE_TO_REG(hwm_get_voltage(0));
             break;
 
         case 0x15: /* VDD */
-            ret = GL518SM_VDD_TO_REG(dev->values->voltages[3]);
+            ret = GL518SM_VDD_TO_REG(hwm_get_voltage(3));
             break;
 
         default: /* other registers */
@@ -292,20 +291,19 @@ gl518sm_init(const device_t *info)
             3000  /* usually CPU */
         },
         {
-         /* temperatures */
-            30, /* usually CPU */
-            30  /* GL520SM only: usually System */
-        },
-        {
          /* voltages */
             hwm_get_vcore(),                  /* Vcore */
             RESISTOR_DIVIDER(12000, 150, 47), /* +12V (15K/4.7K divider suggested in the datasheet) */
             3300,                             /* +3.3V */
             5000                              /* +5V */
+        },
+        {
+         /* temperatures */
+            30, /* usually CPU */
+            30  /* GL520SM only: usually System */
         }
     };
-    hwm_values  = defaults;
-    dev->values = &hwm_values;
+    hwm_values = defaults;
 
     gl518sm_reset(dev);
     gl518sm_remap(dev, dev->local & 0x7f);

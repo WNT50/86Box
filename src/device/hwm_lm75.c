@@ -62,9 +62,9 @@ lm75_read(lm75_t *dev, uint8_t reg)
     uint8_t mask = (dev->local & 0x80) ? 0xf : 0x7;
 
     if ((reg & mask) == 0x0) /* temperature high byte */
-        ret = LM75_TEMP_TO_REG(dev->values->temperatures[dev->local >> 8]) >> 8;
+        ret = LM75_TEMP_TO_REG(hwm_get_temperature(dev->local >> 8)) >> 8;
     else if ((reg & mask) == 0x1) /* temperature low byte */
-        ret = LM75_TEMP_TO_REG(dev->values->temperatures[dev->local >> 8]);
+        ret = LM75_TEMP_TO_REG(hwm_get_temperature(dev->local >> 8));
     else
         ret = dev->regs[reg & mask];
 
@@ -231,7 +231,6 @@ lm75_init(const device_t *info)
     /* Set default value. */
     if (dev->local)
         hwm_values.temperatures[dev->local >> 8] = 30;
-    dev->values = &hwm_values;
 
     dev->i2c_addr    = dev->local & 0x7f;
     dev->i2c_enabled = 1;
