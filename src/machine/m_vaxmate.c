@@ -44,10 +44,34 @@
 extern dma_t dma[8];
 extern uint8_t dma_m;
 
-/* The 64 KB BIOS is two 32 KB EPROMs on a 16-bit bus: the 310E6 device holds
-   the low (even) byte, the 311E6 device the high (odd) byte. */
-#define VAXMATE_BIOS_EVEN "roms/machines/vaxmate/vaxmate_310E6_even.bin"
-#define VAXMATE_BIOS_ODD  "roms/machines/vaxmate/vaxmate_311E6_odd.bin"
+/* The 64 KB BIOS is two 32 KB EPROMs on a 16-bit bus, one holding the low
+   (even) bytes and the other the high (odd) bytes.  Two revisions are archived
+   in the ROM set; note that their part numbers run in opposite directions. */
+#define VAXMATE_BIOS_310E6_EVEN "roms/machines/vaxmate/vaxmate_310E6_even.bin"
+#define VAXMATE_BIOS_311E6_ODD  "roms/machines/vaxmate/vaxmate_311E6_odd.bin"
+#define VAXMATE_BIOS_200E6_EVEN "roms/machines/vaxmate/vaxmate_200E6_even.bin"
+#define VAXMATE_BIOS_199E6_ODD  "roms/machines/vaxmate/vaxmate_199E6_odd.bin"
+
+static const device_config_t vaxmate_config[] = {
+    // clang-format off
+    {
+        .name           = "bios_rev",
+        .description    = "BIOS revision",
+        .type           = CONFIG_SELECTION,
+        .default_string = NULL,
+        .default_int    = 0,
+        .file_filter    = NULL,
+        .spinner        = { 0 },
+        .selection      = {
+            { .description = "05/18/87", .value = 0 },
+            { .description = "07/31/86", .value = 1 },
+            { .description = ""                      }
+        },
+        .bios           = { { 0 } }
+    },
+    { .name = "", .description = "", .type = CONFIG_END }
+    // clang-format on
+};
 
 /*
  * System CSR 1 (0x0C00) - bit-serial port to the 256-bit NVM (TRM Vol.1 p7-23,
@@ -226,7 +250,7 @@ const device_t vaxmate_device = {
     .available     = NULL,
     .speed_changed = NULL,
     .force_redraw  = NULL,
-    .config        = NULL
+    .config        = vaxmate_config
 };
 
 
@@ -312,9 +336,17 @@ vaxmate_uart_write(uint16_t addr, uint8_t val, void *priv)
 int
 machine_at_vaxmate_init(const machine_t *model)
 {
-    int ret;
+    const char *bios_even = VAXMATE_BIOS_310E6_EVEN;
+    const char *bios_odd  = VAXMATE_BIOS_311E6_ODD;
+    int         ret;
 
-    ret = bios_load_interleaved(VAXMATE_BIOS_EVEN, VAXMATE_BIOS_ODD, 0x000f0000, 65536, 0);
+    /* The 07/31/86 pair wires its part numbers the other way round. */
+    if (machine_get_config_int("bios_rev") == 1) {
+        bios_even = VAXMATE_BIOS_200E6_EVEN;
+        bios_odd  = VAXMATE_BIOS_199E6_ODD;
+    }
+
+    ret = bios_load_interleaved(bios_even, bios_odd, 0x000f0000, 65536, 0);
     if (bios_only || !ret)
         return ret;
 
