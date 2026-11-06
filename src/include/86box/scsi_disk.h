@@ -52,6 +52,9 @@ typedef struct scsi_disk_t {
     uint32_t           sector_len;
     uint32_t           packet_len;
     uint32_t           block_len;
+    uint32_t           omti_heads;    /* geometry the bridge was told about */
+    uint32_t           omti_cyl;
+    uint32_t           omti_spt;
 
     double             callback;
 

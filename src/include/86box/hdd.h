@@ -186,6 +186,8 @@ typedef struct hard_disk_t {
     uint32_t           vhd_blocksize;
     uint32_t           block_size;   /* Logical block size the SCSI target
                                         reports (512 unless set). */
+    uint32_t           omti;         /* Behind an OMTI 5100/5300 bridge: take
+                                        its vendor commands as well. */
 
     uint8_t            max_multiple_block;
     uint8_t            pad1[3];

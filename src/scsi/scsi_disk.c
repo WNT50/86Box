@@ -74,7 +74,12 @@ const uint8_t scsi_disk_command_flags[0x100] = {
     [0xaa]          = IMPLEMENTED | CHECK_READY,
     [0xae]          = IMPLEMENTED | CHECK_READY,
     [0xaf]          = IMPLEMENTED | CHECK_READY | SCSI_ONLY,
-    [0xbd]          = IMPLEMENTED
+    [0xbd]          = IMPLEMENTED,
+    /* OMTI 5100/5300 vendor set; the handlers check drv->omti themselves. */
+    [0x05]          = IMPLEMENTED,
+    [0x06]          = IMPLEMENTED,
+    [0xc2]          = IMPLEMENTED,
+    [0xec]          = IMPLEMENTED
 };
 
 uint64_t scsi_disk_mode_sense_page_flags = (GPMODEP_FORMAT_DEVICE_PAGE | GPMODEP_RIGID_DISK_PAGE |
@@ -1556,6 +1561,85 @@ atapi_out:
             scsi_disk_data_command_finish(dev, len, len, len, 0);
             break;
 
+        /* The PC-X hides an OMTI 5100/5300 between the SCSI bus and the drive.
+           These four are what its firmware answers; without them the SINIX
+           installer cannot assign a geometry or format a track. */
+        case 0x05: /* CHECK TRACK FORMAT */
+            if (!dev->drv->omti) {
+                scsi_disk_illegal_opcode(dev, cdb[0]);
+                break;
+            }
+            scsi_disk_set_phase(dev, SCSI_PHASE_STATUS);
+            scsi_disk_command_complete(dev);
+            break;
+
+        case 0x06: /* FORMAT TRACK */
+            if (!dev->drv->omti) {
+                scsi_disk_illegal_opcode(dev, cdb[0]);
+                break;
+            } else {
+                const uint32_t lba   = ((((uint32_t) cdb[1]) & 0x1f) << 16) |
+                                       (((uint32_t) cdb[2]) << 8) | cdb[3];
+                const uint32_t spb   = block_size >> 9;
+                const uint32_t spt   = dev->omti_spt ? dev->omti_spt : dev->drv->spt;
+                const uint32_t cyl   = dev->omti_cyl ? dev->omti_cyl : dev->drv->tracks;
+                const uint32_t heads = dev->omti_heads ? dev->omti_heads : dev->drv->hpc;
+                const uint32_t track = spt ? (lba / spt) : 0;
+                uint8_t       *fill;
+
+                if (!spt || !heads || (track >= (cyl * heads))) {
+                    scsi_disk_sense_key = SENSE_MEDIUM_ERROR;
+                    scsi_disk_asc       = ASC_WRITE_ERROR;
+                    scsi_disk_ascq      = 0;
+                    scsi_disk_cmd_error(dev);
+                    break;
+                }
+
+                fill = (uint8_t *) malloc(spt * block_size);
+                if (fill == NULL) {
+                    scsi_disk_sense_key = SENSE_MEDIUM_ERROR;
+                    scsi_disk_asc       = ASC_WRITE_ERROR;
+                    scsi_disk_ascq      = 0;
+                    scsi_disk_cmd_error(dev);
+                    break;
+                }
+
+                memset(fill, 0xe5, spt * block_size);
+                hdd_image_write(dev->id, (uint32_t) track * spt * spb, spt * spb, fill);
+                free(fill);
+
+                scsi_disk_set_phase(dev, SCSI_PHASE_STATUS);
+                scsi_disk_command_complete(dev);
+            }
+            break;
+
+        case 0xc2: /* ASSIGN DISK PARAM */
+            if (!dev->drv->omti) {
+                scsi_disk_illegal_opcode(dev, cdb[0]);
+                break;
+            }
+            scsi_disk_set_phase(dev, SCSI_PHASE_DATA_OUT);
+            scsi_disk_buf_alloc(dev, 10);
+            len = 10;
+            scsi_disk_set_buf_len(dev, BufLen, &len);
+            dev->total_length = len;
+            scsi_disk_data_command_finish(dev, len, len, len, 1);
+            break;
+
+        case 0xec: /* READ DATA BUFFER */
+            if (!dev->drv->omti) {
+                scsi_disk_illegal_opcode(dev, cdb[0]);
+                break;
+            }
+            scsi_disk_set_phase(dev, SCSI_PHASE_DATA_IN);
+            scsi_disk_buf_alloc(dev, 512);
+            memset(dev->temp_buffer, 0, 512);
+            memcpy(dev->temp_buffer, "5100", 4);
+            len = 512;
+            scsi_disk_set_buf_len(dev, BufLen, &len);
+            scsi_disk_data_command_finish(dev, len, len, len, 0);
+            break;
+
         default:
             scsi_disk_illegal_opcode(dev, cdb[0]);
             break;
@@ -1603,6 +1687,30 @@ scsi_disk_phase_data_out(scsi_common_t *sc)
             log_fatal(dev->log, "Bad Command for phase 2 (%02X)\n", dev->current_cdb[0]);
             ret = 0;
         break;
+
+        case 0xc2: /* ASSIGN DISK PARAM */
+            if (dev->drv->omti && (*BufLen >= 10)) {
+                dev->omti_heads = (uint32_t) dev->temp_buffer[3] + 1;
+                dev->omti_cyl   = (((uint32_t) dev->temp_buffer[4] << 8) |
+                                    (uint32_t) dev->temp_buffer[5]) + 1;
+                dev->omti_spt   = (uint32_t) dev->temp_buffer[8] + 1;
+
+                /* A zero sector count means "use what the medium implies":
+                   512-byte media carry 18, 1024-byte media carry 9. */
+                if (dev->temp_buffer[8] == 0x00) {
+                    switch (scsi_disk_block_size(dev)) {
+                        case 1024:
+                            dev->omti_spt = 9;
+                            break;
+                        case 512:
+                        default:
+                            dev->omti_spt = 18;
+                            break;
+                    }
+                }
+
+            }
+            break;
 
         case GPCMD_VERIFY_6:
         case GPCMD_VERIFY_10:
