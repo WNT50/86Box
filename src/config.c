@@ -1803,12 +1803,12 @@ load_hard_disks(void)
         {
             char  copy[128];
             char *tok, *save = NULL;
-            char *fields[6];
+            char *fields[7];
             int   nf = 0;
 
             strncpy(copy, p, sizeof(copy) - 1);
             copy[sizeof(copy) - 1] = '\0';
-            for (tok = strtok_r(copy, ",", &save); (tok != NULL) && (nf < 6);
+            for (tok = strtok_r(copy, ",", &save); (tok != NULL) && (nf < 7);
                  tok = strtok_r(NULL, ",", &save)) {
                 while (*tok == ' ')
                     tok++;
@@ -1823,6 +1823,8 @@ load_hard_disks(void)
                 s[15] = '\0';
                 if (nf >= 6)
                     hdd[c].block_size = (uint32_t) atoi(fields[5]);
+                if (nf >= 7)
+                    hdd[c].omti = (uint32_t) atoi(fields[6]);
             }
         }
 
@@ -4702,7 +4704,11 @@ save_hard_disks(void)
         sprintf(temp, "hdd_%02i_parameters", c + 1);
         if (hdd_is_valid(c)) {
             p = hdd_bus_to_string(hdd[c].bus_type, 0);
-            if (hdd[c].block_size && (hdd[c].block_size != 512))
+            if (hdd[c].omti)
+                sprintf(tmp2, "%u, %u, %u, %i, %s, %u, %u",
+                        hdd[c].spt, hdd[c].hpc, hdd[c].tracks, hdd[c].wp, p,
+                        hdd[c].block_size ? hdd[c].block_size : 512, hdd[c].omti);
+            else if (hdd[c].block_size && (hdd[c].block_size != 512))
                 sprintf(tmp2, "%u, %u, %u, %i, %s, %u",
                         hdd[c].spt, hdd[c].hpc, hdd[c].tracks, hdd[c].wp, p,
                         hdd[c].block_size);
