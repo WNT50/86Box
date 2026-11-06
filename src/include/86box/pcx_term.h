@@ -42,6 +42,16 @@ typedef struct pcx_term_t {
     int row;
     int font_loaded;
     int dirty; /* a cell changed since the last render */
+
+    /* Escape parser: the board's 8031 turns the host stream into cursor moves
+       and attribute changes, which the BIOS never does but SINIX's tty does
+       as soon as it owns the console.  esc is 0 in the text state, 1 after an
+       ESC, 2 inside a CSI sequence and 3 after ESC ( ) # % * +, where the
+       next byte is a designator and not a command. */
+    int esc;
+    int par[4];
+    int npar;
+    int priv; /* '?' prefix, a private sequence: parsed and ignored */
 } pcx_term_t;
 
 void pcx_term_init(pcx_term_t *term);
