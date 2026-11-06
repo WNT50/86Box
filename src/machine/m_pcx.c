@@ -884,7 +884,7 @@ machine_pcx_init_ex(const machine_t *model)
            at 23 clocks each (cmp 3 + jcc 4 + dec 3 + jcc 13 from the 80186
            timing table), so 25001 counts must take 23.6..70.6 ms, i.e. the pin
            runs at 0.35..1.06 MHz.  8 MHz / 16 = 500 kHz sits inside that. */
-        i8018x_pcb_set_timer_input(pcb, 0, 16);
+        i8018x_pcb_set_timer_input(pcb, 0, 12);
         i8018x_pcb_set_ext_ack(pcb, 0, pcx_8259_ack, &pic);
         i8018x_pcb_set_ext_ack(pcb, 1, pcx_8259_ack, &pic2);
         pic_set_output_callback(&pic, pcx_icu_int0, pcb);
