@@ -30,6 +30,12 @@
 #define PCX_TERM_CELL_W 8
 #define PCX_TERM_CELL_H 14
 #define PCX_TERM_CHARS 512
+
+/* Attribute bit 4 (0x40) is the board's bank bit: the SCN2672 takes the
+   glyph from the second half of the character generator, which is where the
+   graphics set (slots 0x190-0x19F and up) lives.  The cell then holds the
+   low part of the glyph code, exactly like the charcode the board writes. */
+#define PCX_TERM_ATTR_BANK 0x40
 #define PCX_TERM_FONT_SIZE (PCX_TERM_CHARS * 16)
 
 typedef struct pcx_term_t {
@@ -52,6 +58,7 @@ typedef struct pcx_term_t {
     int par[4];
     int npar;
     int priv; /* '?' prefix, a private sequence: parsed and ignored */
+    int g1;   /* SO selected the graphics set; SI (0x0f) returns to ASCII */
 } pcx_term_t;
 
 void pcx_term_init(pcx_term_t *term);

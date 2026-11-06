@@ -23,6 +23,8 @@
    terminates every line with CR LF and every message with ETX (0x03). */
 #define PCX_TERM_ETX 0x03
 #define PCX_TERM_BEL 0x07
+#define PCX_TERM_SO  0x0e
+#define PCX_TERM_SI  0x0f
 #define PCX_TERM_BS  0x08
 #define PCX_TERM_TAB 0x09
 #define PCX_TERM_LF  0x0a
@@ -71,6 +73,7 @@ pcx_term_init(pcx_term_t *term)
     term->esc      = 0;
     term->npar     = 0;
     term->priv     = 0;
+    term->g1       = 0;
     memset(term->par, 0, sizeof(term->par));
 }
 
@@ -216,11 +219,45 @@ pcx_term_csi(pcx_term_t *term, uint8_t final)
     pcx_term_clamp(term);
 }
 
+/* Raw stream log.  The escape parser below is where the character set gets
+   selected, and a designator that is dropped here is invisible in the page
+   dump: enable PCX_RAWLOG to see the bytes exactly as the kernel sends them. */
+static void
+pcx_term_raw(uint8_t val)
+{
+    static int      on      = -1;
+    static uint32_t offset  = 0;
+    static char     hex[32 * 3 + 1];
+    static char     txt[32 + 1];
+    static int      n       = 0;
+
+    if (on < 0)
+        on = (getenv("PCX_RAWLOG") != NULL);
+
+    if (!on || (offset >= 0x40000))
+        return;
+
+    snprintf(&hex[n * 3], 4, "%02X ", val);
+    txt[n] = ((val >= 0x20) && (val < 0x7F)) ? (char) val : '.';
+    n++;
+
+    if ((n == 32) || (val == 0x0A)) {
+        hex[n * 3] = '\0';
+        txt[n]     = '\0';
+        pclog("[RAW] %06X: %s| %s\n", offset - n + 1, hex, txt);
+        n = 0;
+    }
+    offset++;
+}
+
 void
 pcx_term_write(pcx_term_t *term, uint8_t val)
 {
+    pcx_term_raw(val);
+
     if ((term == NULL) || (term->row < 0) || (term->row >= PCX_TERM_ROWS))
         return;
+
 
     if (term->esc != 0) {
         if (term->esc == 1) {
@@ -329,12 +366,27 @@ pcx_term_write(pcx_term_t *term, uint8_t val)
         case PCX_TERM_BEL:
             break;
 
+        case PCX_TERM_SO: /* shift out: the graphics set */
+            term->g1 = 1;
+            break;
+
+        case PCX_TERM_SI: /* shift in: back to ASCII */
+            term->g1 = 0;
+            break;
+
         default:
             if (val < 0x20)
                 break;
 
-            term->cells[term->row][term->col] = val;
-            term->attr[term->row][term->col]  = 0x0f;
+            if (term->g1 && (val >= 0x60) && (val <= 0x7f)) {
+                /* In the graphics set 0x60-0x6f are the box drawing glyphs
+                   at character generator slots 0x190-0x19f. */
+                term->cells[term->row][term->col] = (uint8_t) (0x90 | (val & 0x0f));
+                term->attr[term->row][term->col]  = 0x0f | PCX_TERM_ATTR_BANK;
+            } else {
+                term->cells[term->row][term->col] = val;
+                term->attr[term->row][term->col]  = 0x0f;
+            }
             term->dirty                       = 1;
 
             term->col++;
@@ -361,7 +413,7 @@ pcx_term_render(pcx_term_t *term, uint32_t *out, int width, int height,
                 uint32_t fg, uint32_t bg)
 {
     int      x, y, cx, cy, bit;
-    uint8_t  ch;
+    uint16_t ch;
     const uint8_t *glyph;
 
     if ((term == NULL) || (out == NULL) || (width <= 0) || (height <= 0))
@@ -376,6 +428,9 @@ pcx_term_render(pcx_term_t *term, uint32_t *out, int width, int height,
             ch = term->cells[cy][cx];
             if (ch == ' ')
                 continue;
+
+            if (term->attr[cy][cx] & PCX_TERM_ATTR_BANK)
+                ch += 0x100;
 
             if (ch >= PCX_TERM_CHARS)
                 ch = '?' - 0x20;
