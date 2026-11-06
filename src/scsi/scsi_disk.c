@@ -136,6 +136,20 @@ scsi_disk_set_callback(const scsi_disk_t *dev)
         ide_set_callback(ide_drives[dev->drv->ide_channel], dev->callback);
 }
 
+/* Bytes per logical block.  A plain SCSI disk is 512-byte blocked; the PC-X
+   puts an OMTI bridge in front of the drive, and SINIX formats the medium with
+   1024-byte blocks, so the target has to report what the bridge would. */
+static uint32_t
+scsi_disk_block_size(const scsi_disk_t *dev)
+{
+    uint32_t bs = dev->drv->block_size;
+
+    if ((bs != 512) && (bs != 1024) && (bs != 2048) && (bs != 4096))
+        bs = 512;
+
+    return bs;
+}
+
 static void
 scsi_disk_init(scsi_disk_t *dev)
 {
@@ -167,6 +181,7 @@ scsi_disk_init(scsi_disk_t *dev)
         scsi_disk_sense_key = scsi_disk_asc = scsi_disk_ascq = dev->unit_attention = 0;
         scsi_disk_info      = 0x00;
         scsi_disk_mode_sense_load(dev);
+
     }
 }
 
@@ -312,18 +327,21 @@ uint32_t
 scsi_disk_mode_sense(const scsi_disk_t *dev, uint8_t *buf, uint32_t pos,
                      uint8_t page, const uint8_t block_descriptor_len)
 {
-    int     size = hdd_image_get_last_sector(dev->id);
+    int     size = (int) (((hdd_image_get_last_sector(dev->id) + 1) /
+                          (scsi_disk_block_size(dev) >> 9)) - 1);
 
     page &= 0x3f;
 
     if (block_descriptor_len) {
+        const uint32_t bs = scsi_disk_block_size(dev);
+
         buf[pos++] = 1;                   /* Density code. */
         buf[pos++] = (size >> 16) & 0xff; /* Number of blocks (0 = all). */
         buf[pos++] = (size >> 8) & 0xff;
         buf[pos++] = size & 0xff;
         buf[pos++] = 0; /* Reserved. */
-        buf[pos++] = 0; /* Block length (0x200 = 512 bytes). */
-        buf[pos++] = 2;
+        buf[pos++] = (bs >> 8) & 0xff; /* Block length. */
+        buf[pos++] = bs & 0xff;
         buf[pos++] = 0;
     }
 
@@ -361,8 +379,9 @@ scsi_disk_update_request_length(scsi_disk_t *dev, int len, const int block_len)
         case 0x2a:
         case 0xa8:
         case 0xaa:
-            /* Round it to the nearest 2048 bytes. */
-            dev->max_transfer_len = (dev->max_transfer_len >> 9) << 9;
+            /* Round it down to a whole number of blocks. */
+            if (block_len > 0)
+                dev->max_transfer_len = (dev->max_transfer_len / block_len) * block_len;
 
             /* Make sure total length is not bigger than sum of the lengths of
                all the requested blocks. */
@@ -774,7 +793,9 @@ scsi_disk_data_phase_error(scsi_disk_t *dev, const uint32_t info)
 static int
 scsi_disk_blocks(scsi_disk_t *dev, int32_t *len, const int out)
 {
-    const uint32_t medium_size = hdd_image_get_last_sector(dev->id) + 1;
+    const uint32_t bs          = scsi_disk_block_size(dev);
+    const uint32_t spb         = bs >> 9;
+    const uint32_t medium_size = (hdd_image_get_last_sector(dev->id) + 1) / spb;
 
     int ret = 1;
     *len    = 0;
@@ -789,18 +810,18 @@ scsi_disk_blocks(scsi_disk_t *dev, int32_t *len, const int out)
             scsi_disk_lba_out_of_range(dev);
             ret = 0;
         } else {
-            *len    = dev->requested_blocks << 9;
+            *len    = dev->requested_blocks * bs;
 
             for (int i = 0; i < dev->requested_blocks; i++) {
                 if (out) {
-                    if (hdd_image_write(dev->id, dev->sector_pos, 1, dev->temp_buffer +
-                                        (i << 9)) < 0) {
+                    if (hdd_image_write(dev->id, dev->sector_pos * spb, spb,
+                                        dev->temp_buffer + (i * bs)) < 0) {
                         scsi_disk_log(dev->log, "scsi_disk_blocks(): Error writing data\n");
                         scsi_disk_write_error(dev);
                         ret = -1;
                     }
-                } else if (hdd_image_read(dev->id, dev->sector_pos, 1, dev->temp_buffer +
-                                          (i << 9)) < 0) {
+                } else if (hdd_image_read(dev->id, dev->sector_pos * spb, spb,
+                                          dev->temp_buffer + (i * bs)) < 0) {
                     scsi_disk_log(dev->log, "scsi_disk_blocks(): Error reading data\n");
                     scsi_disk_read_error(dev);
                     ret = -1;
@@ -963,6 +984,8 @@ scsi_disk_command(scsi_common_t *sc, const uint8_t *cdb)
                                             'v', '1', '.', '0', '0', 0 };
     scsi_disk_t *  dev                    = (scsi_disk_t *) sc;
     const uint32_t last_sector            = hdd_image_get_last_sector(dev->id);
+    const uint32_t block_size             = scsi_disk_block_size(dev);
+    const uint32_t last_block             = ((last_sector + 1) / (block_size >> 9)) - 1;
     const uint8_t  scsi_bus               = (dev->drv->scsi_id >> 4) & 0x0f;
     const uint8_t  scsi_id                = dev->drv->scsi_id & 0x0f;
     int32_t        blen                   = 65536;
@@ -1088,7 +1111,7 @@ scsi_disk_command(scsi_common_t *sc, const uint8_t *cdb)
         case GPCMD_READ_10:
         case GPCMD_READ_12:
             scsi_disk_set_phase(dev, SCSI_PHASE_DATA_IN);
-            alloc_length = 512;
+            alloc_length = block_size;
 
             switch (cdb[0]) {
                 case GPCMD_READ_6:
@@ -1120,7 +1143,7 @@ scsi_disk_command(scsi_common_t *sc, const uint8_t *cdb)
                     break;
             }
 
-            if (dev->sector_pos > last_sector)
+            if (dev->sector_pos > last_block)
                 scsi_disk_lba_out_of_range(dev);
             else if (dev->sector_len) {
                 max_len               = dev->sector_len;
@@ -1133,7 +1156,7 @@ scsi_disk_command(scsi_common_t *sc, const uint8_t *cdb)
                 dev->drv->seek_len = dev->sector_len;
 
                 const int ret = scsi_disk_blocks(dev, &alloc_length, 0);
-                alloc_length  = dev->requested_blocks * 512;
+                alloc_length  = dev->requested_blocks * block_size;
 
                 if (ret > 0) {
                     dev->requested_blocks = max_len;
@@ -1141,7 +1164,7 @@ scsi_disk_command(scsi_common_t *sc, const uint8_t *cdb)
 
                     scsi_disk_set_buf_len(dev, BufLen, (int32_t *) &dev->packet_len);
 
-                    scsi_disk_data_command_finish(dev, alloc_length, 512,
+                    scsi_disk_data_command_finish(dev, alloc_length, block_size,
                                                   alloc_length, 0);
 
                     ui_sb_update_icon(SB_HDD | dev->drv->bus_type, dev->packet_status != PHASE_COMPLETE);
@@ -1177,7 +1200,7 @@ scsi_disk_command(scsi_common_t *sc, const uint8_t *cdb)
         case GPCMD_WRITE_12:
         case GPCMD_WRITE_AND_VERIFY_12:
             scsi_disk_set_phase(dev, SCSI_PHASE_DATA_OUT);
-            alloc_length = 512;
+            alloc_length = block_size;
 
             switch (cdb[0]) {
                 case GPCMD_VERIFY_6:
@@ -1218,7 +1241,7 @@ scsi_disk_command(scsi_common_t *sc, const uint8_t *cdb)
                     break;
             }
 
-            if (dev->sector_pos > last_sector)
+            if (dev->sector_pos > last_block)
                 scsi_disk_lba_out_of_range(dev);
             else {
                 if (dev->sector_len) {
@@ -1232,11 +1255,11 @@ scsi_disk_command(scsi_common_t *sc, const uint8_t *cdb)
                     scsi_disk_buf_alloc(dev, dev->packet_len);
 
                     dev->requested_blocks = max_len;
-                    dev->packet_len       = max_len << 9;
+                    dev->packet_len       = max_len * block_size;
 
                     scsi_disk_set_buf_len(dev, BufLen, (int32_t *) &dev->packet_len);
 
-                    scsi_disk_data_command_finish(dev, dev->packet_len, 512, dev->packet_len, 1);
+                    scsi_disk_data_command_finish(dev, dev->packet_len, block_size, dev->packet_len, 1);
 
                     ui_sb_update_icon_write(SB_HDD | dev->drv->bus_type, dev->packet_status != PHASE_COMPLETE);
                 } else {
@@ -1250,7 +1273,7 @@ scsi_disk_command(scsi_common_t *sc, const uint8_t *cdb)
             break;
 
         case GPCMD_WRITE_SAME_10:
-            alloc_length = 512;
+            alloc_length = block_size;
 
             if ((cdb[1] & 6) == 6)
                 scsi_disk_invalid_field(dev, cdb[1]);
@@ -1258,7 +1281,7 @@ scsi_disk_command(scsi_common_t *sc, const uint8_t *cdb)
                 dev->sector_len = (cdb[7] << 8) | cdb[8];
                 dev->sector_pos = (cdb[2] << 24) | (cdb[3] << 16) | (cdb[4] << 8) | cdb[5];
 
-                if (dev->sector_pos > last_sector)
+                if (dev->sector_pos > last_block)
                     scsi_disk_lba_out_of_range(dev);
                 else {
                     if (dev->sector_len) {
@@ -1274,7 +1297,7 @@ scsi_disk_command(scsi_common_t *sc, const uint8_t *cdb)
 
                         scsi_disk_set_phase(dev, SCSI_PHASE_DATA_OUT);
 
-                        scsi_disk_data_command_finish(dev, 512, 512, alloc_length, 1);
+                        scsi_disk_data_command_finish(dev, block_size, block_size, alloc_length, 1);
 
                         ui_sb_update_icon_write(SB_HDD | dev->drv->bus_type,
                                           dev->packet_status != PHASE_COMPLETE);
@@ -1515,13 +1538,16 @@ atapi_out:
         case GPCMD_READ_CDROM_CAPACITY:
             scsi_disk_buf_alloc(dev, 8);
 
-            max_len = hdd_image_get_last_sector(dev->id);
+            max_len = last_block;
             memset(dev->temp_buffer, 0, 8);
             dev->temp_buffer[0] = (max_len >> 24) & 0xff;
             dev->temp_buffer[1] = (max_len >> 16) & 0xff;
             dev->temp_buffer[2] = (max_len >> 8) & 0xff;
             dev->temp_buffer[3] = max_len & 0xff;
-            dev->temp_buffer[6] = 2;
+            dev->temp_buffer[4] = (block_size >> 24) & 0xff;
+            dev->temp_buffer[5] = (block_size >> 16) & 0xff;
+            dev->temp_buffer[6] = (block_size >> 8) & 0xff;
+            dev->temp_buffer[7] = block_size & 0xff;
             len                 = 8;
 
             scsi_disk_set_buf_len(dev, BufLen, &len);

@@ -1799,8 +1799,32 @@ load_hard_disks(void)
     for (uint8_t c = 0; c < HDD_NUM; c++) {
         sprintf(temp, "hdd_%02i_parameters", c + 1);
         p = ini_section_get_string(cat, temp, "0, 0, 0, 0, none");
-        sscanf(p, "%u, %u, %u, %i, %s",
-               &hdd[c].spt, &hdd[c].hpc, &hdd[c].tracks, (int *) &hdd[c].wp, s);
+        hdd[c].block_size = 512;
+        {
+            char  copy[128];
+            char *tok, *save = NULL;
+            char *fields[6];
+            int   nf = 0;
+
+            strncpy(copy, p, sizeof(copy) - 1);
+            copy[sizeof(copy) - 1] = '\0';
+            for (tok = strtok_r(copy, ",", &save); (tok != NULL) && (nf < 6);
+                 tok = strtok_r(NULL, ",", &save)) {
+                while (*tok == ' ')
+                    tok++;
+                fields[nf++] = tok;
+            }
+            if (nf >= 5) {
+                hdd[c].spt    = (uint32_t) atoi(fields[0]);
+                hdd[c].hpc    = (uint32_t) atoi(fields[1]);
+                hdd[c].tracks = (uint32_t) atoi(fields[2]);
+                hdd[c].wp     = (uint8_t) atoi(fields[3]);
+                strncpy(s, fields[4], 15);
+                s[15] = '\0';
+                if (nf >= 6)
+                    hdd[c].block_size = (uint32_t) atoi(fields[5]);
+            }
+        }
 
         hdd[c].bus_type = hdd_string_to_bus(s, 0);
         memset(hdd[c].custom_vendor, 0, sizeof(hdd[c].custom_vendor));
@@ -4678,8 +4702,13 @@ save_hard_disks(void)
         sprintf(temp, "hdd_%02i_parameters", c + 1);
         if (hdd_is_valid(c)) {
             p = hdd_bus_to_string(hdd[c].bus_type, 0);
-            sprintf(tmp2, "%u, %u, %u, %i, %s",
-                    hdd[c].spt, hdd[c].hpc, hdd[c].tracks, hdd[c].wp, p);
+            if (hdd[c].block_size && (hdd[c].block_size != 512))
+                sprintf(tmp2, "%u, %u, %u, %i, %s, %u",
+                        hdd[c].spt, hdd[c].hpc, hdd[c].tracks, hdd[c].wp, p,
+                        hdd[c].block_size);
+            else
+                sprintf(tmp2, "%u, %u, %u, %i, %s",
+                        hdd[c].spt, hdd[c].hpc, hdd[c].tracks, hdd[c].wp, p);
             ini_section_set_string(cat, temp, tmp2);
         } else
             ini_section_delete_var(cat, temp);

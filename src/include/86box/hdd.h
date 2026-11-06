@@ -205,6 +205,8 @@ typedef struct hard_disk_t {
     uint32_t           cur_track;
     uint32_t           cur_addr;
     uint32_t           vhd_blocksize;
+    uint32_t           block_size;   /* Logical block size the SCSI target
+                                        reports (512 unless set). */
 
     uint8_t            max_multiple_block;
     uint8_t            pad1[3];
