@@ -53,6 +53,7 @@ extern volatile int fdcinited;
 #include <86box/scsi_sm912.h>
 #include <86box/serial.h>
 #include <86box/kbc_siemens.h>
+#include <86box/keyboard.h>
 #include <86box/pcd_vid.h>
 #include <86box/pcx_vid.h>
 #include <86box/plat_unused.h>
@@ -552,6 +553,43 @@ pcx_stub_readw(UNUSED(uint16_t port), UNUSED(void *priv))
     return 0xffff;
 }
 
+
+/* Qt hands the machine set 1 scan codes; the PC-X keyboard is not a PC
+   keyboard at all.  It sits on the terminal board's serial line and the 8031
+   forwards what it receives to the host as bytes, which SINIX's console
+   reads at 0xf980 -- printable keys arrive as their ASCII code, Return as
+   CR.  So the scan code is turned back into the character the terminal would
+   have sent; break codes are dropped because the board sends a single byte
+   per key. */
+static void
+pcx_keyboard_send(uint16_t val)
+{
+    static const char plain[0x40] = {
+        /* 00 */ 0, 0, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b', '\t',
+        /* 10 */ 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\r', 0,
+        /* 20 */ 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`', 0, '\\',
+        /* 30 */ 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', 0, 0, 0, ' '
+    };
+    static const char shifted[0x40] = {
+        /* 00 */ 0, 0, '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', '\b', '\t',
+        /* 10 */ 'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', '\r', 0,
+        /* 20 */ 'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', ':', '"', '~', 0, '|',
+        /* 30 */ 'Z', 'X', 'C', 'V', 'B', 'N', 'M', '<', '>', '?', 0, 0, 0, ' '
+    };
+    uint8_t ch;
+
+    if ((pcx.kbc == NULL) || (val >= 0x100) || (val >= 0x40))
+        return;
+
+    /* Bit 7 marks a break code. */
+    if (val & 0x80)
+        return;
+
+    ch = (keyboard_get_shift() ? shifted : plain)[val];
+    if (ch != 0)
+        kbc_siemens_key(pcx.kbc, ch);
+}
+
 static void
 pcx_stub_writeb(UNUSED(uint16_t port), UNUSED(uint8_t val), UNUSED(void *priv))
 {
@@ -852,8 +890,10 @@ machine_pcx_init_ex(const machine_t *model)
        The PC-D's board has no terminal, so its 8741 is the only keyboard
        interface and there is nobody to hand the controller to. */
     pcx.kbc = kbc_siemens_init();
-    if (!pcx_is_pcd)
+    if (!pcx_is_pcd) {
         pcx_video_set_kbc(video, pcx.kbc);
+        keyboard_send = pcx_keyboard_send;
+    }
     /* The 8741A keyboard interface sits next to the terminal channel
        (0xf9b0-0xf9b3); the controller registers those ports itself. */
     kbc_siemens_ports(pcx.kbc);
