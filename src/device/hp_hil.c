@@ -89,6 +89,7 @@
 #define HIL_KBD_ID      0x00   /* Vectra 46030A: 00..1Fh, low 5 bits = nationality */
 /* Leading byte of a poll record: keycode set 1, relative coordinates. */
 /* Poll header bits 1-0: 00 none, 01 X, 10 X and Y, 11 X, Y and Z. */
+#define HIL_POL_READY   0x04 /* device ready for data transfer */
 #define HIL_POL_AXES_XY 0x02
 #define HIL_POL_RECORD  0x40
 /* Describe header: 8-bit relative X and Y, I/O descriptor byte follows. */
@@ -133,6 +134,10 @@ typedef struct hp_hil_t {
 } hp_hil_t;
 
 static hp_hil_t *hp_hil_dev;
+
+/* Ignore Poll Frame: the MLC still queues the empty poll, it only keeps the
+   interrupt to itself (TRM 45918A 4-19). */
+static int hp_hil_no_irq;
 
 static void     hp_hil_link_ready(void *priv);
 static uint16_t hp_hil_reply(uint8_t addr, uint8_t data);
@@ -189,8 +194,11 @@ hp_hil_fifo_push(uint16_t frame)
     /* The MLC interrupts on the command frame, not on the record in front of
        it: MAME's hp_hil_mlc_device::hil_write() only touches R3 for frames
        with the command bit set, and the data frames queue silently. */
-    if (frame & 0x0800) {
+    if ((frame & 0x0800) && !hp_hil_no_irq) {
         dev->r3 |= HIL_R3_INT;
+        /* "The AUTO POLL ENABLE (APE) bit is cleared by the MLC whenever it
+           interrupts the processor" (TRM 45918A 1-16). */
+        dev->w3 &= (uint8_t) ~HIL_W3_APE;
         pic3_int(HIL_IRQ_LINE, 1);
     }
 }
@@ -241,11 +249,12 @@ hp_hil_pointer_tick(void *priv)
         dev->reports++;
     }
 
-    /* MOUSEHP1.SYS never issues EPT: it configures the device (op 01/03)
-       and then expects the link to raise INT when the mouse has something
-       to report.  So the gate is "device addressed and link out of loop",
-       not the pass-through mode. */
-    if ((dev->dev[HIL_PTR].addr != 0) && !dev->loop) {
+    /* The driver configures the pointer, polls it once and then waits for the
+       link to raise an interrupt when there is something to report; it leaves
+       the device in loop-back between polls (ELB after EPT).  Gating the
+       sampler on the link being out of loop-back therefore stopped it dead:
+       all that matters is that the pointer has an address. */
+    if (dev->dev[HIL_PTR].addr != 0) {
         /* Auto Poll: every AP strobe makes the MLC issue a POL and the answer
            carries whatever the device has.  There is no AP source in the
            model and this ROM never sets W3.APE, so the pointer sampler doubles
@@ -405,21 +414,34 @@ hp_hil_dev_idd(hp_hil_t *dev, int i)
     hp_hil_fifo_push(hp_hil_reply(d->addr, 0x1e)); /* resolution, high */
 }
 
-static void
+static int
 hp_hil_dev_poll(hp_hil_t *dev, int i)
 {
     hil_dev_t *d = &dev->dev[i];
 
-    /* Poll record (TRM appendix E): header bits 1-0 say which axes follow.
-       A device with nothing to report answers with no record at all. */
+    /* Poll record (TRM appendix E): header bits 1-0 say which axes follow and
+       bit 2 says the device is ready to hand data over.  A device with nothing
+       to report answers with no record at all. */
     if (d->kbd || (!dev->dx && !dev->dy))
-        return;
+        return 0;
 
+    /* Record layout the ROM parses (F000:8FBA, axes read at F000:9059):
+          header   bits 1-0 = which axes are present
+          X        one byte when the device's describe record has no 16-bit flag
+          Y        one byte, same rule
+       The pointer's describe record does not set ES:[12] bit 20h, so both
+       axes are 8 bit. */
     hp_hil_fifo_push(hp_hil_reply(d->addr, HIL_POL_AXES_XY));
     hp_hil_fifo_push(hp_hil_reply(d->addr, (uint8_t) dev->dx));
     hp_hil_fifo_push(hp_hil_reply(d->addr, (uint8_t) dev->dy));
     dev->dx = 0;
     dev->dy = 0;
+
+    /* A device that reports data ends Auto Polling: the MLC raises the
+       interrupt and clears APE, and the System sets it again in its ISR
+       (TRM 45918A 4-19). */
+    dev->w3 &= (uint8_t) ~HIL_W3_APE;
+    return 1;
 }
 
 /*
@@ -469,11 +491,17 @@ hp_hil_kbd_frame(uint16_t frame)
     hp_hil_trace("HIL: device <= %03X (addr %d, op %02X)\n", frame, addr, data);
 
     /* Link-wide, and never handed back: every device acts, and the last
-       device (which goes pass-thru) sends the frame off the end.  A hard reset
-       restarts the device but KEEPS its address - MOUSEHP1.SYS issues a bare
-       DHR in the PM phase and would lose the pointer otherwise (MAME
-       hlebase.cpp keeps m_device_id across HPHIL_DHR). */
+       device (which goes pass-thru) sends the frame off the end, so nothing
+       comes back.  A hard reset destroys the link configuration: the devices
+       end up in Loop-Back with their match address cleared and Power-Up Mode
+       set, and the System configures the link again (TRM 45918A 4.5). */
     if (data == HIL_DHR) {
+        /* The manual says DHR destroys the link configuration (TRM 45918A
+           4.5), but this ROM's POST issues a DHR and then goes straight on to
+           IDD/poll against the addresses it already handed out: clearing them
+           here leaves POST waiting for a device that no longer answers and the
+           machine never boots.  MAME keeps the address across HPHIL_DHR as
+           well, so the address survives here too. */
         for (i = 0; i < HIL_NDEV; i++)
             dev->dev[i].pt = 0;
         dev->loop      = 1;
@@ -533,11 +561,14 @@ hp_hil_kbd_frame(uint16_t frame)
                     break;
 
                 default:
-                    if ((data >= HIL_POL) && (data <= (HIL_POL + 0x0f)))
-                        hp_hil_dev_poll(dev, i);
+                    if ((data >= HIL_POL) && (data <= (HIL_POL + 0x0f))) {
+                        if (!hp_hil_dev_poll(dev, i) && (dev->w2 & HIL_W2_IPF))
+                            hp_hil_no_irq = 1; /* IPF + Auto Poll: queue silently */
+                    }
                     break;
             }
             hp_hil_fifo_push(frame);
+            hp_hil_no_irq = 0;
             hp_hil_link_ready(dev);
             return;
         }
@@ -574,13 +605,16 @@ hp_hil_kbd_frame(uint16_t frame)
                 break;
 
             default:
-                if ((data >= HIL_POL) && (data <= (HIL_POL + 0x0f)))
-                    hp_hil_dev_poll(dev, i);
+                if ((data >= HIL_POL) && (data <= (HIL_POL + 0x0f))) {
+                    if (!hp_hil_dev_poll(dev, i) && (dev->w2 & HIL_W2_IPF))
+                        hp_hil_no_irq = 1; /* IPF + Auto Poll: queue silently */
+                }
                 break;
         }
         if (d->pt && (i < (HIL_NDEV - 1)))
             continue;
         hp_hil_fifo_push(frame);
+        hp_hil_no_irq = 0;
         hp_hil_link_ready(dev);
         return;
     }
@@ -638,24 +672,18 @@ hp_hil_write(uint16_t port, uint8_t val, void *priv)
             dev->w1 = val;
             break;
 
-        case 0x006c: /* W0: frame data, writing it sends the frame */
-            /* Every transmission starts a new transaction: the MLC drops
-               whatever the last one left behind (MAME: m_fifo.clear() at the
-               top of hp_hil_mlc_device::write(), case 0). */
-            dev->r2         = 0x00;
-            dev->fifo_head  = 0;
-            dev->fifo_count = 0;
+        case 0x006c: /* W0: frame data; the frame goes out at the end of the
+                        write cycle (TRM 45918A 1-16).  The chapters on W0 and
+                        W2 give no FIFO side effect -- R2 is cleared by reading
+                        R2 -- so the receive FIFO is left alone here. */
             hp_hil_transmit(val);
             break;
 
-        case 0x006e: /* W2: test / interrupt-poll flags (MAME: HPMLC_W2_*).
-                       The HP ROM also writes 0xFE here to drop the queued
-                       frames, so keep that side effect. */
+        case 0x006e: /* W2: IPF / TEST / APE source flags (TRM 45918A 1-16).
+                        Writing this register has no documented effect on the
+                        receive FIFO. */
             dev->w2 = val;
-            dev->fifo_head  = 0;
-            dev->fifo_count = 0;
-            dev->r2         = 0x00;
-            hp_hil_trace("HIL: W2 = %02X (fifo cleared)\n", val);
+            hp_hil_trace("HIL: W2 = %02X\n", val);
             break;
 
         case 0x006f: /* W3: APE (Auto Poll Enable) lives in bit 1 */
