@@ -565,6 +565,10 @@ scsi_sm912_init(uint16_t base, scsi_sm912_irq_t irq, void *irq_priv)
     dev->target_present = 1;
     dev->bus            = scsi_get_bus();
 
+    /* Debug logging is a run-time decision: the build always carries the
+       messages, PCX_SCSILOG decides whether they are printed. */
+    scsi_sm912_do_log = (getenv("PCX_SCSILOG") != NULL) ? 1 : 0;
+
     scsi_sm912_reset(dev);
 
     io_sethandler(base, 4, scsi_sm912_read, NULL, NULL,
