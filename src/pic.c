@@ -1216,6 +1216,9 @@ pic3_int(uint8_t line, int set)
 
     pic_notify();
 
+    if (getenv("EPOCH_HIL_TRACE") != NULL)
+        pclog("PIC3: line %d set %d irr=%02X imr=%02X isr=%02X | m irr=%02X imr=%02X isr=%02X\n",
+              line, set, pic3.irr, pic3.imr, pic3.isr, pic.irr, pic.imr, pic.isr);
 }
 
 static void
