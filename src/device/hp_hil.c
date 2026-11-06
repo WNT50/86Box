@@ -77,6 +77,11 @@
 
 #define HIL_W2_IPF 0x04 /* suppress the answer when the FIFO is empty */
 
+/* AP is the adapter's 60 Hz strobe (Vectra TRM Vol 1 section 4); with APE set
+   each rising edge makes the MLC issue a POL of its own. */
+#define HIL_AP_HZ     60
+#define HIL_AP_PERIOD (1000000 / HIL_AP_HZ)
+
 #define HIL_FIFO_SIZE 16
 
 /* HP-HIL IRQ 20 is the third 8259's line 4 (vector 6Ch). */
@@ -186,6 +191,42 @@ hp_hil_pointer_tick(void *priv)
     timer_advance_u64(&dev->pointer_timer, (10000ULL * TIMER_USEC));
 }
 
+/* AP: the adapter's 60 Hz strobe.  With APE set the MLC stops waiting for the
+   System and issues a POL itself.  The record it gets back ends with the poll
+   command, and that command frame is what raises the interrupt - which in
+   turn clears APE (TRM 45918A 1-16 and 4-19).  Nothing is queued when no
+   device has anything to report, so a quiet link stays quiet. */
+static void
+hp_hil_ap_tick(void *priv)
+{
+    hp_hil_t *dev = (hp_hil_t *) priv;
+    int       i, any = 0;
+    uint8_t   addr = 0;
+
+    if ((dev->w3 & HIL_W3_APE) && !dev->loop) {
+        for (i = 0; i < HIL_NDEV; i++) {
+            if (!dev->dev[i].addr)
+                continue;
+            addr = dev->dev[i].addr;
+            if (dev->dev[i].ops->poll(dev, i))
+                any = 1;
+        }
+
+        if (any) {
+            /* IPF keeps the interrupt to the adapter: the terminator is still
+               queued, the System just is not woken for it. */
+            if (dev->w2 & HIL_W2_IPF)
+                hp_hil_no_irq = 1;
+
+            /* fifo_push() clears APE when it raises the interrupt. */
+            hp_hil_fifo_push((uint16_t) (0x0800 | ((uint16_t) addr << 8) | HIL_POL));
+            hp_hil_no_irq = 0;
+        }
+    }
+
+    timer_advance_u64(&dev->ap_timer, (HIL_AP_PERIOD * TIMER_USEC));
+}
+
 void
 hp_hil_poll_link(void)
 {
@@ -293,7 +334,7 @@ hp_hil_reply(uint8_t addr, uint8_t data)
  *   EPT @2  -> last device, the frame runs off the end and nothing comes back
  */
 static void
-hp_hil_kbd_frame(uint16_t frame)
+hp_hil_link_frame(uint16_t frame)
 {
     hp_hil_t *dev = hp_hil_dev;
     uint8_t   addr;
@@ -467,7 +508,7 @@ hp_hil_transmit(uint8_t data)
     /* The adapter is only the wire: a device in loop-back hands the frame
        back itself (HP-HIL TRM 1-10), and a device in pass-thru answers the
        commands addressed to it. */
-    hp_hil_kbd_frame(frame);
+    hp_hil_link_frame(frame);
 }
 
 static void
@@ -595,6 +636,7 @@ hp_hil_init(const device_t *info)
     io_sethandler(0x006c, 4, hp_hil_read, NULL, NULL, hp_hil_write, NULL, NULL, dev);
 
     timer_add(&dev->pointer_timer, hp_hil_pointer_tick, dev, 1);
+    timer_add(&dev->ap_timer, hp_hil_ap_tick, dev, 1);
 
     return dev;
 }

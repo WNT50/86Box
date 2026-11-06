@@ -91,6 +91,7 @@ struct hp_hil_t {
     int8_t    dx;        /* pending displacement, latched by the mouse */
     int8_t    dy;
     pc_timer_t pointer_timer;
+    pc_timer_t ap_timer;      /* 60 Hz AP strobe, drives Auto Poll */
     uint32_t   reports;
 };
 

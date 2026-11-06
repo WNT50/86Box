@@ -66,9 +66,10 @@
 #define HP_DISC_ROM_ADDR   0x000c8000
 #define HP_DISC_ROM_SIZE   0x4000
 
-/* Offsets inside the option ROM that the OS/2 driver reads. */
-#define HP_DISC_ROM_SIG    0x1848  /* "WINSTON"          */
-#define HP_DISC_ROM_PARAMS 0x3022  /* port base, ...     */
+/* The option ROM carries no IRQ field: DISKHP1.SYS masks IRQ14 itself
+   (0x276D opens "master IRQ2 + slave IRQ6" before every command).  The
+   port base it does read, from ROM +0x186A, is whatever the generator
+   writes there - see mk_hp_disc_rom.py. */
 
 #define HP_DISC_PACKET_WORDS 10
 #define HP_DISC_PACKET_BYTES (HP_DISC_PACKET_WORDS * 2)
