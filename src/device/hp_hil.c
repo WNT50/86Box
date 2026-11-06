@@ -93,7 +93,7 @@ static hp_hil_t *hp_hil_dev;
    interrupt to itself (TRM 45918A 4-19). */
 static int hp_hil_no_irq;
 
-static void hp_hil_link_ready(void *priv);
+static void hp_hil_link_ready(void);
 
 #ifdef ENABLE_HP_HIL_LOG
 int hp_hil_do_log = ENABLE_HP_HIL_LOG;
@@ -260,7 +260,7 @@ hp_hil_link_scan(void)
     if ((ctx != 0) && (dev->dev[HIL_PTR].id != 0x00)) {
         /* The driver asks the 8041 for the link right before it starts
            waiting; that is when a real 8041 reports the link is up. */
-        hp_hil_link_ready(dev);
+        hp_hil_link_ready();
         return;
     }
 
@@ -367,16 +367,12 @@ hp_hil_link_frame(uint16_t frame)
        end up in Loop-Back with their match address cleared and Power-Up Mode
        set, and the System configures the link again (TRM 45918A 4.5). */
     if (data == HIL_DHR) {
-        /* The manual says DHR destroys the link configuration (TRM 45918A
-           4.5), but this ROM's POST issues a DHR and then goes straight on to
-           IDD/poll against the addresses it already handed out: clearing them
-           here leaves POST waiting for a device that no longer answers and the
-           machine never boots.  MAME keeps the address across HPHIL_DHR as
-           well, so the address survives here too. */
-        for (i = 0; i < HIL_NDEV; i++)
-            dev->dev[i].pt = 0;
-        dev->loop      = 1;
-        dev->ready_ctx = 0;
+        /* The manual has DHR destroy the link configuration (TRM 45918A 4.5)
+           and put every device back in Loop-Back, but the addresses and the
+           pass-through state survive here.  This ROM sends a DHR in front of
+           every poll, so resetting pass-through at this point turns the poll
+           into a loop-back echo and POST stops waiting for a device that no
+           longer answers.  MAME keeps the address across HPHIL_DHR too. */
         return;
     }
 
@@ -433,14 +429,25 @@ hp_hil_link_frame(uint16_t frame)
 
                 default:
                     if ((data >= HIL_POL) && (data <= (HIL_POL + 0x0f))) {
+                        /* Poll Record order (TRM 45918A appendix E): header,
+                           the axis bytes, then the incremented POLL COMMAND
+                           last.  That command frame is what tells the System
+                           the record has ended, so it must not lead. */
                         if (!d->ops->poll(dev, i) && (dev->w2 & HIL_W2_IPF))
                             hp_hil_no_irq = 1; /* IPF + Auto Poll: queue silently */
                     }
                     break;
             }
+            /* ELB sends this device to Loop-Back, which makes it the end of
+               the chain: the frame has nowhere left to travel and is not
+               mirrored back (TRM 45918A 4.3). */
+            if (data == HIL_ELB) {
+                hp_hil_no_irq = 0;
+                return;
+            }
             hp_hil_fifo_push(frame);
             hp_hil_no_irq = 0;
-            hp_hil_link_ready(dev);
+            hp_hil_link_ready();
             return;
         }
 
@@ -457,7 +464,7 @@ hp_hil_link_frame(uint16_t frame)
             if (d->pt && (i < (HIL_NDEV - 1)))
                 continue;
             hp_hil_fifo_push(frame);
-            hp_hil_link_ready(dev);
+            hp_hil_link_ready();
             return;
         }
 
@@ -483,7 +490,7 @@ hp_hil_link_frame(uint16_t frame)
             continue;
         hp_hil_fifo_push(frame);
         hp_hil_no_irq = 0;
-        hp_hil_link_ready(dev);
+        hp_hil_link_ready();
         return;
     }
 
@@ -512,20 +519,21 @@ hp_hil_transmit(uint8_t data)
 }
 
 static void
-hp_hil_link_ready(void *priv)
+hp_hil_link_ready(void)
 {
-    hp_hil_t *dev = (hp_hil_t *) priv;
     uint32_t  ctx = hp_hil_driver_ctx();
     uint16_t  flags;
 
-    if ((ctx == 0) || (ctx == dev->ready_ctx))
+    if (ctx == 0)
         return;
 
     flags = mem_readw_phys(ctx + 0x10);
-    if (!(flags & 0x0001))
-        return;                         /* driver is not waiting */
+    /* One completion per busy cycle.  The waiter at F000:92AB sets bit0 and
+       clears bit2 while it spins; bit2 goes up with the completion so the same
+       cycle is not reported twice. */
+    if (!(flags & 0x0001) || (flags & 0x0004))
+        return;
 
-    dev->ready_ctx = ctx;
     mem_writew_phys(ctx + 0x10, (uint16_t) (flags | 0x1004));
     pic3_int(HIL_IRQ_LINE, 1);
 }
@@ -680,7 +688,6 @@ hp_hil_reset(void *priv)
     dev->dev[HIL_PTR].pwr  = 1;
     dev->dev[HIL_PTR].ops  = &hp_hil_mouse_ops;
     dev->scan_reported = 0;
-    dev->ready_ctx    = 0;
     dev->dx           = 0;
     dev->dy           = 0;
 }

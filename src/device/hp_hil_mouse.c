@@ -53,6 +53,7 @@ hp_hil_mouse_poll(hp_hil_t *dev, int i)
     /* Poll Record (TRM appendix E): header bits 1-0 say which axes follow and
        bit 2 says the device is ready to hand data over.  A device with
        nothing to report answers with no record at all. */
+    hp_hil_trace("HIL: mouse poll dev=%p dx=%d dy=%d addr=%d\n", (void *) dev, dev->dx, dev->dy, d->addr);
     if (!dev->dx && !dev->dy)
         return 0;
 
@@ -61,7 +62,7 @@ hp_hil_mouse_poll(hp_hil_t *dev, int i)
           X        one byte when the device's describe record has no 16-bit flag
           Y        one byte, same rule
        This describe record does not set bit 20h, so both axes are 8 bit. */
-    hp_hil_fifo_push(hp_hil_reply(d->addr, HIL_POL_AXES_XY));
+    hp_hil_fifo_push(hp_hil_reply(d->addr, HIL_POL_READY | HIL_POL_AXES_XY));
     hp_hil_fifo_push(hp_hil_reply(d->addr, (uint8_t) dev->dx));
     hp_hil_fifo_push(hp_hil_reply(d->addr, (uint8_t) dev->dy));
     dev->dx = 0;
@@ -108,27 +109,22 @@ hp_hil_mouse_tick(hp_hil_t *dev, int i)
        all that matters is that the pointer has an address. */
     if (dev->dev[HIL_PTR].addr != 0) {
         /* Auto Poll: every AP strobe makes the MLC issue a POL and the answer
-           carries whatever the device has.  There is no AP source in the
-           model and this ROM never sets W3.APE, so the pointer sampler doubles
-           as the strobe.  AP is a 60 Hz line from the 8041 (Vectra TRM Vol 1,
+           carries whatever the device has.  The adapter models APE now
+           (hp_hil_ap_tick), but this ROM never sets it - a cold boot shows W3
+           written exactly once, with 00 - so the pointer sampler doubles as
+           the strobe.  AP is a 60 Hz line from the 8041 (Vectra TRM Vol 1,
            section 4): three polls in every five 10 ms ticks.
 
-           Two things make a strobe worth issuing: the driver is parked waiting
-           for a frame (HPHIL.SYS spins on DS:0x10 bit 0 at F000:92AB), or the
-           device has motion to report and nothing has polled it yet (OS/2's
-           HIL.SYS stops polling once the link is up and waits for the
-           interrupt instead). */
-        static int ap_div;
-        static const uint8_t ap_pattern[5] = { 1, 0, 1, 1, 0 };
-
-        uint32_t ctx = hp_hil_driver_ctx();
-
-        if (((dev->dx || dev->dy) ||
-             ((ctx != 0) && (mem_readw_phys(ctx + 0x10) & 0x0001))) &&
-            (dev->fifo_count == 0) && ap_pattern[ap_div++ % 5]) {
+           A strobe is only worth issuing when there is something to hand over.
+           The ROM runs its own 60 Hz loop, so polling an idle pointer just
+           competes with it; the driver is served either way, because it is
+           either parked on the completion word (HPHIL.SYS spins on DS:0x10
+           bit 0 at F000:92AB) or waiting for the interrupt (OS/2's HIL.SYS). */
+        if ((dev->dx || dev->dy) && (dev->fifo_count == 0)) {
             /* Poll this device directly: a broadcast poll is answered by the
                first device in the chain, and OS/2's HIL.SYS keeps its own
                idea of which address the mouse got. */
+            hp_hil_trace("HIL: tick strobe dev=%p dx=%d dy=%d\n", (void *) dev, dev->dx, dev->dy);
             dev->w1 = (uint8_t) (0x08 | (dev->dev[HIL_PTR].addr & 0x07));
             hp_hil_transmit(HIL_POL);
         }
@@ -137,7 +133,7 @@ hp_hil_mouse_tick(hp_hil_t *dev, int i)
            without one makes the driver read a frame it never asked for.  The
            deltas simply stay latched until the next POL asks for them. */
         if (dev->dx || dev->dy) {
-            hp_hil_trace("HIL: host pointer %d,%d latched\n", dev->dx, dev->dy);
+            hp_hil_trace("HIL: host pointer dev=%p %d,%d latched\n", (void *) dev, dev->dx, dev->dy);
         }
     }
 }

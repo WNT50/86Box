@@ -87,7 +87,6 @@ struct hp_hil_t {
     /* The devices on the link, in chain order. */
     hil_dev_t dev[HIL_NDEV];
     uint8_t   scan_reported;
-    uint32_t  ready_ctx; /* context already told the link is up */
     int8_t    dx;        /* pending displacement, latched by the mouse */
     int8_t    dy;
     pc_timer_t pointer_timer;
