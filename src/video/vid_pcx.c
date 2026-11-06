@@ -37,6 +37,7 @@
 #include <86box/video.h>
 #include <86box/plat.h>
 #include "../cpu/cpu.h"
+#include "../cpu/cpu.h"
 
 extern void pcx_ring_dump(void);
 extern void pcx_dump_code(uint32_t log, int len, const char *why);
@@ -47,6 +48,8 @@ extern void pcx_dump_code(uint32_t log, int len, const char *why);
 #define PCX_VIDEO_XSIZE 640
 #define PCX_VIDEO_YSIZE 350
 #define PCX_VIDEO_FREQ  50 /* Hz, the board's vertical rate */
+
+static struct pcx_video_t *pcx_active_video;
 
 typedef struct pcx_video_t {
     pcx_term_t term;
@@ -86,6 +89,10 @@ static video_timings_t timing_pcx = { VIDEO_ISA, 8, 16, 32, 8, 16, 32 };
 
 /* PCX_VID_LOG in the environment dumps the host -> 8031 stream; the POST's
    message table is ASCII, so the log reads as text with a byte index. */
+volatile int pcx_trace_req;
+volatile int pcx_trace_cs = -1;
+volatile int pcx_trace_n;
+
 static int pcx_vid_log;
 static int pcx_vid_log_n;
 
@@ -183,10 +190,88 @@ pcx_video_read(uint16_t addr, void *priv)
         case 0x00:
             /* 0xf980: what the keyboard/terminal side has to say.  The POST's
                identity check (v3 0xfd8d3) reads its answer here. */
-            return kbc_siemens_read_data(dev->kbc);
+            if (getenv("PCX_TTYREAL") != NULL) {
+                static int tr_n = 0;
+                if (tr_n < 60) {
+                    uint32_t db = cpu_state.seg_ds.base;
+                    uint8_t  b[0x30];
+                    int      i;
+                    for (i = 0; i < 0x30; i++)
+                        b[i] = readmembl(db + 0x6ffa + i);
+                    pclog("[TTY] t=%u cnt=%02X%02X fl18=%02X%02X fl1e=%02X%02X "
+                          "fl20=%02X%02X p22=%02X%02X rd25=%02X vmin2c=%02X "
+                          "vt2d=%02X\n",
+                          plat_get_ticks(), b[0x01], b[0x00], b[0x19], b[0x18],
+                          b[0x1f], b[0x1e], b[0x21], b[0x20], b[0x23], b[0x22],
+                          b[0x25], b[0x2c], b[0x2d]);
+                    tr_n++;
+                }
+            }
+            if ((getenv("PCX_CTXDUMP") != NULL) && (plat_get_ticks() > 50000)) {
+                static int ctx_done = 0;
+                if (!ctx_done) {
+                    uint32_t cbase = cpu_state.seg_cs.base;
+                    uint32_t sbase = cpu_state.seg_ss.base;
+                    uint16_t sp    = cpu_state.regs[4].w;
+                    FILE    *f     = fopen("/tmp/pcx_caller.bin", "wb");
+                    char     line[160];
+                    int      n     = 0;
+                    int      i;
+
+                    if (f != NULL) {
+                        uint32_t o;
+                        for (o = 0x0000; o < 0x2000; o++)
+                            fputc(readmembl(cbase + o), f);
+                        fclose(f);
+                    }
+                    f = fopen("/tmp/pcx_seg110e.bin", "wb");
+                    if (f != NULL) {
+                        uint32_t o;
+                        for (o = 0x0000; o < 0x5000; o++)
+                            fputc(readmembl(0x110e0 + o), f);
+                        fclose(f);
+                    }
+                    f = fopen("/tmp/pcx_seg151e.bin", "wb");
+                    if (f != NULL) {
+                        uint32_t o;
+                        for (o = 0x0000; o < 0x5000; o++)
+                            fputc(readmembl(0x151e0 + o), f);
+                        fclose(f);
+                    }
+                    n += snprintf(line + n, sizeof(line) - n, "[CTX] cs=%04X base=%05X ip=%04X sp=%04X",
+                                  cpu_state.seg_cs.seg, cbase, cpu_state.pc, sp);
+                    for (i = 0; (i < 12) && (n < (int) sizeof(line) - 8); i++)
+                        n += snprintf(line + n, sizeof(line) - n, " %04X",
+                                      readmemwl(sbase + sp + 2 * i));
+                    pclog("%s\n", line);
+                    ctx_done = 1;
+                }
+            }
+            {
+                uint8_t kv = kbc_siemens_read_data(dev->kbc);
+                if ((getenv("PCX_PCTRACE") != NULL) && (kv == 'j')) {
+                    pcx_trace_req = 1;
+                    pcx_trace_n   = 0;
+                }
+                return kv;
+            }
 
         case 0x01:
             /* 0xf981: bit 0 "a byte waits", bit 1 "not taken yet". */
+            if (getenv("PCX_CTXDUMP") != NULL) {
+                static int stage = 0;
+                uint32_t   now   = plat_get_ticks();
+
+                if ((stage == 0) && (now > 52000)) {
+                    kbc_siemens_key(dev->kbc, 'j');
+                    stage = 1;
+                    pclog("[CTX] 'j' sent at %u\n", now);
+                } else if ((stage == 1) && (now > 62000)) {
+                    kbc_siemens_key(dev->kbc, 0x0d);
+                    stage = 2;
+                    pclog("[CTX] CR sent at %u\n", now);
+                }
+            }
             return kbc_siemens_read_status(dev->kbc);
 
         case 0x02:
@@ -212,7 +297,7 @@ pcx_term_dump(pcx_video_t *dev)
     char            line[PCX_TERM_COLS + 1];
     uint32_t        now = plat_get_ticks();
 
-    if ((n >= 6) || (getenv("PCX_TERMDUMP") == NULL) || (now < 4600u) ||
+    if ((n >= 40) || (getenv("PCX_TERMDUMP") == NULL) || (now < 4600u) ||
         ((now - last) < 250u))
         return;
     last = now;
@@ -239,7 +324,7 @@ pcx_video_write(uint16_t addr, uint8_t val, void *priv)
 
 
     if ((reg == 0x00) && (pcx_vid_log > 0) && (pcx_vid_log_n < 8192))
-        pclog("[PCXV] %05i %02X %c\n", pcx_vid_log_n++, val,
+        pclog("[PCXV] t=%u %05i %02X %c\n", plat_get_ticks(), pcx_vid_log_n++, val,
               ((val >= 0x20) && (val < 0x7f)) ? val : '.');
 
     if (reg == 0x02) {
@@ -467,6 +552,7 @@ pcx_video_init(const device_t *info)
     if (dev == NULL)
         return NULL;
 
+    pcx_active_video = dev;
     pcx_vid_log = (getenv("PCX_VID_LOG") != NULL);
 
     pcx_term_init(&dev->term);
@@ -515,13 +601,61 @@ pcx_video_init(const device_t *info)
     return dev;
 }
 
+uint32_t
+pcx_video_screen_hash(void)
+{
+    pcx_video_t *dev = pcx_active_video;
+    uint32_t     h   = 2166136261u;
+    int          row, col;
+
+    if (dev == NULL)
+        return 0;
+
+    for (row = 0; row < PCX_TERM_ROWS; row++) {
+        for (col = 0; col < PCX_TERM_COLS; col++) {
+            h ^= (uint8_t) dev->term.cells[row][col];
+            h *= 16777619u;
+        }
+    }
+
+    return h;
+}
+
+int
+pcx_video_screen_contains(const char *needle)
+{
+    pcx_video_t *dev = pcx_active_video;
+    char         line[PCX_TERM_COLS + 1];
+    int          row, col, n;
+
+    if ((dev == NULL) || (needle == NULL))
+        return 0;
+
+    n = (int) strlen(needle);
+    if ((n <= 0) || (n > PCX_TERM_COLS))
+        return 0;
+
+    for (row = 0; row < PCX_TERM_ROWS; row++) {
+        for (col = 0; col < PCX_TERM_COLS; col++)
+            line[col] = (char) dev->term.cells[row][col];
+        line[PCX_TERM_COLS] = '\0';
+        if (strstr(line, needle) != NULL)
+            return 1;
+    }
+
+    return 0;
+}
+
 static void
 pcx_video_close(void *priv)
 {
     pcx_video_t *dev = (pcx_video_t *) priv;
 
-    if (dev != NULL)
+    if (dev != NULL) {
+        if (pcx_active_video == dev)
+            pcx_active_video = NULL;
         free(dev);
+    }
 }
 
 static void

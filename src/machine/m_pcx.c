@@ -41,6 +41,7 @@
 #include <86box/device.h>
 #include <86box/io.h>
 #include <86box/machine.h>
+#include <86box/mem.h>
 
 extern volatile int fdcinited;
 #include <86box/mem.h>
@@ -487,6 +488,69 @@ pcx_rtc_tick(void *priv)
         picint(1 << 7);
     }
 
+    /* Temporary: type an answer into the installer, one byte per second step. */
+    if (getenv("PCX_TTYPOLL") != NULL) {
+        static uint32_t last = 0;
+        uint32_t t = plat_get_ticks();
+        if (t > 50000 && (t - last) > 4000) {
+            last = t;
+            pclog("[TP] t=%u cnt=%02X%02X rd25=%02X\n", t,
+                  readmembl(0x6ffb), readmembl(0x6ffa), readmembl(0x6ffa + 0x25));
+        }
+    }
+
+    if ((getenv("PCX_KDUMP") != NULL) && (plat_get_ticks() > 60000)) {
+        static int done = 0;
+        if (!done) {
+            FILE *f = fopen("/tmp/kern.bin", "wb");
+            if (f != NULL) {
+                fwrite(&ram[0x10000], 1, 0x20000, f);
+                fclose(f);
+            }
+            done = 1;
+            pclog("[KDUMP] written\n");
+        }
+    }
+
+    if (getenv("PCX_AUTOKEY") != NULL) {
+        static int      stage = 0;
+        static uint32_t next  = 0;
+        uint32_t        t     = plat_get_ticks();
+
+        /* Drive the installer off the screen instead of the wall clock: the
+           first key is eaten when formint switches the tty to raw mode, so a
+           throwaway key goes first, then the answer. */
+        if ((stage == 0) && pcx_video_screen_contains("Antworten Sie mit")) {
+            kbc_siemens_key(pcx.kbc, ' ');
+            stage = 1;
+            next  = t + 600;
+            pclog("[AUTO] prompt at %u, priming key\n", t);
+        } else if ((stage == 1) && (t >= next)) {
+            kbc_siemens_key(pcx.kbc, 'j');
+            stage = 2;
+            next  = t + 400;
+            pclog("[AUTO] j at %u\n", t);
+        } else if ((stage >= 2) && (t >= next)) {
+            /* From here on the installer waits for a key at whatever page it
+               likes ("Weiter mit").  Press Return only once the screen has
+               stopped changing: a key that lands mid-paint gets dropped. */
+            static uint32_t last_hash   = 0;
+            static uint32_t last_change = 0;
+            uint32_t        h = pcx_video_screen_hash();
+
+            if (h != last_hash) {
+                last_hash   = h;
+                last_change = t;
+            } else if ((h != 0) && ((t - last_change) > 4000)) {
+                kbc_siemens_key(pcx.kbc, 0x0d);
+                last_change = t;
+                pclog("[AUTO] idle screen, CR at %u\n", t);
+            }
+
+            next = t + 500;
+        }
+    }
+
     timer_on_auto(&pcx.rtc_timer, 1000000.0);
 }
 
@@ -614,6 +678,14 @@ static void
 pcx_usart_irq(void *priv, int level)
 {
     int irq = (int) (intptr_t) priv;
+
+    if (getenv("PCX_IRQLOG") != NULL) {
+        static int il = 0;
+        if (il < 200) {
+            pclog("[IRQ] t=%u irq=%d level=%d\n", plat_get_ticks(), irq, level);
+            il++;
+        }
+    }
 
     if (level)
         picint(1 << irq);

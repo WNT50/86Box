@@ -24,4 +24,8 @@ extern void pcx_video_set_key(void *dev, uint8_t val);
 struct kbc_siemens_t;
 extern void pcx_video_set_kbc(void *dev, struct kbc_siemens_t *kbc);
 
+/* Text on the 80x25 page, for scripts that key off what the guest shows. */
+extern int pcx_video_screen_contains(const char *needle);
+extern uint32_t pcx_video_screen_hash(void);
+
 #endif /*EMU_PCX_VID_H*/
