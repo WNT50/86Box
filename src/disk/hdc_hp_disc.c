@@ -129,8 +129,6 @@ typedef struct hp_disc_t {
     uint64_t irqs;
 
     pc_timer_t timer;
-    pc_timer_t pc_timer;   /* HP_DISC_PC=<us>：周期性采 CS:IP */
-    int        pc_us;
     uint8_t      shadow[HP_DISC_ROM_SIZE];
     mem_mapping_t mapping;
 } hp_disc_t;
@@ -236,24 +234,6 @@ hp_disc_parse_packet(hp_disc_t *dev)
         dev->count = 1;
     if (dev->count > HP_DISC_MAX_SECTORS)
         dev->count = HP_DISC_MAX_SECTORS;
-}
-
-static void
-hp_disc_pc_cb(void *priv)
-{
-    hp_disc_t *dev = (hp_disc_t *) priv;
-    static uint32_t last = 0xffffffff;
-    uint32_t pc = (cpu_state.seg_cs.base << 4) + cpu_state.pc;
-
-    if (pc != last) {
-        last = pc;
-        fprintf(stderr, "PC %05x:%04x fl34=%02x model[ph=%d st=%02x left=%d pos=%u reads=%u irq=%u]\n",
-                cpu_state.seg_cs.base, cpu_state.pc,
-                mem_readb_phys(cpu_state.seg_ds.base + 0x0e34),
-                dev->phase, dev->status, dev->xfer_left, dev->packet_pos,
-                dev->reads, dev->irqs);
-    }
-    timer_set_delay_u64(&dev->pc_timer, (uint64_t) dev->pc_us * TIMER_USEC);
 }
 
 static int
@@ -717,8 +697,9 @@ hp_disc_out(uint16_t addr, uint8_t val, void *priv)
                     if (getenv("HP_DISC_BLK")) {
                         uint8_t *b = (uint8_t *) dev->packet;
                         uint32_t dseg2 = cpu_state.seg_ds.base;
-                        fprintf(stderr, " [reads=%u writes=%u status=%02x phase=%d left=%d]",
-                                dev->reads, dev->writes, dev->status, dev->phase, dev->xfer_left);
+                        fprintf(stderr, " [reads=%llu writes=%llu status=%02x phase=%d left=%d]",
+                                (unsigned long long) dev->reads, (unsigned long long) dev->writes,
+                                dev->status, dev->phase, dev->xfer_left);
                         fprintf(stderr, "C1 %06x ip=%04x pp=%i drv_unit=%02x drv_lba=%02x%02x%02x%02x :",
                                 cpu_state.pc, cpu_state.pc, dev->packet_pos,
                                 mem_readb_phys(dseg2 + 0x22d),
@@ -851,7 +832,6 @@ hp_disc_outw(uint16_t addr, uint16_t val, void *priv)
 {
     hp_disc_t *dev = (hp_disc_t *) priv;
     int        len;
-    uint16_t   shmem_len = 0;
 
     if (dev->tracing && (dev->trace_all < 4000)) {
         dev->trace_all++;
@@ -982,14 +962,6 @@ hp_disc_init(const device_t *info)
     }
 
     timer_add(&dev->timer, hp_disc_complete, dev, 0);
-    timer_add(&dev->pc_timer, hp_disc_pc_cb, dev, 0);
-    if (getenv("HP_DISC_PC")) {
-        dev->pc_us = getenv("HP_DISC_PC")[0] ? atoi(getenv("HP_DISC_PC")) : 10000;
-        if (dev->pc_us <= 0)
-            dev->pc_us = 10000;
-        timer_set_delay_u64(&dev->pc_timer, (uint64_t) dev->pc_us * TIMER_USEC);
-    }
-
     io_sethandler(dev->base, 8,
                   hp_disc_in, hp_disc_inw, NULL,
                   hp_disc_out, hp_disc_outw, NULL,

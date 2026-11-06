@@ -2407,6 +2407,7 @@ mem_phys_has_code(uint32_t addr, uint32_t len)
     return 0;
 }
 
+
 void
 mem_write_ram(uint32_t addr, uint8_t val, UNUSED(void *priv))
 {

@@ -283,29 +283,6 @@ machine_at_ibmxt286_init(const machine_t *model)
     return ret;
 }
 
-/* TEMPORARY Phase 1 scaffolding: the HP-HIL controller (0x6C-0x6F) and the
-   45981A video card (0x3B0-0x3DF) are not emulated yet, so their ports are
-   open bus. Log the accesses (with CS:IP) when HP_VECTRA_TRACE is set, which
-   is how POST progress is tracked until those devices exist. */
-static void
-hp_trace_write(uint16_t addr, uint8_t val, void *priv)
-{
-    pclog("[HPIO] out %03X = %02X at %04X:%04X\n", addr, val, CS, cpu_state.pc);
-}
-
-static uint8_t
-hp_trace_read(uint16_t addr, void *priv)
-{
-    pclog("[HPIO] in  %03X at %04X:%04X\n", addr, CS, cpu_state.pc);
-    return 0xff;
-}
-
-static void
-hp_trace_init(void)
-{
-    io_sethandler(0x03b0, 0x30, hp_trace_read, NULL, NULL, hp_trace_write, NULL, NULL, NULL);
-}
-
 int
 machine_at_vectra_init(const machine_t *model)
 {
@@ -336,9 +313,6 @@ machine_at_vectra_init(const machine_t *model)
     /* HP hard disc adapter: registers at 0x300, option ROM at C8000. */
     if (hdc_current[0] == HDC_INTERNAL)
         device_add(&hp_disc_device);
-
-    if (getenv("HP_VECTRA_TRACE") != NULL)
-        hp_trace_init();
 
     return ret;
 }
