@@ -743,6 +743,16 @@ wd10_hdc_ctrl_w(UNUSED(uint16_t addr), uint8_t val, void *priv)
         wd10_hdc_irq_update(dev);
 }
 
+/* Reading the alternate status register returns the same byte as the status
+   register but leaves INTRQ alone, which is what makes it usable from an
+   interrupt handler and from code that polls while a command completes.
+   Left unhandled the port reads back FFh, whose BUSY bit never clears. */
+static uint8_t
+wd10_hdc_alt_status_r(UNUSED(uint16_t addr), void *priv)
+{
+    return ((wd10_hdc_t *) priv)->status;
+}
+
 static uint8_t
 wd10_hdc_status_r(UNUSED(uint16_t addr), void *priv)
 {
@@ -784,7 +794,7 @@ wd10_hdc_init(const device_t *info)
     }
 
     if (dev->local) {
-        io_sethandler(0x03f6, 0x0001, NULL, NULL, NULL,
+        io_sethandler(0x03f6, 0x0001, wd10_hdc_alt_status_r, NULL, NULL,
                       wd10_hdc_ctrl_w, NULL, NULL, dev);
         io_sethandler(0x03f7, 0x0001, wd10_hdc_status_r, NULL, NULL,
                       NULL, NULL, NULL, dev);
