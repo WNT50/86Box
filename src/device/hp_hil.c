@@ -52,6 +52,8 @@
 #include <86box/mem.h>
 #include <86box/timer.h>
 
+#include "hp_hil.h"
+
 /* HP-HIL opcodes (Table 4-1). */
 #define HIL_IFC 0x00 /* Interface Clear */
 #define HIL_EPT 0x01 /* Enter Pass-Thru Mode */
@@ -62,7 +64,6 @@
 #define HIL_RRG 0x06 /* Read Register */
 #define HIL_WRG 0x07 /* Write Register */
 #define HIL_ACF 0x08 /* Auto Configure, 08..0f */
-#define HIL_POL 0x10 /* Poll, 10..1f */
 #define HIL_RPL 0x20 /* RePoll, 20..2f */
 #define HIL_DHR 0xfe /* Device Hard Reset */
 
@@ -75,63 +76,11 @@
 #define HIL_R3_LERR 0x04
 
 #define HIL_W2_IPF 0x04 /* suppress the answer when the FIFO is empty */
-#define HIL_W3_APE 0x02 /* Auto Poll Enable: an AP strobe issues a POL */
 
 #define HIL_FIFO_SIZE 16
 
 /* HP-HIL IRQ 20 is the third 8259's line 4 (vector 6Ch). */
 #define HIL_IRQ_LINE 4
-
-/* The keyboard of this machine hangs off the 8041 (0x60/0x64 and the
-   0x68-0x6A mailbox), so the only device on the HP-HIL link is the mouse.
-   Relative positioners are 60..6Fh; 68h is the HP Mouse 46060A. */
-#define HIL_MOUSE_ID    0x68
-#define HIL_KBD_ID      0x00   /* Vectra 46030A: 00..1Fh, low 5 bits = nationality */
-/* Leading byte of a poll record: keycode set 1, relative coordinates. */
-/* Poll header bits 1-0: 00 none, 01 X, 10 X and Y, 11 X, Y and Z. */
-#define HIL_POL_READY   0x04 /* device ready for data transfer */
-#define HIL_POL_AXES_XY 0x02
-#define HIL_POL_RECORD  0x40
-/* Describe header: 8-bit relative X and Y, I/O descriptor byte follows. */
-#define HIL_MOUSE_DESCR 0x12
-
-/* One device on the link.  SLC = the Link Control state machine: a device in
-   Loop-Back mirrors every frame back to the System, a device in Pass-Thru
-   retransmits it to the next device (TRM 45918A 4.2/4.3). */
-typedef struct {
-    uint8_t addr; /* match address, 0 = not configured */
-    uint8_t id;   /* device ID byte, appendix B */
-    uint8_t pt;   /* Pass-Thru Mode */
-    uint8_t pwr;  /* Power-Up Mode: cleared by IFC */
-    uint8_t kbd;  /* 1 = key device, 0 = relative positioner */
-} hil_dev_t;
-
-#define HIL_KBD  0 /* nearest the System */
-#define HIL_PTR  1
-#define HIL_NDEV 2
-
-typedef struct hp_hil_t {
-    /* MLC state. */
-    uint16_t fifo[HIL_FIFO_SIZE];
-    int      fifo_head;
-    int      fifo_count;
-    uint8_t  w1;   /* command bit + address of the frame being built */
-    uint8_t  w2;
-    uint8_t  w3;
-    uint8_t  r2;
-    uint8_t  r3;
-    uint8_t  loop; /* Loop-Back Mode: frames come straight back */
-
-    /* The devices on the link, in chain order. */
-    hil_dev_t dev[HIL_NDEV];
-    uint8_t  scan_reported;
-    uint32_t ready_ctx;   /* context already told the link is up */
-    int8_t   dx;
-    int8_t   dy;
-    pc_timer_t pointer_timer; /* host pointer -> link displacement reports */
-    uint32_t  reports;        /* displacement reports handed to the link */
-
-} hp_hil_t;
 
 static hp_hil_t *hp_hil_dev;
 
@@ -139,9 +88,7 @@ static hp_hil_t *hp_hil_dev;
    interrupt to itself (TRM 45918A 4-19). */
 static int hp_hil_no_irq;
 
-static void     hp_hil_link_ready(void *priv);
-static uint16_t hp_hil_reply(uint8_t addr, uint8_t data);
-static void     hp_hil_transmit(uint8_t data);
+static void hp_hil_link_ready(void *priv);
 
 #ifdef ENABLE_HP_HIL_LOG
 int hp_hil_do_log = ENABLE_HP_HIL_LOG;
@@ -161,7 +108,7 @@ hp_hil_log(const char *fmt, ...)
 #    define hp_hil_log(fmt, ...)
 #endif
 
-static void
+void
 hp_hil_trace(const char *fmt, ...)
 {
     va_list ap;
@@ -175,7 +122,7 @@ hp_hil_trace(const char *fmt, ...)
 }
 
 /* A frame the System has to read: data byte plus its command/address byte. */
-static void
+void
 hp_hil_fifo_push(uint16_t frame)
 {
     hp_hil_t *dev = hp_hil_dev;
@@ -207,7 +154,7 @@ hp_hil_fifo_push(uint16_t frame)
    record table: IVT 6Fh -> record 0x114 -> its data segment.  The 8041 owns
    the bring-up, so this is where the "link initialised" bit of that context
    is set; without it the driver parks in state 2 and POST waits forever. */
-static uint32_t
+uint32_t
 hp_hil_driver_ctx(void)
 {
     uint16_t ivt = (uint16_t) (mem_readb_phys(0x1be) | (mem_readb_phys(0x1bf) << 8));
@@ -229,68 +176,12 @@ static void
 hp_hil_pointer_tick(void *priv)
 {
     hp_hil_t *dev = (hp_hil_t *) priv;
-    int       dx  = 0;
-    int       dy  = 0;
-    int       ox  = 0;
-    int       oy  = 0;
-    int       nx, ny;
 
-    /* Take the host delta every tick, held back until the link can carry it.
-       HP-HIL reports +Y upwards while the host moves +Y downwards, so the
-       delta is negated here (MAME's hp_46060b does the same:
-       mouse_y_delta += -delta). */
-    mouse_subtract_coords(&dx, &dy, &ox, &oy, -128, 127, 0, 0);
-    dy = -dy;
-    if (dx || dy) {
-        nx = (int) dev->dx + dx;
-        ny = (int) dev->dy + dy;
-        dev->dx = (int8_t) ((nx > 127) ? 127 : ((nx < -128) ? -128 : nx));
-        dev->dy = (int8_t) ((ny > 127) ? 127 : ((ny < -128) ? -128 : ny));
-        dev->reports++;
-    }
-
-    /* The driver configures the pointer, polls it once and then waits for the
-       link to raise an interrupt when there is something to report; it leaves
-       the device in loop-back between polls (ELB after EPT).  Gating the
-       sampler on the link being out of loop-back therefore stopped it dead:
-       all that matters is that the pointer has an address. */
-    if (dev->dev[HIL_PTR].addr != 0) {
-        /* Auto Poll: every AP strobe makes the MLC issue a POL and the answer
-           carries whatever the device has.  There is no AP source in the
-           model and this ROM never sets W3.APE, so the pointer sampler doubles
-           as the strobe.  AP is a 60 Hz line from the 8041 (Vectra TRM Vol 1,
-           section 4): three polls in every five 10 ms ticks.
-
-           Two things make a strobe worth issuing: the driver is parked waiting
-           for a frame (HPHIL.SYS spins on DS:0x10 bit 0 at F000:92AB), or the
-           device has motion to report and nothing has polled it yet (OS/2's
-           HIL.SYS stops polling once the link is up and waits for the
-           interrupt instead). */
-        static int ap_div;
-        static const uint8_t ap_pattern[5] = { 1, 0, 1, 1, 0 };
-
-        uint32_t ctx = hp_hil_driver_ctx();
-
-        if (((dev->dx || dev->dy) ||
-             ((ctx != 0) && (mem_readw_phys(ctx + 0x10) & 0x0001))) &&
-            (dev->fifo_count == 0) && ap_pattern[ap_div++ % 5]) {
-            /* Poll this device directly: a broadcast poll is answered by the
-               first device in the chain, and OS/2's HIL.SYS keeps its own
-               idea of which address the mouse got. */
-            dev->w1 = (uint8_t) (0x08 | (dev->dev[HIL_PTR].addr & 0x07));
-            hp_hil_transmit(HIL_POL);
-        }
-        /* Motion is not pushed here: the record is the device's answer to a
-           poll (hp_hil_kbd_frame(), HIL_POL case), and a record that arrives
-           without one makes the driver read a frame it never asked for.  The
-           deltas simply stay latched until the next POL asks for them. */
-        if (dev->dx || dev->dy) {
-            hp_hil_trace("HIL: host pointer %d,%d latched\n", dev->dx, dev->dy);
-        }
-        /* The request is raised once, when the command frame lands in the
-           FIFO (see hp_hil_fifo_push()); re-asserting it every tick turned a
-           60 Hz poll into a 240 Hz interrupt storm. */
-    }
+    /* The host pointer belongs to the device that reports it; the adapter only
+       owns the 10 ms tick (AP is a 60 Hz line from the 8041, Vectra TRM Vol 1
+       section 4). */
+    if (dev->dev[HIL_PTR].ops->tick != NULL)
+        dev->dev[HIL_PTR].ops->tick(dev, HIL_PTR);
 
     timer_advance_u64(&dev->pointer_timer, (10000ULL * TIMER_USEC));
 }
@@ -303,15 +194,8 @@ hp_hil_poll_link(void)
     if ((dev == NULL) || !dev->dev[HIL_PTR].pt)
         return;
 
-    /* Displacement reports are raised by hp_hil_pointer_tick(); a poll only
-       hands back whatever is still queued here. */
-    if (dev->dx || dev->dy) {
-        hp_hil_fifo_push(hp_hil_reply(dev->dev[HIL_PTR].addr, HIL_POL_AXES_XY));
-        hp_hil_fifo_push(hp_hil_reply(dev->dev[HIL_PTR].addr, (uint8_t) dev->dx));
-        hp_hil_fifo_push(hp_hil_reply(dev->dev[HIL_PTR].addr, (uint8_t) dev->dy));
-        dev->dx = 0;
-        dev->dy = 0;
-    }
+    /* The record, and whether there is one at all, is the device's business. */
+    dev->dev[HIL_PTR].ops->poll(dev, HIL_PTR);
 }
 
 int
@@ -384,64 +268,10 @@ hp_hil_fifo_pop(void)
 }
 
 /* The frame a device answers with: its own address, no command bit. */
-static uint16_t
+uint16_t
 hp_hil_reply(uint8_t addr, uint8_t data)
 {
     return (uint16_t) (((uint16_t) (addr & 7) << 8) | data);
-}
-
-/*
- * The single device on the link: an HP Mouse 46060A.  It starts out in
- * loop-back so the System's link self test sees its own frames come back;
- * EPT takes it out of loop-back and from then on it answers as a device.
- */
-static void
-hp_hil_dev_idd(hp_hil_t *dev, int i)
-{
-    hil_dev_t *d = &dev->dev[i];
-
-    /* ID byte, then the Describe record.  The keyboard answers with a single
-       byte (axis count bits 1-0 = 0, no I/O descriptor); the pointer sends
-       the header plus the 16-bit resolution, four frames in all - what
-       hle_hp_46060b_device::hil_idd() sends (TRM 45918A appendix C). */
-    hp_hil_fifo_push(hp_hil_reply(d->addr, d->id));
-    if (d->kbd) {
-        hp_hil_fifo_push(hp_hil_reply(d->addr, 0x00));
-        return;
-    }
-    hp_hil_fifo_push(hp_hil_reply(d->addr, HIL_MOUSE_DESCR));
-    hp_hil_fifo_push(hp_hil_reply(d->addr, 0xc2)); /* resolution, low */
-    hp_hil_fifo_push(hp_hil_reply(d->addr, 0x1e)); /* resolution, high */
-}
-
-static int
-hp_hil_dev_poll(hp_hil_t *dev, int i)
-{
-    hil_dev_t *d = &dev->dev[i];
-
-    /* Poll record (TRM appendix E): header bits 1-0 say which axes follow and
-       bit 2 says the device is ready to hand data over.  A device with nothing
-       to report answers with no record at all. */
-    if (d->kbd || (!dev->dx && !dev->dy))
-        return 0;
-
-    /* Record layout the ROM parses (F000:8FBA, axes read at F000:9059):
-          header   bits 1-0 = which axes are present
-          X        one byte when the device's describe record has no 16-bit flag
-          Y        one byte, same rule
-       The pointer's describe record does not set ES:[12] bit 20h, so both
-       axes are 8 bit. */
-    hp_hil_fifo_push(hp_hil_reply(d->addr, HIL_POL_AXES_XY));
-    hp_hil_fifo_push(hp_hil_reply(d->addr, (uint8_t) dev->dx));
-    hp_hil_fifo_push(hp_hil_reply(d->addr, (uint8_t) dev->dy));
-    dev->dx = 0;
-    dev->dy = 0;
-
-    /* A device that reports data ends Auto Polling: the MLC raises the
-       interrupt and clears APE, and the System sets it again in its ISR
-       (TRM 45918A 4-19). */
-    dev->w3 &= (uint8_t) ~HIL_W3_APE;
-    return 1;
 }
 
 /*
@@ -557,12 +387,12 @@ hp_hil_kbd_frame(uint16_t frame)
                     break;
 
                 case HIL_IDD:
-                    hp_hil_dev_idd(dev, i);
+                    d->ops->idd(dev, i);
                     break;
 
                 default:
                     if ((data >= HIL_POL) && (data <= (HIL_POL + 0x0f))) {
-                        if (!hp_hil_dev_poll(dev, i) && (dev->w2 & HIL_W2_IPF))
+                        if (!d->ops->poll(dev, i) && (dev->w2 & HIL_W2_IPF))
                             hp_hil_no_irq = 1; /* IPF + Auto Poll: queue silently */
                     }
                     break;
@@ -582,10 +412,7 @@ hp_hil_kbd_frame(uint16_t frame)
                back from the end of the link. */
             frame = (uint16_t) ((frame & 0xff00) |
                                 ((((data & 0x07) + 1) & 0x07) | HIL_ACF));
-            if (d->kbd)
-                hp_hil_trace("HIL: keyboard configured as address %d\n", d->addr);
-            else
-                hp_hil_trace("HIL: mouse configured as address %d\n", d->addr);
+            hp_hil_trace("HIL: %s configured as address %d\n", d->ops->name, d->addr);
             if (d->pt && (i < (HIL_NDEV - 1)))
                 continue;
             hp_hil_fifo_push(frame);
@@ -606,7 +433,7 @@ hp_hil_kbd_frame(uint16_t frame)
 
             default:
                 if ((data >= HIL_POL) && (data <= (HIL_POL + 0x0f))) {
-                    if (!hp_hil_dev_poll(dev, i) && (dev->w2 & HIL_W2_IPF))
+                    if (!d->ops->poll(dev, i) && (dev->w2 & HIL_W2_IPF))
                         hp_hil_no_irq = 1; /* IPF + Auto Poll: queue silently */
                 }
                 break;
@@ -623,7 +450,7 @@ hp_hil_kbd_frame(uint16_t frame)
 }
 
 /* The System wrote W0: the frame is complete, put it on the link. */
-static void
+void
 hp_hil_transmit(uint8_t data)
 {
     hp_hil_t *dev = hp_hil_dev;
@@ -761,8 +588,9 @@ hp_hil_init(const device_t *info)
 
     dev->loop   = 1; /* the adapter powers up in loop-back */
     dev->dev[HIL_KBD].id  = HIL_KBD_ID;
-    dev->dev[HIL_KBD].kbd = 1;
+    dev->dev[HIL_KBD].ops = &hp_hil_kbd_ops;
     dev->dev[HIL_PTR].id  = HIL_MOUSE_ID;
+    dev->dev[HIL_PTR].ops = &hp_hil_mouse_ops;
 
     io_sethandler(0x006c, 4, hp_hil_read, NULL, NULL, hp_hil_write, NULL, NULL, dev);
 
@@ -803,12 +631,12 @@ hp_hil_reset(void *priv)
     dev->dev[HIL_KBD].id   = HIL_KBD_ID;
     dev->dev[HIL_KBD].pt   = 0;
     dev->dev[HIL_KBD].pwr  = 1;
-    dev->dev[HIL_KBD].kbd  = 1;
+    dev->dev[HIL_KBD].ops  = &hp_hil_kbd_ops;
     dev->dev[HIL_PTR].addr = 0;
     dev->dev[HIL_PTR].id   = HIL_MOUSE_ID;
     dev->dev[HIL_PTR].pt   = 0;
     dev->dev[HIL_PTR].pwr  = 1;
-    dev->dev[HIL_PTR].kbd  = 0;
+    dev->dev[HIL_PTR].ops  = &hp_hil_mouse_ops;
     dev->scan_reported = 0;
     dev->ready_ctx    = 0;
     dev->dx           = 0;

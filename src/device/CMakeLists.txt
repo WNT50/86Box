@@ -39,6 +39,8 @@ add_library(dev OBJECT
     ibm_xma.c
     mcamem.c
     hp_hil.c
+    hp_hil_kbd.c
+    hp_hil_mouse.c
     isamem.c
     isarom.c
     isartc.c
