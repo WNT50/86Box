@@ -32,7 +32,7 @@
  *          technical reference (table 7.6) gives the full
  *          SPU/display access matrix.  The 25 kHz (400 line) timing runs
  *          from the card's 22.44 MHz master oscillator and the documented
- *          CRTC translations; see docs/hp-vectra/VIDEO-45981A.md.
+ *          CRTC translations; see the port notebook, "video/45981a.md".
  *
  * Authors: WNT50
  *
