@@ -9,8 +9,10 @@
  *          Definitions for hardware monitoring chips.
  *
  * Authors: RichardG, <richardg867@gmail.com>
+ *          WNT50
  *
  *          Copyright 2020 RichardG.
+ *          Copyright 2026 WNT50.
  */
 #ifndef EMU_HWM_H
 #define EMU_HWM_H
@@ -18,15 +20,27 @@
 
 #define RESISTOR_DIVIDER(v, r1, r2) (((v) * (r2)) / ((r1) + (r2)))
 
+#define HWM_FANS          4
+#define HWM_VOLTAGES     13
+#define HWM_TEMPERATURES  4
+
 typedef struct hwm_values_t {
-    uint16_t fans[4];
-    uint8_t  temperatures[4];
-    uint16_t voltages[13];
+    uint16_t fans[HWM_FANS];
+    uint16_t voltages[HWM_VOLTAGES];
+    uint8_t  temperatures[HWM_TEMPERATURES];
 } hwm_values_t;
+
+/* A supplier of environment readings. Any callback may be NULL, in which case
+   the readings last stored in hwm_values are reported instead. */
+typedef struct hwm_source_s {
+    uint16_t (*fan_rpm)(void *priv, unsigned idx);
+    uint16_t (*voltage_mv)(void *priv, unsigned idx);
+    uint8_t  (*temperature)(void *priv, unsigned idx);
+    void     *priv;
+} hwm_source_t;
 
 typedef struct lm75_t {
     uint32_t      local;
-    hwm_values_t *values;
     void         *as99127f;
 
     uint8_t regs[16];
@@ -37,7 +51,12 @@ typedef struct lm75_t {
 } lm75_t;
 
 /* hwm.c */
+extern void     hwm_attach_source(const hwm_source_t *source);
+extern void     hwm_detach_source(const hwm_source_t *source);
+extern uint16_t hwm_get_fan(unsigned idx);
 extern uint16_t hwm_get_vcore(void);
+extern uint16_t hwm_get_voltage(unsigned idx);
+extern uint8_t  hwm_get_temperature(unsigned idx);
 
 /* hwm_lm75.c */
 extern void    lm75_remap(lm75_t *dev, uint8_t addr);

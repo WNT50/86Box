@@ -52,7 +52,6 @@
 
 typedef struct lm78_t {
     uint32_t      local;
-    hwm_values_t *values;
     lm75_t       *lm75[2];
     pc_timer_t    reset_timer;
 
@@ -353,19 +352,19 @@ sis5595_dam_read(lm78_t *dev, uint8_t reg)
 
     switch (reg) {
         case 0x20 ... 0x23:       /* VIN0-VIN3 */
-            ret = LM78_VOLTAGE_TO_REG(dev->values->voltages[reg & 0x07]);
+            ret = LM78_VOLTAGE_TO_REG(hwm_get_voltage(reg & 0x07));
             break;
 
         case 0x24:                /* VIN4, or temperature in DXP mode */
             if (dev->dxp)
-                ret = dev->values->temperatures[0];
+                ret = hwm_get_temperature(0);
             else
-                ret = LM78_VOLTAGE_TO_REG(dev->values->voltages[4]);
+                ret = LM78_VOLTAGE_TO_REG(hwm_get_voltage(4));
             break;
 
         case 0x28 ... 0x29:       /* FAN1, FAN2 */
             ret = (dev->regs[0x47] >> ((reg & 0x01) ? 6 : 4)) & 0x03;
-            ret = LM78_RPM_TO_REG(dev->values->fans[reg & 0x01], 1 << ret);
+            ret = LM78_RPM_TO_REG(hwm_get_fan(reg & 0x01), 1 << ret);
             break;
 
         case 0x2b ... 0x34:       /* limits, config, status, masks, divisor */
@@ -406,7 +405,7 @@ lm78_read(lm78_t *dev, uint8_t reg, uint8_t bank)
         /* W83782D additional registers */
         if (dev->local & LM78_W83782D) {
             if ((bank == 5) && ((reg == 0x50) || (reg == 0x51))) /* voltages */
-                ret = LM78_VOLTAGE_TO_REG(dev->values->voltages[7 + (reg & 1)]);
+                ret = LM78_VOLTAGE_TO_REG(hwm_get_voltage(7 + (reg & 1)));
             else if (bank < 6)
                 ret = dev->w83782d.regs[bank - 4][reg & 0x0f];
         }
@@ -415,16 +414,16 @@ lm78_read(lm78_t *dev, uint8_t reg, uint8_t bank)
         if ((reg >= 0x60) && (reg <= 0x94)) /* read auto-increment value RAM registers from their non-auto-increment locations */
             masked_reg = reg & 0x3f;
         if ((masked_reg >= 0x20) && (masked_reg <= 0x26)) /* voltages */
-            ret = LM78_VOLTAGE_TO_REG(dev->values->voltages[reg & 7]);
+            ret = LM78_VOLTAGE_TO_REG(hwm_get_voltage(reg & 7));
         else if ((dev->local & LM78_AS99127F) && (masked_reg <= 0x05)) /* AS99127F additional voltages */
-            ret = LM78_VOLTAGE_TO_REG(dev->values->voltages[7 + masked_reg]);
+            ret = LM78_VOLTAGE_TO_REG(hwm_get_voltage(7 + masked_reg));
         else if (masked_reg == 0x27) /* temperature */
-            ret = dev->values->temperatures[0];
+            ret = hwm_get_temperature(0);
         else if ((masked_reg >= 0x28) && (masked_reg <= 0x2a)) {                             /* fan speeds */
             ret = (dev->regs[((reg & 3) == 2) ? 0x4b : 0x47] >> ((reg & 3) ? 6 : 4)) & 0x03; /* bits [1:0] */
             if (dev->local & LM78_W83782D)
                 ret |= (dev->regs[0x5d] >> (3 + (reg & 3))) & 0x04; /* bit 2 */
-            ret = LM78_RPM_TO_REG(dev->values->fans[reg & 3], 1 << ret);
+            ret = LM78_RPM_TO_REG(hwm_get_fan(reg & 3), 1 << ret);
         } else if ((reg == 0x4f) && (dev->local & LM78_WINBOND)) /* two-byte vendor ID register */
             ret = (dev->regs[0x4e] & 0x80) ? (uint8_t) (LM78_WINBOND_VENDOR_ID >> 8) : (uint8_t) LM78_WINBOND_VENDOR_ID;
         else
@@ -864,12 +863,6 @@ lm78_init(const device_t *info)
             3000  /* usually PSU, sometimes Chassis */
         },
         {
-         /* temperatures */
-            30, /* usually Board, sometimes Chassis */
-            30, /* Winbond only: usually CPU, sometimes Probe */
-            30  /* Winbond only: usually CPU when not the one above */
-        },
-        {
          /* voltages */
             hwm_get_vcore(),                 /* Vcore */
             0,                               /* sometimes Vtt, Vio or second CPU */
@@ -884,6 +877,12 @@ lm78_init(const device_t *info)
             1500,                            /* AS99127F only: +1.5V */
             3000,                            /* AS99127F only: NVRAM */
             3300                             /* AS99127F only: +3.3VSB */
+        },
+        {
+         /* temperatures */
+            30, /* usually Board, sometimes Chassis */
+            30, /* Winbond only: usually CPU, sometimes Probe */
+            30  /* Winbond only: usually CPU when not the one above */
         }
     };
 
@@ -901,8 +900,7 @@ lm78_init(const device_t *info)
         defaults.voltages[6] = LM78_NEG_VOLTAGE2(5000, 120);
     }
 
-    hwm_values  = defaults;
-    dev->values = &hwm_values;
+    hwm_values = defaults;
 
     /* Initialize secondary/tertiary LM75 sensors on Winbond. */
     if (dev->local & LM78_WINBOND) {
