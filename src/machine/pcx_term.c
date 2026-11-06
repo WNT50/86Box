@@ -68,6 +68,10 @@ pcx_term_init(pcx_term_t *term)
     term->col      = 0;
     term->row      = 0;
     term->dirty    = 1;
+    term->esc      = 0;
+    term->npar     = 0;
+    term->priv     = 0;
+    memset(term->par, 0, sizeof(term->par));
 }
 
 int
@@ -101,11 +105,201 @@ pcx_term_load_font(pcx_term_t *term, const char *path)
     return ret;
 }
 
+/* Blanks a run of cells on one row.  Every erase goes through here so the
+   dirty flag and the attribute byte stay in step with the characters. */
+static void
+pcx_term_erase(pcx_term_t *term, int row, int col0, int col1)
+{
+    if ((row < 0) || (row >= PCX_TERM_ROWS))
+        return;
+    if (col0 < 0)
+        col0 = 0;
+    if (col1 >= PCX_TERM_COLS)
+        col1 = PCX_TERM_COLS - 1;
+
+    for (int c = col0; c <= col1; c++) {
+        if ((term->cells[row][c] != ' ') || (term->attr[row][c] != 0x0f))
+            term->dirty = 1;
+        term->cells[row][c] = ' ';
+        term->attr[row][c]  = 0x0f;
+    }
+}
+
+/* Clamps the cursor after a command that moved it. */
+static void
+pcx_term_clamp(pcx_term_t *term)
+{
+    if (term->row < 0)
+        term->row = 0;
+    if (term->row >= PCX_TERM_ROWS)
+        term->row = PCX_TERM_ROWS - 1;
+    if (term->col < 0)
+        term->col = 0;
+    if (term->col >= PCX_TERM_COLS)
+        term->col = PCX_TERM_COLS - 1;
+}
+
+/* Final byte of a CSI sequence.  The 8031 implements the cursor and erase
+   subset below; everything else is consumed and dropped, which is what the
+   board does with commands its firmware does not know either. */
+static void
+pcx_term_csi(pcx_term_t *term, uint8_t final)
+{
+    int p0 = (term->npar > 0) ? term->par[0] : 0;
+    int p1 = (term->npar > 1) ? term->par[1] : 0;
+    int r;
+
+    term->esc = 0;
+
+    /* '?' prefixes a mode the board has no state for (cursor visible and the
+       like).  Swallow it rather than mistaking its final byte for a command. */
+    if (term->priv)
+        return;
+
+    switch (final) {
+        case 'H':
+        case 'f':
+            term->row = ((p0 > 0) ? p0 : 1) - 1;
+            term->col = ((p1 > 0) ? p1 : 1) - 1;
+            break;
+
+        case 'A':
+            term->row -= (p0 > 0) ? p0 : 1;
+            break;
+        case 'B':
+            term->row += (p0 > 0) ? p0 : 1;
+            break;
+        case 'C':
+            term->col += (p0 > 0) ? p0 : 1;
+            break;
+        case 'D':
+            term->col -= (p0 > 0) ? p0 : 1;
+            break;
+        case 'G':
+            term->col = ((p0 > 0) ? p0 : 1) - 1;
+            break;
+        case 'd':
+            term->row = ((p0 > 0) ? p0 : 1) - 1;
+            break;
+
+        case 'J':
+            if (p0 == 0) {
+                pcx_term_erase(term, term->row, term->col, PCX_TERM_COLS - 1);
+                for (r = term->row + 1; r < PCX_TERM_ROWS; r++)
+                    pcx_term_erase(term, r, 0, PCX_TERM_COLS - 1);
+            } else if (p0 == 1) {
+                for (r = 0; r < term->row; r++)
+                    pcx_term_erase(term, r, 0, PCX_TERM_COLS - 1);
+                pcx_term_erase(term, term->row, 0, term->col);
+            } else {
+                for (r = 0; r < PCX_TERM_ROWS; r++)
+                    pcx_term_erase(term, r, 0, PCX_TERM_COLS - 1);
+                term->row = 0;
+                term->col = 0;
+            }
+            break;
+
+        case 'K':
+            if (p0 == 0)
+                pcx_term_erase(term, term->row, term->col, PCX_TERM_COLS - 1);
+            else if (p0 == 1)
+                pcx_term_erase(term, term->row, 0, term->col);
+            else
+                pcx_term_erase(term, term->row, 0, PCX_TERM_COLS - 1);
+            break;
+
+        case 'm': /* attributes: the page is monochrome, nothing to place */
+        default:
+            break;
+    }
+
+    pcx_term_clamp(term);
+}
+
 void
 pcx_term_write(pcx_term_t *term, uint8_t val)
 {
     if ((term == NULL) || (term->row < 0) || (term->row >= PCX_TERM_ROWS))
         return;
+
+    if (term->esc != 0) {
+        if (term->esc == 1) {
+            switch (val) {
+                case '[':
+                    term->esc  = 2;
+                    term->npar = 0;
+                    term->priv = 0;
+                    memset(term->par, 0, sizeof(term->par));
+                    break;
+                case '(':
+                case ')':
+                case '#':
+                case '%':
+                case '*':
+                case '+':
+                    /* Designator for a character set or a keyboard mode: one
+                       more byte follows and neither is ours to act on. */
+                    term->esc = 3;
+                    break;
+                case 'c': /* RIS: back to the power-on page */
+                    pcx_term_init(term);
+                    break;
+                case 'D':
+                    pcx_term_newline(term);
+                    break;
+                case 'E':
+                    term->col = 0;
+                    pcx_term_newline(term);
+                    break;
+                case 'M': /* reverse index */
+                    if (term->row > 0)
+                        term->row--;
+                    break;
+                default:
+                    break;
+            }
+            if (val != '[')
+                term->esc = (term->esc == 3) ? 3 : 0;
+            return;
+        }
+
+        if (term->esc == 3) {
+            term->esc = 0;
+            return;
+        }
+
+        /* Inside CSI. */
+        if ((val >= '0') && (val <= '9')) {
+            if (term->npar == 0) {
+                term->npar    = 1;
+                term->par[0]  = 0;
+            }
+            if (term->npar <= 4)
+                term->par[term->npar - 1] =
+                    term->par[term->npar - 1] * 10 + (val - '0');
+        } else if (val == ';') {
+            if (term->npar == 0)
+                term->npar = 1;
+            if (term->npar < 4) {
+                term->npar++;
+                term->par[term->npar - 1] = 0;
+            }
+        } else if (val == '?') {
+            term->priv = 1;
+        } else if ((val >= 0x20) && (val <= 0x2f)) {
+            /* Intermediate byte, part of the sequence. */
+        } else if ((val >= 0x40) && (val <= 0x7e)) {
+            pcx_term_csi(term, val);
+        } else {
+            term->esc = 0;
+        }
+        return;
+    }
+
+    if (val == 0x1b) {
+        term->esc = 1;
+        return;
+    }
 
     switch (val) {
         case PCX_TERM_ETX: /* end of message, nothing to place */
