@@ -36,6 +36,10 @@
  *
  *          Copyright 2026 WNT50.
  */
+#define ENABLE_SCSI_SM912_LOG 0
+
+/* DRQ0 is wired to the adapter (m_pcx: DRQ0 SCSI, DRQ1 WD2791). */
+#define SM912_DMA_CHANNEL 0
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -46,6 +50,8 @@
 #include "cpu.h"
 #include <86box/io.h>
 #include <86box/scsi.h>
+#include <86box/dma.h>
+#include <86box/plat.h>
 #include <86box/scsi_device.h>
 #include <86box/scsi_sm912.h>
 #include <86box/timer.h>
@@ -59,9 +65,11 @@ scsi_sm912_log(const char *fmt, ...)
     va_list ap;
 
     if (scsi_sm912_do_log) {
+        char buf[256];
         va_start(ap, fmt);
-        pclog_ex(fmt, ap);
+        vsnprintf(buf, sizeof(buf), fmt, ap);
         va_end(ap);
+        pclog("%s", buf);
     }
 }
 #else
@@ -127,10 +135,88 @@ scsi_sm912_update_irq(scsi_sm912_t *dev)
         dev->irq(dev->irq_priv, level);
 }
 
+static int sm912_dma_used;
+
+/* Data phases can be driven by the DMA engine instead of the CPU: on this
+   board the adapter only raises REQ, and DRQ0 makes the 80186 move the byte
+   between memory and the data register.  The driver polls the status port
+   while it waits, so each poll hands over one byte. */
+static void
+scsi_sm912_dma_pump(scsi_sm912_t *dev)
+{
+    scsi_common_t *sc = (dev->sd != NULL) ? dev->sd->sc : NULL;
+
+    if ((sc == NULL) || (sc->temp_buffer == NULL))
+        return;
+    /* Do not gate on dma_channel_readable(): the BIOS arms the channel in a
+       way that reports "not readable" while still accepting deposits, and it
+       then waits for C/D without ever touching the data port.  Try the write
+       and back off on DMA_NODATA instead. */
+
+    if (dev->phase == SM912_DATAIN) {
+        if (dev->data_pos >= (uint32_t) dev->sd->buffer_length)
+            return;
+        {
+            int r;
+            /* Mirror the hardware handshake: REQ raises DRQ0, the controller
+               performs one byte, then DRQ drops.  Without this the 80186 DMA
+               never sees the transfer end and the driver waits for TC. */
+            dma_set_drq(SM912_DMA_CHANNEL, 1);
+            r = dma_channel_write(SM912_DMA_CHANNEL, sc->temp_buffer[dev->data_pos]);
+            dma_set_drq(SM912_DMA_CHANNEL, 0);
+            if (r == DMA_NODATA)
+                return;
+            sm912_dma_used = 1;
+            dev->data_pos++;
+            if (r & DMA_OVER) {
+                /* The channel counted out before the CDB length did: that is
+                   the guest's idea of "transfer done", so stop here. */
+                if (dev->sd != NULL)
+                    scsi_device_command_phase1(dev->sd);
+                dev->status_byte = (dev->sd != NULL) ? dev->sd->status : 0x02;
+                dev->phase       = SM912_STATUS;
+                scsi_sm912_log("[SM912] dma over at %u/%u\n", dev->data_pos,
+                               (dev->sd != NULL) ? (unsigned) dev->sd->buffer_length : 0);
+                return;
+            }
+        }
+        if (dev->data_pos >= (uint32_t) dev->sd->buffer_length) {
+            scsi_device_command_phase1(dev->sd);
+            dev->status_byte = dev->sd->status;
+            dev->phase       = SM912_STATUS;
+            scsi_sm912_log("[SM912] dma data-in done %u\n", dev->data_pos);
+        }
+    } else if (dev->phase == SM912_DATAOUT) {
+        int val;
+        if (dev->data_pos >= (uint32_t) dev->sd->buffer_length)
+            return;
+        val = dma_channel_read(SM912_DMA_CHANNEL);
+        if (val == DMA_NODATA)
+            return;
+        sc->temp_buffer[dev->data_pos++] = (uint8_t) val;
+        if (dev->data_pos >= (uint32_t) dev->sd->buffer_length) {
+            scsi_device_command_phase1(dev->sd);
+            dev->status_byte = dev->sd->status;
+            dev->phase       = SM912_STATUS;
+        }
+    }
+
+    /* Entering STATUS/MSGIN has to raise the interrupt: the driver waits for
+       it instead of polling, and a silent transition makes it reset the bus. */
+    scsi_sm912_update_irq(dev);
+}
+
 static uint8_t
 scsi_sm912_status(scsi_sm912_t *dev)
 {
     static int log_on = -1;
+
+    /* The driver polls this register while it waits for the command phase; a
+       DMA channel armed after the selection only gets its chance here. */
+    scsi_sm912_dma_pump(dev);
+
+
+
     static int log_n;
     uint8_t ret = 0;
 
@@ -144,6 +230,8 @@ scsi_sm912_status(scsi_sm912_t *dev)
             if ((dev->phase == SM912_CMD) || (dev->phase == SM912_STATUS) ||
                 (dev->phase == SM912_MSGIN))
                 ret |= SM912_ST_CD;
+            /* Bit 6 is NOT I/O on this adapter: setting it makes the BIOS
+               INT 13h handler spin forever at FC00:1B32.  Leave it clear. */
             break;
         default:
             break;
@@ -190,10 +278,15 @@ scsi_sm912_execute(scsi_sm912_t *dev)
     if ((dev->sd != NULL) && scsi_device_present(dev->sd)) {
         sc = dev->sd->sc;
 
+        dev->sd->buffer_length = -1;
         scsi_device_command_phase0(dev->sd, dev->cdb);
-        scsi_device_command_phase1(dev->sd);
 
         dev->status_byte = dev->sd->status;
+
+        scsi_sm912_log("[SM912] exec op %02X status %02X phase %d len %d buf %p\n",
+                       dev->cdb[0], dev->sd->status, dev->sd->phase,
+                       (int) dev->sd->buffer_length,
+                       (sc != NULL) ? (void *) sc->temp_buffer : NULL);
 
         if ((dev->sd->buffer_length > 0) && (sc != NULL) && (sc->temp_buffer != NULL)) {
             if (dev->sd->phase == SCSI_PHASE_DATA_IN) {
@@ -212,14 +305,29 @@ scsi_sm912_execute(scsi_sm912_t *dev)
         }
     }
 
-    dev->phase = SM912_STATUS;
+    /* Commands without a data phase finish here; data phases finish in the
+       register handlers, which is when phase1() may run. */
+    if (dev->sd != NULL)
+        scsi_device_command_phase1(dev->sd);
+
+    dev->status_byte = (dev->sd != NULL) ? dev->sd->status : 0x02;
+    dev->phase       = SM912_STATUS;
 
     scsi_sm912_update_irq(dev);
 }
 
+static void scsi_sm912_command_byte(scsi_sm912_t *dev, uint8_t val);
+
+/* Command phase.  On the real board the target raises REQ with C/D low, and
+   that combination drives DRQ0: the DMA controller fetches the CDB out of
+   memory and drops it into the data register, so the CPU never writes those
+   bytes itself (MAME: write_scsi_req() -> drq0_w(1)).  The driver programs the
+   channel before it selects; if it did not, the PIO path in the data-register
+   handler still applies. */
 static void
 scsi_sm912_select(scsi_sm912_t *dev, uint8_t val)
 {
+
     if (!dev->target_present) {
         /* Nobody answers, so SEL stays asserted and BSY never comes; the host
            times out and reports an empty bus. */
@@ -253,6 +361,8 @@ scsi_sm912_select(scsi_sm912_t *dev, uint8_t val)
     dev->phase   = SM912_CMD;
 
     scsi_sm912_update_irq(dev);
+
+    /* The DMA controller may already hold the whole CDB. */
 }
 
 /* One command byte arrives; once the whole CDB is in the command runs. */
@@ -285,17 +395,43 @@ scsi_sm912_data_read(scsi_sm912_t *dev)
 
     switch (dev->phase) {
         case SM912_DATAIN:
+            /* When the driver armed DMA for the transfer, the pump in the
+               status handler moves the bytes; a CPU read of the data port
+               must not consume a second time. */
+            if (sm912_dma_used)
+                return 0x00;
             if ((sc != NULL) && (sc->temp_buffer != NULL) &&
                 (dev->data_pos < (uint32_t) dev->sd->buffer_length))
                 ret = sc->temp_buffer[dev->data_pos++];
             if ((sc == NULL) || (dev->data_pos >= (uint32_t) dev->sd->buffer_length)) {
+                if (dev->sd != NULL)
+                    scsi_device_command_phase1(dev->sd);
                 dev->status_byte = (dev->sd != NULL) ? dev->sd->status : 0x02;
                 dev->phase       = SM912_STATUS;
+                scsi_sm912_log("[SM912] data-in %u/%u byte(s)\n", dev->data_pos,
+                               (dev->sd != NULL) ? (unsigned) dev->sd->buffer_length : 0);
             }
             break;
         case SM912_STATUS:
-            ret        = dev->status_byte;
-            dev->phase = SM912_MSGIN;
+            /* The adapter owns the message phase: the target raises REQ with
+               C/D and MSG, and the board takes the message byte itself and
+               drops BSY (MAME: write_scsi_req() reads the data register and
+               raises ACK without the CPU).  Waiting for the host to read the
+               message leaves BSY up and the driver resets the bus. */
+            ret = dev->status_byte;
+            {
+                static int autoack = -1;
+                if (autoack < 0)
+                    autoack = (getenv("PCX_NOAUTOACK") != NULL) ? 0 : 1;
+                if (autoack) {
+                    dev->phase = SM912_IDLE;
+                } else {
+                    dev->message_byte = 0x00;   /* COMMAND COMPLETE */
+                    dev->phase    = SM912_MSGIN;
+                }
+            }
+            scsi_sm912_log("[SM912] status %02X, message %s\n", ret,
+                           (dev->phase == SM912_IDLE) ? "auto-acked" : "left for host");
             break;
         case SM912_MSGIN:
             ret        = dev->message_byte;
@@ -319,6 +455,8 @@ scsi_sm912_data_write(scsi_sm912_t *dev, uint8_t val)
 
     switch (dev->phase) {
         case SM912_CMD:
+            scsi_sm912_log("[SM912] pio cdb %02X from %04X:%04X\n", val,
+                           cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
             scsi_sm912_command_byte(dev, val);
             break;
         case SM912_DATAOUT:
@@ -359,6 +497,15 @@ scsi_sm912_write(uint16_t port, uint8_t val, void *priv)
     scsi_sm912_t *dev = (scsi_sm912_t *) priv;
     uint16_t      off = (uint16_t) (port - dev->base);
 
+    if (getenv("PCX_SM912V") != NULL) {
+        static int vn = 0;
+        if (vn < 400) {
+            pclog("[V] t=%u %s val=%02X phase=%d cdbpos=%d\n", plat_get_ticks(),
+                  (off & 1) ? "CTL" : "DAT", val, dev->phase, dev->cdb_pos);
+            vn++;
+        }
+    }
+
 
     if (!(off & 1)) {
         scsi_sm912_data_write(dev, val);
@@ -366,7 +513,9 @@ scsi_sm912_write(uint16_t port, uint8_t val, void *priv)
     }
 
     if (val & SM912_CT_RST) {
-        scsi_sm912_log("[SM912] bus reset\n");
+        scsi_sm912_log("[SM912] bus reset from %04X:%04X phase %d\n",
+                       cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc,
+                       dev->phase);
         scsi_sm912_reset(dev);
         return;
     }
