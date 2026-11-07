@@ -32,13 +32,24 @@
 #define HIL_POL_READY   0x04 /* device ready for data transfer */
 #define HIL_POL_AXES_XY 0x02 /* bits 1-0: 00 none, 01 X, 10 X and Y */
 
+/* Frame bit 11 marks a frame the System sent as a command; the MLC only
+   interrupts on those (MAME's hp_hil_mlc_device::hil_write does the same). */
+#define HIL_FRAME_CMD 0x0800
+
 /* Mouse 46060A describe record: 8-bit relative X and Y, I/O descriptor. */
+/* Keyboard describe header: no axes, no I/O descriptor. */
+#define HIL_KBD_DESCR 0x00
+
 #define HIL_MOUSE_DESCR 0x12
 #define HIL_MOUSE_RES_LO 0xc2
 #define HIL_MOUSE_RES_HI 0x1e
+/* I/O Descriptor byte (TRM appendix C, C-3): bits 2-0 are the buttons the
+   device reports keycodes for.  Three buttons, no proximity, no prompt/ack. */
+#define HIL_MOUSE_IO_DESC 0x03
 
 /* HP-HIL commands the devices answer (Table 4-1). */
 #define HIL_POL 0x10 /* Poll, 10..1f */
+#define HIL_IDD 0x03 /* Identify and Describe */
 
 /* MLC register bits the devices care about (Appendix I). */
 #define HIL_W3_APE 0x02 /* Auto Poll Enable: an AP strobe issues a POL */

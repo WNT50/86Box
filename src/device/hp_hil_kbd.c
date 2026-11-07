@@ -36,10 +36,11 @@ hp_hil_kbd_idd(hp_hil_t *dev, int i)
 {
     hil_dev_t *d = &dev->dev[i];
 
-    /* ID byte, then a single describe byte: no positional information, no
-       I/O descriptor (appendix C). */
+    /* ID byte, one describe header: no positional information, no I/O
+       descriptor (appendix C).  The command comes back through the link, so
+       the System sees the retransmission it waits for (TRM 45918A 4-8). */
     hp_hil_fifo_push(hp_hil_reply(d->addr, d->id));
-    hp_hil_fifo_push(hp_hil_reply(d->addr, 0x00));
+    hp_hil_fifo_push(hp_hil_reply(d->addr, HIL_KBD_DESCR));
 }
 
 static int

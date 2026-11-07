@@ -146,7 +146,7 @@ hp_hil_fifo_push(uint16_t frame)
     /* The MLC interrupts on the command frame, not on the record in front of
        it: MAME's hp_hil_mlc_device::hil_write() only touches R3 for frames
        with the command bit set, and the data frames queue silently. */
-    if ((frame & 0x0800) && !hp_hil_no_irq) {
+    if ((frame & HIL_FRAME_CMD) && !hp_hil_no_irq) {
         dev->r3 |= HIL_R3_INT;
         /* "The AUTO POLL ENABLE (APE) bit is cleared by the MLC whenever it
            interrupts the processor" (TRM 45918A 1-16). */
@@ -219,7 +219,7 @@ hp_hil_ap_tick(void *priv)
                 hp_hil_no_irq = 1;
 
             /* fifo_push() clears APE when it raises the interrupt. */
-            hp_hil_fifo_push((uint16_t) (0x0800 | ((uint16_t) addr << 8) | HIL_POL));
+            hp_hil_fifo_push((uint16_t) (HIL_FRAME_CMD | ((uint16_t) addr << 8) | HIL_POL));
             hp_hil_no_irq = 0;
         }
     }

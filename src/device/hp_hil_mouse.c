@@ -37,12 +37,18 @@ hp_hil_mouse_idd(hp_hil_t *dev, int i)
 {
     hil_dev_t *d = &dev->dev[i];
 
-    /* ID byte plus the Describe Record: header (8-bit relative X and Y axes),
-       then the resolution in counts per meter (appendix C). */
+    /* ID byte, then the Describe Record in the order the ROM's parser reads it
+       (F000:8E9E) and appendix C describes it:
+         header     8-bit relative X and Y axes, I/O Descriptor byte follows
+         resolution counts per meter, low byte first
+         I/O desc   three buttons, no proximity, no prompt/acknowledge
+       The command itself comes back through the link afterwards, which is the
+       retransmission the System waits for (TRM 45918A 4-8). */
     hp_hil_fifo_push(hp_hil_reply(d->addr, d->id));
     hp_hil_fifo_push(hp_hil_reply(d->addr, HIL_MOUSE_DESCR));
     hp_hil_fifo_push(hp_hil_reply(d->addr, HIL_MOUSE_RES_LO));
     hp_hil_fifo_push(hp_hil_reply(d->addr, HIL_MOUSE_RES_HI));
+    hp_hil_fifo_push(hp_hil_reply(d->addr, HIL_MOUSE_IO_DESC));
 }
 
 static int
