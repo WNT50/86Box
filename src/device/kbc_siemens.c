@@ -43,7 +43,9 @@
 #include <string.h>
 #include <wchar.h>
 #define HAVE_STDARG_H
+#include <86box/plat.h>
 #include <86box/86box.h>
+#include "cpu.h"
 #include <86box/device.h>
 #include <86box/timer.h>
 #include <86box/log.h>
@@ -61,6 +63,8 @@ static uint8_t kbc_siemens_irq_state;
 static void
 kbc_siemens_irq(int on)
 {
+    if (on && (getenv("PCX_HLTLOG") != NULL))
+        pclog("[KIRQ] t=%u assert\n", plat_get_ticks());
     picint_common(1 << 8, PIC_IRQ_LEVEL, on, &kbc_siemens_irq_state);
 }
 
@@ -236,11 +240,12 @@ kbc_siemens_read_data(kbc_siemens_t *dev)
     if (!kbc_fifo_empty(dev)) {
         ret        = dev->fifo[dev->fifo_head];
         dev->fifo_head = (dev->fifo_head + 1) % KBC_FIFO_SIZE;
-    } else if (dev->identity_done && !dev->present_sent) {
-        /* The keyboard answers the first poll after the terminal handshake so
-           the loader sees a live 8741A; after that the channel stays quiet
-           until a key is injected. */
-        ret               = 0x00;
+    } else if (!dev->present_sent) {
+        /* The DOS loader drains this channel before it is willing to boot and
+           prints "Tastatur ist nicht angeschlossen oder kann nicht im
+           PC-Modus betrieben werden" if nothing is waiting, so hand it the
+           '<' the loader accepts as the presence answer. */
+        ret               = '<';
         dev->present_sent = 1;
     }
 
@@ -261,7 +266,7 @@ kbc_siemens_read_status(kbc_siemens_t *dev)
     /* Bit 0: a byte waits at 0xf980 (v3 0xfd9e6 tests exactly this bit).
        Bit 1: busy, i.e. the controller has not taken the last byte.  The
        high level model consumes the stream at once, so it stays clear. */
-    if (!kbc_fifo_empty(dev))
+    if (!kbc_fifo_empty(dev) || !dev->present_sent)
         ret |= 0x01;
 
     if (dev->busy)
@@ -288,28 +293,48 @@ kbc_siemens_key(kbc_siemens_t *dev, uint8_t byte)
 /* 8741A master side as the board wires it: 0xf9b0 is the data register, the
    ports next to it the status word.  The DOS loader polls 0xf9b2 for "a byte
    waits" (bit 0) and then reads 0xf9b0, so the same FIFO serves both views. */
+static int kbc_iolog = -1;
+
 static uint8_t
 kbc_upi_read(uint16_t port, void *priv)
 {
     kbc_siemens_t *dev = (kbc_siemens_t *) priv;
+    uint8_t        v;
+
+    if (kbc_iolog < 0)
+        kbc_iolog = (getenv("KBC_IOLOG") != NULL);
 
     switch (port & 0x03) {
         case 0x00:
-            return kbc_siemens_read_data(dev);
+            v = kbc_siemens_read_data(dev);
+            break;
 
         case 0x01:
         case 0x02:
-            return kbc_siemens_read_status(dev);
+            v = kbc_siemens_read_status(dev);
+            break;
 
         default:
-            return 0x00;
+            v = 0x00;
+            break;
     }
+
+    if (kbc_iolog)
+        pclog("[KBCIO] r %04X=%02X @%04X:%04X\n", port, v, cpu_state.seg_cs, cpu_state.pc);
+
+    return v;
 }
 
 static void
 kbc_upi_write(uint16_t port, uint8_t val, void *priv)
 {
     kbc_siemens_t *dev = (kbc_siemens_t *) priv;
+
+    if (kbc_iolog < 0)
+        kbc_iolog = (getenv("KBC_IOLOG") != NULL);
+
+    if (kbc_iolog)
+        pclog("[KBCIO] w %04X=%02X @%04X:%04X\n", port, val, cpu_state.seg_cs, cpu_state.pc);
 
     if ((port & 0x03) == 0x00)
         kbc_siemens_rx(dev, val);

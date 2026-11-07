@@ -64,15 +64,28 @@ extern volatile int fdcinited;
    even addresses, the high byte half (.d42) at odd addresses -- exactly what
    bios_load_interleaved() wants, first argument is the even one.
 
-   The two machines carry different builds: the PC-X (1982) runs the V2 GS
-   pair, whose console is the terminal byte stream on 0xf980/0xf981, and the
-   PC-D (1984) runs the later V3 GS4 build that talks to the SCN2674 window. */
+   Both machines run the same board ROM; what differs is the video device the
+   machine installs.  V3 GS4 is the revision to use: its disk check accepts the
+   SINIX boot record (track 0 sector 7 -> 0x63e, byte 4 must be 'S'), which the
+   earlier V2 GS build never tries because it only takes that fallback when the
+   sector-1 read itself fails.  The V2 pair is kept next to it as s26361-d359.*
+   for A/B runs; switching this macro back to it gives a PC-X that stops in the
+   ROM retry loop instead of booting the SINIX disk. */
 #define PCD_BIOS_LOW      "roms/machines/pcd/361d0359.d43"
 #define PCD_BIOS_HIGH     "roms/machines/pcd/361d0359.d42"
-#define PCX_BIOS_LOW      "roms/machines/pcx/s26361-d359.d43"
-#define PCX_BIOS_HIGH     "roms/machines/pcx/s26361-d359.d42"
+#define PCX_BIOS_LOW      "roms/machines/pcx/361d0359.d43"
+#define PCX_BIOS_HIGH     "roms/machines/pcx/361d0359.d42"
 #define PCX_BIOS_ADDR     0x000fc000
 #define PCX_BIOS_SIZE     0x00004000
+
+/* TMRIN0 pulse period, in CPU clocks.  The service manual (Teil II, adapter
+   type 5, p. 4-11) puts timer 0's count input on the serial interface's
+   Schrittakt, which the board derives as 8 MHz / 16 = 500 kHz.  The POST then
+   times its calibration loop against one 25001-count period and accepts
+   8192..24576 passes; 16 clocks puts us at ~14,300, inside that window and
+   above the 12,288 the V2 GS BIOS demands (12 clocks gave 10,714, which the
+   V3 GS4 BIOS accepts but V2 rejects with "BASIC-FUNCTION ERROR"). */
+#define PCX_TMRIN_CLOCKS  16
 
 /* System RAM runs from 0 up to the graphics board: the service manual's 1 MB
    configuration note (Teil I, p. 4-11) says the refresh memory, the EPROM and
@@ -145,6 +158,9 @@ typedef struct pcx_t {
 } pcx_t;
 
 static pcx_t pcx;
+
+/* Which machine is being initialised (set before the common init runs). */
+static int pcx_is_pcd = 0;
 
 static uint8_t pcx_usart2_read(uint16_t addr, void *priv);
 
@@ -306,6 +322,15 @@ pcx_dip_write(UNUSED(uint16_t port), uint8_t val, UNUSED(void *priv))
        the POST writes 0x3e there (v3 BIOS 0x5e2) and 0xc0 to 0xf840 before it
        touches anything else.  Keep the value for a display model later. */
 
+    /* PCX_LEDLOG=1: the POST reports progress by code on this latch. */
+    if (getenv("PCX_LEDLOG")) {
+        static long led_n;
+
+        led_n++;
+        if (led_n <= 120)
+            pclog("[LED] #%ld val=%02X\n", led_n, val);
+    }
+
     pcx.led = val;
 }
 
@@ -383,6 +408,16 @@ pcx_kbd_host(uint16_t scan, int down, UNUSED(void *priv))
         pclog("[KBD] sc=%02X ch=%02X\n", sc, (uint8_t) ch);
     if (ch == 0)
         return;
+
+    /* The PC-X console is the terminal byte stream on 0xf980/0xf981, which the
+       kbc_siemens model serves; the PC-D's Graphik-BIOS instead puts its
+       keyboard on the second USART.  Sending PC-X keys to USART2 left SINIX
+       halted at 1000:03a4 with no way to type anything. */
+    if (!pcx_is_pcd) {
+        if (pcx.kbc != NULL)
+            kbc_siemens_key(pcx.kbc, (uint8_t) ch);
+        return;
+    }
 
     serial_endpoint_receive(scn26x1_endpoint(pcx.usart[1]), (uint8_t) ch);
 }
@@ -761,8 +796,6 @@ pcx_i186_logw16(uint16_t addr, uint16_t val, void *priv)
         pclog("[I186] w16 %04X=%04X @%04X:%04X\n", addr, val, CS, cpu_state.pc);
 }
 
-static int pcx_is_pcd = 0;
-
 static int machine_pcx_init_ex(const machine_t *model);
 
 int
@@ -813,7 +846,13 @@ machine_pcx_init_ex(const machine_t *model)
        the POST runs its own MMU self test, which our model only satisfies up to
        test four -- the I/O trap raises NMI but the handler the test installs
        never runs -- so the machine would not come up at all. */
-    pcx.dip  = 0x01;
+    /* PCX_DIP (hex) overrides the strap byte for bench tests; the default is
+       the value the POST needs to come up. */
+    {
+        const char *dip_env = getenv("PCX_DIP");
+
+        pcx.dip = (dip_env != NULL) ? (uint8_t) strtoul(dip_env, NULL, 16) : 0x01;
+    }
     pcx.led  = 0x00;
     pcx.dskctl2 = 0x00;
 
@@ -886,14 +925,9 @@ machine_pcx_init_ex(const machine_t *model)
         struct i8018x_pcb_t *pcb = device_add(&i8018x_pcb_device);
 
         i8018x_pcb_set_dma_channels(pcb, 0, 1); /* DRQ0: SCSI, DRQ1: WD2791 */
-        /* TIMERIN0 is a board signal, not the internal clock: the service manual
-           (Teil II, adapter type 5, p. 4-11) says timer 0's count input hangs on
-           the serial interface's Schrittakt and times the c/t lines out.  The
-           POST's timer test gives a window: its loop allows 8192..24576 passes
-           at 23 clocks each (cmp 3 + jcc 4 + dec 3 + jcc 13 from the 80186
-           timing table), so 25001 counts must take 23.6..70.6 ms, i.e. the pin
-           runs at 0.35..1.06 MHz.  8 MHz / 16 = 500 kHz sits inside that. */
-        i8018x_pcb_set_timer_input(pcb, 0, 12);
+        /* TIMERIN0 is a board signal, not the internal clock; see
+           PCX_TMRIN_CLOCKS for how the divider was derived. */
+        i8018x_pcb_set_timer_input(pcb, 0, PCX_TMRIN_CLOCKS);
         i8018x_pcb_set_ext_ack(pcb, 0, pcx_8259_ack, &pic);
         i8018x_pcb_set_ext_ack(pcb, 1, pcx_8259_ack, &pic2);
         pic_set_output_callback(&pic, pcx_icu_int0, pcb);
