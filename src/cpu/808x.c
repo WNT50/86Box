@@ -367,6 +367,42 @@ cpu_io(int bits, int out, uint16_t port)
 static uint8_t
 readmemb(uint32_t s, uint32_t a)
 {
+    /* PCX_STALLREAD=1: which words the stalling kernel loop keeps reading. */
+    if (getenv("PCX_STALLREAD") && ((uint16_t) CS == 0x110E)) {
+        static struct { uint32_t addr; uint32_t hits; } sr[24];
+        static long sr_total, sr_dump;
+        int i, k;
+
+        sr_total++;
+        for (i = 0; i < 24; i++) {
+            if (sr[i].hits && (sr[i].addr == (s + a))) {
+                sr[i].hits++;
+                break;
+            }
+            if (!sr[i].hits) {
+                sr[i].addr = s + a;
+                sr[i].hits = 1;
+                break;
+            }
+        }
+        if ((sr_total - sr_dump) >= 50000) {
+            sr_dump = sr_total;
+            pclog("[SR] n=%ld", sr_total);
+            for (k = 0; k < 8; k++) {
+                int best = -1;
+
+                for (i = 0; i < 24; i++)
+                    if (sr[i].hits && ((best < 0) || (sr[i].hits > sr[best].hits)))
+                        best = i;
+                if (best < 0)
+                    break;
+                pclog(" %05X:%lu", sr[best].addr, (unsigned long) sr[best].hits);
+                sr[best].hits = 0;
+            }
+            pclog("\n");
+        }
+    }
+
     if (is_new_biu)
         return readmemb_vx0(s, a);
     else {
@@ -482,6 +518,42 @@ writememb(uint32_t s, uint32_t a, uint8_t v)
             pclog("[WC] %05X=%02X cs=%04X ip=%04X ds=%04X es=%04X si=%04X di=%04X\n",
                   s + a, v, (uint16_t) CS, (uint16_t) cpu_state.oldpc,
                   (uint16_t) DS, (uint16_t) ES, (uint16_t) SI, (uint16_t) DI);
+    }
+
+    /* PCX_STALLWATCH=1: which words the stalling kernel loop rewrites. */
+    if (getenv("PCX_STALLWATCH") && ((uint16_t) CS == 0x110E)) {
+        static struct { uint32_t addr; uint32_t hits; } sw[24];
+        static long sw_total, sw_dump;
+        int i, k;
+
+        sw_total++;
+        for (i = 0; i < 24; i++) {
+            if (sw[i].hits && (sw[i].addr == (s + a))) {
+                sw[i].hits++;
+                break;
+            }
+            if (!sw[i].hits) {
+                sw[i].addr = s + a;
+                sw[i].hits = 1;
+                break;
+            }
+        }
+        if ((sw_total - sw_dump) >= 50000) {
+            sw_dump = sw_total;
+            pclog("[SW] n=%ld", sw_total);
+            for (k = 0; k < 8; k++) {
+                int best = -1;
+
+                for (i = 0; i < 24; i++)
+                    if (sw[i].hits && ((best < 0) || (sw[i].hits > sw[best].hits)))
+                        best = i;
+                if (best < 0)
+                    break;
+                pclog(" %05X:%lu", sw[best].addr, (unsigned long) sw[best].hits);
+                sw[best].hits = 0;
+            }
+            pclog("\n");
+        }
     }
 
     if (is_new_biu)
