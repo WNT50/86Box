@@ -200,9 +200,21 @@ pcd_video_poll(void *priv)
 }
 
 static uint8_t
-pcd_video_read(uint16_t port, UNUSED(void *priv))
+pcd_video_read(uint16_t port, void *priv)
 {
-    return (uint8_t) (port & 0x0f);
+    pcd_video_t *dev = (pcd_video_t *) priv;
+    uint16_t     reg = (uint16_t) (port & 0x0f);
+
+    /* 0x02 is the port the DOS console driver handshakes on: it sets bit 6 of
+       the value and then polls bit 4 until it reads high (0070:4D19-4D20).
+       The board only asserts that bit when the character path is idle, and
+       this model has no busy state, so report the written value with bit 4
+       forced high.  Other ports still return their index: the BIOS reads them
+       as part of its init sequence and nothing here proves a read-back yet. */
+    if (reg == 0x02)
+        return (uint8_t) (dev->regs[reg] | 0x10);
+
+    return (uint8_t) reg;
 }
 
 static void

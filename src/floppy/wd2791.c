@@ -993,8 +993,10 @@ wd_start_read(wd2791_t *dev)
        cell track it put the head 78 ms in, while the PC-D read loop gives up
        after 28 ms and never saw a byte. */
     if (getenv("PCX_FDCLOG") != NULL)
-        pclog("[SEEKPOS] pos=%u (left where the drive is)\n",
+        pclog("[SEEKPOS] pos=%u (reset to index)\n",
               d86f_get_track_pos(drv));
+    if (drv != NULL)
+        d86f_set_track_pos(drv, 0);
 
     wd_sector_read(dev, dev->sector_reg);
 
