@@ -72,21 +72,18 @@ enum {
 
 /* Video modes, TRM Table 7-11 (control register A bits 2-0 + control B bit 7) */
 enum {
-    /* 标准模式，编号即控制寄存器 A 的 3 位模式号（TRM 1.2.2.2） */
-    VMODE_TEXT40      = 0,  /* 40x25 文本，单色 */
-    VMODE_TEXT80      = 1,  /* 80x25 文本，单色（bit0 = 80 列） */
-    VMODE_TEXT40C     = 2,  /* 40x25 文本，彩色 */
-    VMODE_TEXT80C     = 3,  /* 80x25 文本，彩色 */
-    VMODE_TEXT_LAST   = VMODE_TEXT80C,
-    VMODE_G320x200x4  = 4,  /* 320x200 4 色（模式 4） */
-    VMODE_G320x200x2  = 5,  /* 320x200 单色（模式 5） */
-    VMODE_G640x200x2  = 6,  /* 640x200 单色（模式 6） */
-    /* VAXmate 专有模式 */
-    VMODE_G320x200x16 = 7,  /* 320x200 16 色 */
-    VMODE_G640x200x4  = 8,  /* 640x200 4 色 */
-    VMODE_G640x400x2  = 9,  /* D0：640x400 2 色 */
-    VMODE_G640x400x4  = 10, /* D1：640x400 4 色 */
-    VMODE_G800x252x4  = 11  /* D2：800x250 4 色 */
+    /* 编号即控制寄存器 A 的 {bit4, bit1, bit0} 三个模式位（TRM 表 7-11 的 A2 A1 A0）。
+       bit3 是显示使能、bit2 恒 0，都不参与编码。BIOS 的 D0/D1/D2 只是这些码位的别名。 */
+    VMODE_TEXT40      = 0,  /* 000：40x25 文本 */
+    VMODE_TEXT80      = 1,  /* 001：80x25 文本 */
+    VMODE_TEXT_LAST   = VMODE_TEXT80,
+    VMODE_G320x200x4  = 2,  /* 010：320x200 4 色 */
+    VMODE_G320x200x16 = 3,  /* 011：320x200 16 色 */
+    VMODE_G640x400x2  = 4,  /* 100：640x400 2 色（BIOS 模式 D0） */
+    VMODE_G640x200x4  = 5,  /* 101：640x200 4 色 */
+    VMODE_G640x200x2  = 6,  /* 110：640x200 2 色（BIOS 模式 6） */
+    VMODE_G640x400x4  = 7,  /* 111：640x400 4 色（BIOS 模式 D1） */
+    VMODE_G800x252x4  = 8   /* 111 + control B bit7：800x250 4 色（BIOS 模式 D2） */
 };
 
 /* Control register B (03DF) */
@@ -100,7 +97,6 @@ enum {
 /* Control register A (03D8) */
 #define CTLA_BLINK        0x20
 #define CTLA_DISPLAY_EN   0x08
-#define CTLA_MODE_MASK    0x07
 
 
 /* Status register A (03DA) */
@@ -269,20 +265,13 @@ vaxmate_video_recalctimings(vaxmate_video_t *vid)
 static int
 vaxmate_video_mode(vaxmate_video_t *vid)
 {
-    int mode = vid->ctrl_a & CTLA_MODE_MASK;
+    int code = ((vid->ctrl_a & 0x10) >> 1) | (vid->ctrl_a & 0x03);
 
-    /* 扩展模式（control A 的 bit4 置位，低 3 位是扩展模式号）：
-       0xD0 -> 10h/18h，640x400 2 色；
-       0xD1 -> 13h/1Bh，640x400 4 色；0xD2 用同值，靠 control B 的 252 行位区分。 */
-    if ((vid->ctrl_a & 0x17) == 0x10)
-        return VMODE_G640x400x2;
-    if ((vid->ctrl_a & 0x17) == 0x13)
+    /* 111 一档由 control B 的 252 行位再分成 D1 / D2。 */
+    if (code == 7)
         return (vid->ctrl_b & CTLB_MONITOR252) ? VMODE_G800x252x4 : VMODE_G640x400x4;
 
-    if (mode == 7)
-        return (vid->ctrl_b & CTLB_MONITOR252) ? VMODE_G800x252x4 : VMODE_G320x200x16;
-
-    return mode;
+    return code;
 }
 
 /* Text buffer <-> font RAM/VLT shadowing, TRM pages 7-15 and 7-30:
@@ -364,19 +353,16 @@ typedef struct {
     uint8_t  bpp;      /* bits per pixel                 */
 } vaxmate_gfx_t;
 
-static const vaxmate_gfx_t vaxmate_modes[12] = {
-    /* 0  40x25 text mono  */ { 640, 400, 80, 1, 0x2000, 0xb8000, 0 },
-    /* 1  80x25 text mono  */ { 640, 400, 160, 1, 0x2000, 0xb8000, 0 },
-    /* 2  40x25 text color */ { 640, 400, 80, 1, 0x2000, 0xb8000, 0 },
-    /* 3  80x25 text color */ { 640, 400, 160, 1, 0x2000, 0xb8000, 0 },
-    /* 4  320x200 4-color  */ { 320, 200, 80, 2, 0x2000, 0xb8000, 2 },
-    /* 5  320x200 mono     */ { 320, 200, 80, 1, 0x2000, 0xb8000, 1 },
-    /* 6  640x200 2-color  */ { 640, 200, 80, 2, 0x2000, 0xb8000, 1 },
-    /* 7  320x200 16-color */ { 320, 200, 160, 4, 0x2000, 0xb8000, 4 },
-    /* 8  640x200 4-color  */ { 640, 200, 160, 2, 0x4000, 0xb8000, 2 },
-    /* 9  D0 640x400 2-col */ { 640, 400, 80, 4, 0x2000, 0xb8000, 1 },
-    /* 10 D1 640x400 4-col */ { 640, 400, 160, 4, 0x4000, 0xb0000, 2 },
-    /* 11 D2 800x250 4-col */ { 800, 250, 200, 4, 0x4000, 0xb0000, 2 },
+static const vaxmate_gfx_t vaxmate_modes[9] = {
+    /* 000 40x25 text      */ { 640, 400, 80, 1, 0x2000, 0xb8000, 0 },
+    /* 001 80x25 text      */ { 640, 400, 160, 1, 0x2000, 0xb8000, 0 },
+    /* 010 320x200 4-color */ { 320, 200, 80, 2, 0x2000, 0xb8000, 2 },
+    /* 011 320x200 16-color*/ { 320, 200, 160, 4, 0x2000, 0xb8000, 4 },
+    /* 100 D0 640x400 2-col*/ { 640, 400, 80, 4, 0x2000, 0xb8000, 1 },
+    /* 101 640x200 4-color */ { 640, 200, 160, 2, 0x4000, 0xb8000, 2 },
+    /* 110 640x200 2-color */ { 640, 200, 80, 2, 0x2000, 0xb8000, 1 },
+    /* 111 D1 640x400 4-col*/ { 640, 400, 160, 4, 0x4000, 0xb0000, 2 },
+    /* 111 D2 800x250 4-col*/ { 800, 250, 200, 4, 0x4000, 0xb0000, 2 },
 };
 
 static void
@@ -524,7 +510,7 @@ vaxmate_font_lazy_load(vaxmate_video_t *vid)
 static int
 vaxmate_text_cols(vaxmate_video_t *vid)
 {
-    return ((vid->mode == VMODE_TEXT40) || (vid->mode == VMODE_TEXT40C)) ? 40 : 80;
+    return (vid->mode == VMODE_TEXT40) ? 40 : 80;
 }
 
 static void
@@ -910,7 +896,7 @@ vaxmate_video_init(UNUSED(const device_t *info))
     video_inform(VIDEO_FLAG_TYPE_MDA, &timing_vaxmate);
 
     vid->monitor_index = monitor_index_global;
-    vid->ctrl_a        = CTLA_DISPLAY_EN | VMODE_TEXT80;   /* 80x25 文本，模式号 2 */
+    vid->ctrl_a        = CTLA_DISPLAY_EN | VMODE_TEXT80;   /* 09h：80x25 文本 */
     vid->ctrl_b        = CTLB_DISPLAY_EN | CTLB_SAVER;
     vid->mode          = VMODE_TEXT80;
     vid->spr           = SPR_DISABLE_VIDEO; /* video enabled at power-on */
