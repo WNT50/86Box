@@ -477,6 +477,15 @@ inb(uint16_t port)
     io_cycle = 0;
     io_log("[%04X:%08X] (%i, %i, %04i) in b(%04X) = %02X\n", CS, cpu_state.pc, in_smm, found, qfound, port, ret);
 
+    /* PCX_IOTRACE=1: what the guest polls in the I/O window while it waits. */
+    if ((port >= 0xf800) && (port <= 0xf9ff) && (getenv("PCX_IOTRACE") != NULL)) {
+        static long it_n;
+
+        if (it_n++ < 4000)
+            pclog("[IOR] %04X <- %02X @%04X:%04X\n", port, ret,
+                  (uint16_t) CS, (uint16_t) cpu_state.pc);
+    }
+
     if ((port & 0xfff8) == 0x0200)
         fdc37mx0x_watchdog_reset_ext(0);
 

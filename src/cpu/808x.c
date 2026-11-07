@@ -19,6 +19,8 @@
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdlib.h>
+
+extern void pic_pcx_dump(const char *tag);
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -3966,6 +3968,28 @@ execx86(int cycs)
         }
 
         execx86_instruction();
+
+        /* PCX_PICSNAP=1: snapshot both 8259s where the installer waits. */
+        if (getenv("PCX_PICSNAP") && ((uint16_t) CS == 0x110E) &&
+            ((uint16_t) cpu_state.pc == 0x36AB)) {
+            static long ps_n;
+
+            if (ps_n++ < 10)
+                pic_pcx_dump("at 110E:36AB");
+        }
+
+        /* PCX_DEVSCAN=1: the SINIX installer's device-table scan. */
+        if (getenv("PCX_DEVSCAN") && ((uint16_t) CS == 0x1000) &&
+            ((uint16_t) cpu_state.pc == 0x0428)) {
+            static long dv_n;
+
+            if (dv_n++ < 40)
+                pclog("[DEVSCAN] #%ld ds=%04X tbl=%04X idx=%04X:%04X hi=%04X\n",
+                      dv_n, (uint16_t) cpu_state.seg_ds.seg,
+                      readmemw(cpu_state.seg_ds.seg, 0x1b20),
+                      readmemw(0x0000, 0xf83a), readmemw(0x0000, 0xf83c),
+                      readmemw(0x0000, 0xf838));
+        }
 
         /* PCX_PCHIST=1: per-instruction 16-byte page histogram of ROM code. */
         {

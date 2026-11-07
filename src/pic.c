@@ -55,6 +55,17 @@ pic_t pic;
 pic_t pic2;
 int cascade = 0;
 
+/* Snapshot of both 8259s, for diagnosing a guest that sits in an interrupt
+   wait: IMR says what is masked, IRR what is asking, ISR what is running. */
+void
+pic_pcx_dump(const char *tag)
+{
+    pclog("[PICSNAP] %s pic1 imr=%02X isr=%02X irr=%02X pend=%02X | "
+          "pic2 imr=%02X isr=%02X irr=%02X pend=%02X\n",
+          tag, pic.imr, pic.isr, pic.irr, pic.int_pending,
+          pic2.imr, pic2.isr, pic2.irr, pic2.int_pending);
+}
+
 static int shadow = 0;
 static int tmr_inited = 0;
 static int elcr_enabled = 0;

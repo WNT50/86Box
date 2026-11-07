@@ -118,6 +118,7 @@ typedef struct scsi_sm912_t {
     int               target_present;
     int               irq_level;
     int               pio_used;   /* the host moved bytes through the data port */
+    int               req;        /* REQ line: a byte waits in the data register */
 
     scsi_sm912_irq_t  irq;
     void             *irq_priv;
@@ -129,7 +130,7 @@ scsi_sm912_update_irq(scsi_sm912_t *dev)
     int level = 0;
 
     /* IO && CD && REQ: a status or message byte is waiting for the host. */
-    if ((dev->phase == SM912_STATUS) || (dev->phase == SM912_MSGIN))
+    if (((dev->phase == SM912_STATUS) || (dev->phase == SM912_MSGIN)) && dev->req)
         level = 1;
 
     if (level == dev->irq_level)
@@ -222,6 +223,7 @@ scsi_sm912_dma_pump(scsi_sm912_t *dev)
             scsi_device_command_phase1(dev->sd);
             dev->status_byte = dev->sd->status;
             dev->phase       = SM912_STATUS;
+            dev->req         = 1;
             scsi_sm912_log("[SM912] dma data-in done %u\n", dev->data_pos);
         }
     } else if (dev->phase == SM912_DATAOUT) {
@@ -280,7 +282,7 @@ scsi_sm912_status(scsi_sm912_t *dev)
         case SM912_DATAOUT:
         case SM912_STATUS:
         case SM912_MSGIN:
-            ret = SM912_ST_BSY | SM912_ST_REQ;
+            ret = SM912_ST_BSY | (dev->req ? SM912_ST_REQ : 0);
             if ((dev->phase == SM912_CMD) || (dev->phase == SM912_STATUS) ||
                 (dev->phase == SM912_MSGIN))
                 ret |= SM912_ST_CD;
@@ -361,6 +363,7 @@ scsi_sm912_execute(scsi_sm912_t *dev)
             if (dev->sd->phase == SCSI_PHASE_DATA_IN) {
                 sc->buffer_pos = 0;
                 dev->phase     = SM912_DATAIN;
+                dev->req       = 1;
                 scsi_sm912_update_irq(dev);
                 return;
             }
@@ -481,14 +484,18 @@ scsi_sm912_data_read(scsi_sm912_t *dev)
                must not consume a second time. */
             if (sm912_dma_used)
                 return 0x00;
+            dev->req = 0;
             if ((sc != NULL) && (sc->temp_buffer != NULL) &&
                 (dev->data_pos < (uint32_t) dev->sd->buffer_length))
                 ret = sc->temp_buffer[dev->data_pos++];
+            if (dev->data_pos < (uint32_t) dev->sd->buffer_length)
+                dev->req = 1;
             if ((sc == NULL) || (dev->data_pos >= (uint32_t) dev->sd->buffer_length)) {
                 if (dev->sd != NULL)
                     scsi_device_command_phase1(dev->sd);
                 dev->status_byte = (dev->sd != NULL) ? dev->sd->status : 0x02;
                 dev->phase       = SM912_STATUS;
+                dev->req         = 1;
                 scsi_sm912_log("[SM912] data-in %u/%u byte(s)\n", dev->data_pos,
                                (dev->sd != NULL) ? (unsigned) dev->sd->buffer_length : 0);
             }
@@ -499,7 +506,8 @@ scsi_sm912_data_read(scsi_sm912_t *dev)
                drops BSY (MAME: write_scsi_req() reads the data register and
                raises ACK without the CPU).  Waiting for the host to read the
                message leaves BSY up and the driver resets the bus. */
-            ret = dev->status_byte;
+            ret      = dev->status_byte;
+            dev->req = 0;
             {
                 static int autoack = -1;
                 if (autoack < 0)
@@ -509,6 +517,7 @@ scsi_sm912_data_read(scsi_sm912_t *dev)
                 } else {
                     dev->message_byte = 0x00;   /* COMMAND COMPLETE */
                     dev->phase    = SM912_MSGIN;
+                    dev->req      = 1;
                 }
                 /* The line follows the phase: leaving it high after the status
                    byte made the driver treat the command as still in progress
@@ -527,6 +536,7 @@ scsi_sm912_data_read(scsi_sm912_t *dev)
             break;
         case SM912_MSGIN:
             ret        = dev->message_byte;
+            dev->req   = 0;
             dev->phase = SM912_IDLE;
             scsi_sm912_update_irq(dev);
             if (getenv("PCX_SCSILOG") != NULL)
