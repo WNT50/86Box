@@ -63,6 +63,8 @@ extern volatile int fdcinited;
 /* BIOS: two 8 KB halves of one 16-bit ROM.  The low byte half (.d43) is at
    even addresses, the high byte half (.d42) at odd addresses -- exactly what
    bios_load_interleaved() wants, first argument is the even one. */
+#define PCD_BIOS_LOW      "roms/machines/pcd/361d0359.d43"
+#define PCD_BIOS_HIGH     "roms/machines/pcd/361d0359.d42"
 #define PCX_BIOS_LOW      "roms/machines/pcx/361d0359.d43"
 #define PCX_BIOS_HIGH     "roms/machines/pcx/361d0359.d42"
 #define PCX_BIOS_ADDR     0x000fc000
@@ -782,8 +784,13 @@ machine_pcx_init_ex(const machine_t *model)
 {
     int ret;
 
-    /* 16 KB BIOS, assembled from the two 8 KB halves of the MAME dump. */
-    ret = bios_load_interleaved(PCX_BIOS_LOW, PCX_BIOS_HIGH, PCX_BIOS_ADDR, PCX_BIOS_SIZE, 0);
+    /* 16 KB BIOS, assembled from the two 8 KB halves of the MAME dump.  The
+       two machines keep their own set: the ROM is the same dump today, but
+       keeping the paths apart means a machine-specific build can be dropped
+       into its own directory without touching the other one. */
+    ret = bios_load_interleaved(pcx_is_pcd ? PCD_BIOS_LOW : PCX_BIOS_LOW,
+                                pcx_is_pcd ? PCD_BIOS_HIGH : PCX_BIOS_HIGH,
+                                PCX_BIOS_ADDR, PCX_BIOS_SIZE, 0);
 
     if (bios_only || !ret)
         return ret;
