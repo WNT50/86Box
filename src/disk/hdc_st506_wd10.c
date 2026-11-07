@@ -743,10 +743,33 @@ wd10_hdc_ctrl_w(UNUSED(uint16_t addr), uint8_t val, void *priv)
         wd10_hdc_irq_update(dev);
 }
 
+/* Reading the alternate status register returns the same byte as status
+   register but leaves INTRQ alone. Left unhandled the port reads back
+   FFh, whose BUSY bit never clears. */
 static uint8_t
 wd10_hdc_status_r(UNUSED(uint16_t addr), void *priv)
 {
     return ((wd10_hdc_t *) priv)->status;
+}
+
+/* 3F7h is a shared port. The diskette controller drives the media change bit and
+   leaves the other seven high, so those belong to this board; EK-PC500-TD 6.5.3.3
+   gives them as the complemented write gate, head select and drive select levels,
+   so an asserted line reads back as zero. Bit layout follows the WD1003 adapter:
+   0-2 head select, 3 drive select, 4 write gate, 5-6 unused. */
+static uint8_t
+wd10_hdc_dir_r(UNUSED(uint16_t addr), void *priv)
+{
+    wd10_hdc_t *dev = (wd10_hdc_t *) priv;
+    uint8_t     dir = 0x7f;
+
+    dir &= ~(dev->sdh & 0x07);
+    if (dev->sdh & 0x10)
+        dir &= ~0x08;
+    if (dev->state == STATE_WRITE_WAIT)
+        dir &= ~0x10;
+
+    return (dir | 0x80);
 }
 
 static void
@@ -784,9 +807,9 @@ wd10_hdc_init(const device_t *info)
     }
 
     if (dev->local) {
-        io_sethandler(0x03f6, 0x0001, NULL, NULL, NULL,
+        io_sethandler(0x03f6, 0x0001, wd10_hdc_status_r, NULL, NULL,
                       wd10_hdc_ctrl_w, NULL, NULL, dev);
-        io_sethandler(0x03f7, 0x0001, wd10_hdc_status_r, NULL, NULL,
+        io_sethandler(0x03f7, 0x0001, wd10_hdc_dir_r, NULL, NULL,
                       NULL, NULL, NULL, dev);
 
         io_sethandler(0x01f0, 0x0001, wd10_hdc_read, wd10_hdc_readw, NULL,
