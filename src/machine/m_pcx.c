@@ -1007,15 +1007,13 @@ machine_pcx_init_ex(const machine_t *model)
     pcx.usart[1] = device_add_inst_params(&scn2661b_device, 2, (void *) (intptr_t) SERIAL_PORT_NONE); /* no connector */
     scn26x1_set_irq(pcx.usart[1], 1 << 2);
     keyboard_set_input_handler(pcx_kbd_host, NULL);
-    /* On the PC-X the second USART is the line the keyboard hangs off; on the
-       PC-D that job belongs to the 8741 on the video board, so the part is a
-       plain hidden USART there. */
-    if (pcx_is_pcd)
-        io_sethandler(PCX_USART2_PORT, 0x0004, pcx_usart2_read, NULL, NULL,
-                      scn26x1_write, NULL, NULL, pcx.usart[1]);
-    else
-        io_sethandler(PCX_USART2_PORT, 0x0004, pcx_usart2_read, NULL, NULL,
-                      pcx_kbd_usart_write, NULL, NULL, pcx.usart[1]);
+    /* Both machines reach the keyboard through the second USART: the PC-D's
+       Graphik-BIOS (loaded into RAM at 0x7000) sends its presence query from
+       segment 0x0070, the PC-X terminal does it from its own board.  The 8741
+       on the PC-D video board is not on this path -- its mailbox at 0xf9b0 is
+       never touched by that BIOS. */
+    io_sethandler(PCX_USART2_PORT, 0x0004, pcx_usart2_read, NULL, NULL,
+                  pcx_kbd_usart_write, NULL, NULL, pcx.usart[1]);
 
     pcx.usart[2] = device_add_inst_params(&scn2661b_device, 3, (void *) (intptr_t) 1);              /* reserve -> COM2 */
     scn26x1_set_irq(pcx.usart[2], 1 << 4);
