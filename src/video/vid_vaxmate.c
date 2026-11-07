@@ -74,8 +74,8 @@ enum {
 enum {
     /* 标准模式，编号即控制寄存器 A 的 3 位模式号（TRM 1.2.2.2） */
     VMODE_TEXT40      = 0,  /* 40x25 文本，单色 */
-    VMODE_TEXT40C     = 1,  /* 40x25 文本，彩色 */
-    VMODE_TEXT80      = 2,  /* 80x25 文本，单色 */
+    VMODE_TEXT80      = 1,  /* 80x25 文本，单色（bit0 = 80 列） */
+    VMODE_TEXT40C     = 2,  /* 40x25 文本，彩色 */
     VMODE_TEXT80C     = 3,  /* 80x25 文本，彩色 */
     VMODE_TEXT_LAST   = VMODE_TEXT80C,
     VMODE_G320x200x4  = 4,  /* 320x200 4 色（模式 4） */
@@ -101,6 +101,7 @@ enum {
 #define CTLA_BLINK        0x20
 #define CTLA_DISPLAY_EN   0x08
 #define CTLA_MODE_MASK    0x07
+
 
 /* Status register A (03DA) */
 #define STATA_DISPENSE    0x01
@@ -365,8 +366,8 @@ typedef struct {
 
 static const vaxmate_gfx_t vaxmate_modes[12] = {
     /* 0  40x25 text mono  */ { 640, 400, 80, 1, 0x2000, 0xb8000, 0 },
-    /* 1  40x25 text color */ { 640, 400, 80, 1, 0x2000, 0xb8000, 0 },
-    /* 2  80x25 text mono  */ { 640, 400, 160, 1, 0x2000, 0xb8000, 0 },
+    /* 1  80x25 text mono  */ { 640, 400, 160, 1, 0x2000, 0xb8000, 0 },
+    /* 2  40x25 text color */ { 640, 400, 80, 1, 0x2000, 0xb8000, 0 },
     /* 3  80x25 text color */ { 640, 400, 160, 1, 0x2000, 0xb8000, 0 },
     /* 4  320x200 4-color  */ { 320, 200, 80, 2, 0x2000, 0xb8000, 2 },
     /* 5  320x200 mono     */ { 320, 200, 80, 1, 0x2000, 0xb8000, 1 },
@@ -517,10 +518,19 @@ vaxmate_font_lazy_load(vaxmate_video_t *vid)
     loaded = 1;
 }
 
+/* 列数由模式号决定：实测 control A 的低 3 位是 DEC 自己的编码（bit0 = 80 列），
+   不是 BIOS 模式号——BIOS 在整个 80 列 DOS 会话里写的一直是模式 1
+   （BDA 0040:044A = 0x50，文字缓冲 160 字节/行）。 */
+static int
+vaxmate_text_cols(vaxmate_video_t *vid)
+{
+    return ((vid->mode == VMODE_TEXT40) || (vid->mode == VMODE_TEXT40C)) ? 40 : 80;
+}
+
 static void
 vaxmate_video_render_text(vaxmate_video_t *vid, int line)
 {
-    int      cols = ((vid->mode == VMODE_TEXT40) || (vid->mode == VMODE_TEXT40C)) ? 40 : 80;
+    int      cols = vaxmate_text_cols(vid);
 
     vaxmate_font_lazy_load(vid);
     int      cw   = (cols == 40) ? 16 : 8;  /* 40-column modes: 16-dot cells */
@@ -680,8 +690,7 @@ vaxmate_video_poll(void *priv)
         start = ((vid->crtc[CRTC_STARTHI] & 0x3f) << 8) | vid->crtc[CRTC_STARTLO];
 
         vid->scanline = sub;
-        vid->memaddr  = start + (row * (((vid->mode == VMODE_TEXT40) ||
-                                         (vid->mode == VMODE_TEXT40C)) ? 40 : 80));
+        vid->memaddr  = start + (row * (vaxmate_text_cols(vid) == 40 ? 40 : 80));
 
         if (vid->mode <= VMODE_TEXT_LAST)
             vaxmate_video_render_text(vid, vid->displine);
