@@ -3859,6 +3859,10 @@ d86f_load(void *priv, char *fn)
     if (fread(&(dev->version), 1, 2, dev->fp) != 2)
         fatal("d86f_load(): Error reading format version\n");
 
+    if (getenv("PCX_FDCLOG") != NULL)
+        pclog("[86FLOAD] drv=%d fn=%s size=%u ver=%04X\n", drv->id, fn,
+              (unsigned) len, dev->version);
+
     if (dev->version != D86FVER) {
         /* File is not of a recognized format version, abort. */
 #ifdef ENABLE_D86F_LOG

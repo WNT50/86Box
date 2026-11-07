@@ -18,6 +18,7 @@
 #include <math.h>
 #include <stdarg.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -467,6 +468,20 @@ readmemq(uint32_t s, uint16_t a)
 static void
 writememb(uint32_t s, uint32_t a, uint8_t v)
 {
+    /* PCX_WATCH_ADDR=<linear>: log CPU writes to one address with the writer. */
+    {
+        static long wa = -2;
+
+        if (wa == -2) {
+            const char *e = getenv("PCX_WATCH_ADDR");
+            wa = e ? strtol(e, NULL, 0) : -1;
+        }
+        if ((wa >= 0) && ((long) (s + a) == wa))
+            pclog("[WC] %05X=%02X cs=%04X ip=%04X ds=%04X es=%04X si=%04X di=%04X\n",
+                  s + a, v, (uint16_t) CS, (uint16_t) cpu_state.oldpc,
+                  (uint16_t) DS, (uint16_t) ES, (uint16_t) SI, (uint16_t) DI);
+    }
+
     if (is_new_biu)
         writememb_vx0(s, a, v);
     else {
@@ -1348,8 +1363,25 @@ check_interrupts(int nec_hlt)
 {
     int temp;
     int     i_flag = (cpu_state.flags & I_FLAG) || nec_hlt;
+    int     pend   = irq_pending(nec_hlt);
+    int     inloop = ((uint16_t) CS == 0xFC00) && ((uint16_t) cpu_state.pc >= 0x0800) &&
+                     ((uint16_t) cpu_state.pc <= 0x0840);
 
-    if (irq_pending(nec_hlt)) {
+    if (pend && inloop) {
+        static int qn;
+        if (qn < 30) {
+            qn++;
+            pclog("[LOOP] pc=%04X pending=1 iflag=%d\n",
+                  (uint16_t) cpu_state.pc, (cpu_state.flags & I_FLAG) ? 1 : 0);
+        }
+    } else if (!pend && inloop) {
+        static long qm;
+        if ((++qm % 20000) == 1)
+            pclog("[LOOP] pc=%04X pending=0 iflag=%d (checks=%ld)\n",
+                  (uint16_t) cpu_state.pc, (cpu_state.flags & I_FLAG) ? 1 : 0, qm);
+    }
+
+    if (pend) {
         if ((cpu_state.flags & T_FLAG) && (is80c88 ? !noint : !(noint & 1))) {
             interrupt(1);
             return;
@@ -1396,6 +1428,37 @@ check_interrupts(int nec_hlt)
             /* Here is where temp should be filled, but we cheat. */
             wait_cycs(3, 0);
             opcode = 0x00;
+            /* PCX_IRQCOUNT=1: histogram of delivered vectors, plus a line each
+               time the 0x081a-0x082d wait loop is interrupted. */
+            {
+                static int      q_on = -1;
+                static long     q_total;
+                static uint32_t q_hist[256];
+
+                if (q_on < 0)
+                    q_on = (getenv("PCX_IRQCOUNT") != NULL);
+                if (q_on) {
+                    q_total++;
+                    q_hist[temp & 0xff]++;
+                    if (((uint16_t) CS == 0xFC00) && ((uint16_t) cpu_state.pc >= 0x081a) &&
+                        ((uint16_t) cpu_state.pc <= 0x082d))
+                        pclog("[IRQLOOP] vec=%02X at %04X:%04X total=%ld\n",
+                              temp & 0xff, (uint16_t) CS, (uint16_t) cpu_state.pc, q_total);
+                    if (q_total <= 3000)
+                        pclog("[IRQ] #%ld vec=%02X at %04X:%04X ax=%04X bx=%04X cx=%04X\n",
+                              q_total, temp & 0xff, (uint16_t) CS,
+                              (uint16_t) cpu_state.pc, (uint16_t) AX,
+                              (uint16_t) BX, (uint16_t) CX);
+                    if ((q_total % 2000) == 0) {
+                        int k;
+                        pclog("[IRQSUM] total=%ld", q_total);
+                        for (k = 0; k < 256; k++)
+                            if (q_hist[k])
+                                pclog(" %02X:%lu", k, (unsigned long) q_hist[k]);
+                        pclog("\n");
+                    }
+                }
+            }
             interrupt(temp);
         }
     }
@@ -2102,7 +2165,7 @@ pcx_ring_dump(void)
           (uint16_t) cpu_state.regs[0].w, (uint16_t) cpu_state.regs[3].w,
           (uint16_t) cpu_state.regs[1].w, (uint16_t) cpu_state.regs[2].w,
           (uint16_t) cpu_state.regs[6].w, (uint16_t) cpu_state.regs[7].w,
-          (uint16_t) cpu_state.regs[5].w, (uint16_t) cpu_state.regs[4].w,
+          (uint16_t) cpu_state.regs[5].w, (uint16_t) SP,
           (uint16_t) cpu_state.seg_cs.seg, (uint16_t) cpu_state.seg_ds.seg,
           (uint16_t) cpu_state.seg_es.seg, (uint16_t) cpu_state.seg_ss.seg);
     for (i = 0; i < n; i++) {
@@ -2126,120 +2189,150 @@ execx86_instruction(void)
 
     completed = 1;
 
-    /* PCX_AXHIT=1: catch the moment AX holds PCX_AXVAL (default 352) and dump
-       the surrounding code through the MMU. */
+    /* PCX_PANIC=1: catch the DOS loader's abort helper and print who called it. */
     {
-        static int a_on = -1, a_done;
-        static unsigned a_val;
+        static int      p_on = -1;
+        static uint16_t hist[16];
+        static int      hn;
 
-        if (a_on < 0) {
-            const char *e = getenv("PCX_AXHIT");
-            a_on = e ? 1 : 0;
-            a_val = 352;
-            if (e != NULL)
-                a_val = (unsigned) strtoul(e, NULL, 0);
-        }
-        if (a_on && !a_done && (plat_get_ticks() > 8000u) &&
-            (cpu_state.regs[0].w == a_val)) {
-            uint32_t log = ((uint32_t) CS << 4) + (uint16_t) cpu_state.pc;
+        if (p_on < 0)
+            p_on = (getenv("PCX_PANIC") != NULL);
+        if (p_on) {
+            static int      entries;
+            static uint16_t last_cs, last_pc;
+            int             inside = (((uint16_t) CS == 0x0070) && ((uint16_t) cpu_state.pc >= 0x6300) && ((uint16_t) cpu_state.pc <= 0x63ff));
+            int             was    = ((last_cs == 0x0070) && (last_pc >= 0x6300) && (last_pc <= 0x63ff));
 
-            a_done = 1;
-            pclog("[AXHIT] AX=%04X at %04X:%04X\n",
-                  (uint16_t) a_val, (uint16_t) CS, (uint16_t) cpu_state.pc);
-            pcx_dump_code(log - 48, 112, "ax-hit");
+            if (inside && !was && (entries < 4)) {
+                int i;
+
+                entries++;
+                pclog("[PENTRY] %d from %04X:%04X ss:sp=%04X:%04X\n", entries,
+                      last_cs, last_pc, (uint16_t) SS, (uint16_t) SP);
+                for (i = 1; i <= 12; i++)
+                    pclog("  hist %02d %04X\n", i, hist[(hn - i) & 15]);
+                for (i = 0; i < 6; i++)
+                    pclog("  stk %02d %04X\n", i, readmemw(SS, (uint16_t) SP + (i * 2)));
+            }
+
+            /* The mode check: cmp byte [0x402],2 -- log DS and the byte it sees. */
+            if (((uint16_t) CS == 0x0070) && ((uint16_t) cpu_state.pc == 0x5cb0) && (entries < 8)) {
+                entries++;
+                pclog("[MODE] ds=%04X [ds:402]=%02X ss:sp=%04X:%04X ret=%04X:%04X\n",
+                      (uint16_t) cpu_state.seg_ds.seg, readmemb(cpu_state.seg_ds.seg, 0x402),
+                      (uint16_t) SS, (uint16_t) SP,
+                      readmemw(SS, (uint16_t) SP + 2), readmemw(SS, (uint16_t) SP));
+            }
+            hist[hn++ & 15] = (uint16_t) cpu_state.pc;
+            last_cs = (uint16_t) CS;
+            last_pc = (uint16_t) cpu_state.pc;
         }
     }
 
-    /* PCX_W6424=1: watch the kernel's free-page counter and report the
-       instruction that first changes it. */
+    /* PCX_SCANLOG=1: log the floppy-probe return value (call 0x1cfc / 0x1d0d). */
     {
-        static int w_on = -1, w_last = -1, w_hits;
-        static unsigned w_tick;
+        static int s_on = -1;
+        static long exec_n;
 
-        if (w_on < 0)
-            w_on = getenv("PCX_W6424") ? 1 : 0;
-        if (w_on && (w_hits < 40) && ((++w_tick & 31u) == 0)) {
-            uint32_t a = 0x6424u;
-            int      v;
+        if (getenv("PCX_EXECLOG") && ((++exec_n % 5000000) == 0))
+            pclog("[EXEC] n=%ld at %04X:%04X\n", exec_n, (uint16_t) CS,
+                  (uint16_t) cpu_state.pc);
 
-            if (mem_machine_translate != NULL)
-                a = mem_machine_translate(a, 0);
-            v = readmembl(a) | (readmembl(a + 1) << 8);
-            if ((v != w_last) && ((uint16_t) CS < 0xf000u)) {
-                static int peak = -1, fell;
+        if (s_on < 0)
+            s_on = (getenv("PCX_SCANLOG") != NULL);
+        /* PCX_LOOPLOG=1: watch the POST's IVT clear/verify loop (V2 0x0598-0x05BF). */
+        if (getenv("PCX_LOOPLOG") && ((uint16_t) CS == 0xFC00)) {
+            static long l_clr, l_ver, l_bad;
 
-                if (v == 0)
-                    peak = 0;
-                else if (v > peak)
-                    peak = v;
-                if ((w_last > 0) && (v > 0) && (v < w_last)) {
-                    if (!fell) {
-                        fell = 1;
-                        pclog("[W6424] peak %d, first drop to %d at %04X:%04X\n",
-                              peak, v, (uint16_t) CS, (uint16_t) cpu_state.pc);
-                        pcx_dump_code((((uint32_t) CS) << 4) +
-                                      (uint16_t) cpu_state.pc - 80, 176, "alloc");
-                    }
-                    if (w_hits < 40) {
-                        pclog("[W6424] %d -> %d (%d pages) at %04X:%04X\n",
-                              w_last, v, w_last - v, (uint16_t) CS,
-                              (uint16_t) cpu_state.pc);
-                        w_hits++;
-                    }
-                }
-                w_last = v;
+            if ((uint16_t) cpu_state.pc == 0x05ad) {
+                l_clr++;
+                if ((l_clr % 200) == 1)
+                    pclog("[LOOPC] clear passes=%ld verify=%ld bad=%ld\n",
+                          l_clr, l_ver, l_bad);
+            } else if ((uint16_t) cpu_state.pc == 0x05af) {
+                l_ver++;
+            } else if ((uint16_t) cpu_state.pc == 0x05c6) {
+                static long l_out;
+                if ((++l_out <= 12) || ((l_out % 200) == 0))
+                    pclog("[LOOPO] test done #%ld ax=%04X\n", l_out, (uint16_t) AX);
+            } else if (((uint16_t) cpu_state.pc == 0x05b2) && (l_bad < 12)) {
+                l_bad++;
+                pclog("[LOOPB] mismatch di=%04X val=%04X want=%04X es=%04X\n",
+                      (uint16_t) cpu_state.regs[7].w,
+                      (uint16_t) cpu_state.regs[0].w, 0,
+                      (uint16_t) cpu_state.seg_es.seg);
             }
         }
-    }
-
-    /* PCX_RING=1: record it; pcx_ring_dump() is called from the video model. */
-    {
-        static int r_on = -1;
-
-        if (r_on < 0)
-            r_on = getenv("PCX_RING") ? 1 : 0;
-        if (r_on) {
-            static int hit;
-
-            pcx_ring[pcx_ring_pos % PCX_RING_SIZE].rcs = (uint16_t) CS;
-            pcx_ring[pcx_ring_pos % PCX_RING_SIZE].rip = (uint16_t) cpu_state.pc;
-            pcx_ring_pos++;
+        if (s_on &&
+            (((uint16_t) cpu_state.pc == 0x00cd) || ((uint16_t) cpu_state.pc == 0x00a4) ||
+             ((uint16_t) cpu_state.pc == 0x00f6))) {
+            pclog("[SCAN] cs=%04X ret at %04X -> AX=%04X [0x40c]=%04X\n",
+                  (uint16_t) CS, (uint16_t) cpu_state.pc, (uint16_t) AX,
+                  readmemw(0x0000, 0x040c));
         }
     }
 
-    /* PCX_SSLOG=1: every change of SS, so a lost segment shows up. */
+    /* PCX_PCTRACE=1: opcode stream after the console byte is read. */
     {
-        static int sl = -1;
-        static uint16_t last_ss = 0xFFFF;
+        extern volatile int pcx_trace_req;
+        extern volatile int pcx_trace_n;
 
-        if (sl < 0)
-            sl = getenv("PCX_SSLOG") ? 1 : 0;
-        if (sl && (last_ss != cpu_state.seg_ss.seg)) {
-            pclog("[SS] %04X -> %04X at %04X:%04X SP=%04X\n",
-                  last_ss, cpu_state.seg_ss.seg, CS, cpu_state.pc, SP);
-            last_ss = cpu_state.seg_ss.seg;
-        }
-    }
+        extern volatile int pcx_trace_cs;
 
-    /* PCX_REGS=1: the state the moment control lands in the loader's buffer. */
-    {
-        static int rr = -1, shown;
+        if (pcx_trace_req && (pcx_trace_n < 20000) &&
+            ((pcx_trace_cs < 0) || ((uint16_t) CS == (uint16_t) pcx_trace_cs))) {
+            pclog("[OP] %04X:%04X op=%02X ax=%04X dx=%04X si=%04X di=%04X\n",
+                  (uint16_t) CS, (uint16_t) cpu_state.oldpc, (uint8_t) opcode,
+                  cpu_state.regs[0].w, cpu_state.regs[2].w,
+                  cpu_state.regs[6].w, cpu_state.regs[7].w);
+            pcx_trace_n++;
+            if ((cpu_state.seg_cs.seg == 0x151e) && ((uint16_t) cpu_state.oldpc == 0x1396) && (getenv("PCX_TTYDUMP") != NULL)) {
+                static int td_n = 0;
+                if (td_n < 8) {
+                    char     line[220];
+                    int      n = 0, i;
+                    uint32_t base = cpu_state.seg_ds.base + cpu_state.regs[7].w;
 
-        if (rr < 0)
-            rr = getenv("PCX_REGS") ? 1 : 0;
-        if (rr && !shown && (CS == 0x0070) && (cpu_state.pc <= 0x0002)) {
-            shown = 1;
-            pclog("[REGS] AX=%04X BX=%04X CX=%04X DX=%04X SI=%04X DI=%04X "
-                  "BP=%04X SP=%04X DS=%04X ES=%04X SS=%04X FL=%04X\n",
-                  AX, BX, CX, DX, SI, DI, BP, SP, DS, ES, SS, cpu_state.flags);
-            pclog("[REGS] low 0x60:");
-            for (int q = 0; q < 16; q++)
-                pclog(" %04X", pcx_peekw(0x60u + (uint32_t) (q << 1)));
-            pclog("\n[REGS] stack SS:SP:");
-            for (int q = 0; q < 12; q++)
-                pclog(" %04X", pcx_peekw((((uint32_t) SS) << 4) +
-                                         (((uint32_t) SP + (uint32_t) (q << 1)) & 0xFFFFu)));
-            pclog("\n");
+                    n += snprintf(line + n, sizeof(line) - n, "[TTY] t=%u ip=%04X ds=%04X base=%05X di=%04X:",
+                                  plat_get_ticks(), (uint16_t) cpu_state.oldpc,
+                                  cpu_state.seg_ds.seg, (unsigned) cpu_state.seg_ds.base,
+                                  cpu_state.regs[7].w);
+                    for (i = 0; (i < 0x30) && (n < (int) sizeof(line) - 5); i++)
+                        n += snprintf(line + n, sizeof(line) - n, " %02X", readmembl(base + i));
+                    pclog("%s\n", line);
+                    td_n++;
+                }
+            }
+            if ((cpu_state.seg_cs.seg == 0x151e) && ((uint16_t) cpu_state.oldpc == 0x1396)) {
+                static int d151e = 0;
+                if (!d151e) {
+                    FILE *f = fopen("/tmp/pcx_151e.bin", "wb");
+                    if (f != NULL) {
+                        uint32_t o;
+                        for (o = 0; o < 0x4000; o++)
+                            fputc(readmembl(cpu_state.seg_cs.base + o), f);
+                        fclose(f);
+                    }
+                    pclog("[D15] base=%05X ip=%04X\n", cpu_state.seg_cs.base,
+                          (uint16_t) cpu_state.oldpc);
+                    d151e = 1;
+                }
+            }
+            if (cpu_state.seg_cs.seg == 0x1180) {
+                static int d1180 = 0;
+                if (!d1180) {
+                    FILE *f = fopen("/tmp/pcx_1180.bin", "wb");
+                    if (f != NULL) {
+                        uint32_t o;
+                        for (o = 0; o < 0x4000; o++)
+                            fputc(readmembl(cpu_state.seg_cs.base + o), f);
+                        fclose(f);
+                    }
+                    pclog("[D18] base=%05X ip=%04X\n", cpu_state.seg_cs.base,
+                          (uint16_t) cpu_state.oldpc);
+                    d1180 = 1;
+                }
+            }
         }
     }
 
@@ -3536,6 +3629,18 @@ execx86_instruction(void)
                         cpu_808x_access(8, bits);
                     else
                         cpu_808x_access(9, bits);
+                    /* PCX_PORTTRACE=1: every write to the terminal window. */
+                    {
+                        static int pt_on = -1, pt_n = 0;
+                        if (pt_on < 0)
+                            pt_on = getenv("PCX_PORTTRACE") ? 1 : 0;
+                        if (pt_on && (cpu_data >= 0xf980) && (cpu_data <= 0xf98f) &&
+                            (pt_n < 4000)) {
+                            pclog("[OUT] t=%u %04X %02X\n", plat_get_ticks(),
+                                  (unsigned) cpu_data, AL);
+                            pt_n++;
+                        }
+                    }
                     if (opcode & 1)
                         cpu_io(16, 1, cpu_data);
                     else
@@ -3598,6 +3703,29 @@ execx86_instruction(void)
                     wait_cycs(cycles & 1, 0);
                     check_interrupts(is_nec);
                 } else {
+                    if (getenv("PCX_HLTLOG") != NULL) {
+                        static int hl = 0;
+                        if (hl < 200) {
+                            pclog("[HLT] t=%u at %04X:%04X\n", plat_get_ticks(),
+                                  (uint16_t) CS, (uint16_t) cpu_state.pc);
+                            hl++;
+                        }
+                    }
+                    if (getenv("PCX_CODEDUMP2") != NULL) {
+                        static int cd2_done = 0;
+                        if (!cd2_done && (plat_get_ticks() > 56000)) {
+                            FILE *cd2_f = fopen("/tmp/pcx_cs1000.bin", "wb");
+                            if (cd2_f != NULL) {
+                                uint32_t cd2_a;
+                                for (cd2_a = 0x10000; cd2_a < 0x20000; cd2_a++)
+                                    fputc(readmembl(cd2_a), cd2_f);
+                                fclose(cd2_f);
+                            }
+                            cd2_done = 1;
+                            pclog("[CD2] dumped 64K at 1000:0000 at %llu ms\n",
+                                  (unsigned long long) plat_get_ticks());
+                        }
+                    }
                     repeating = 1;
                     completed = 0;
                     clock_end();
@@ -3781,6 +3909,15 @@ execx86_instruction(void)
 
             default:
                 x808x_log("Illegal opcode: %02X\n", opcode);
+                {
+                    static int ill = -1;
+                    if (ill < 0)
+                        ill = (getenv("PCX_ILLEGAL") != NULL) ? 1 : 0;
+                    if (ill)
+                        pclog("[ILL] %02X at %04X:%04X mode %i\n", opcode,
+                              cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc,
+                              cpu_state.eflags & 0x1000 ? 1 : 0);
+                }
                 pfq_fetchb();
                 wait_cycs(8, 0);
                 break;
@@ -3829,6 +3966,39 @@ execx86(int cycs)
         }
 
         execx86_instruction();
+
+        /* PCX_PCHIST=1: per-instruction 16-byte page histogram of ROM code. */
+        {
+            static int      h_on = -1;
+            static long     h_n;
+            static uint32_t h[256];
+
+            if (h_on < 0)
+                h_on = (getenv("PCX_PCHIST") != NULL);
+            if (h_on) {
+                uint16_t ip = (uint16_t) cpu_state.oldpc;
+
+                if ((uint16_t) CS == 0xFC00)
+                    h[(ip >> 4) & 0xff]++;
+                if ((++h_n % 2000000L) == 0) {
+                    int i, k;
+
+                    pclog("[PCHZ] n=%ld", h_n);
+                    for (k = 0; k < 10; k++) {
+                        int best = -1;
+
+                        for (i = 0; i < 256; i++)
+                            if ((h[i] > 0) && ((best < 0) || (h[i] > h[best])))
+                                best = i;
+                        if (best < 0)
+                            break;
+                        pclog(" %03X0:%lu", best, (unsigned long) h[best]);
+                        h[best] = 0;
+                    }
+                    pclog("\n");
+                }
+            }
+        }
 {
     /* PCX_HELPER=1: 把 1000:0B2E / 1000:0B37 当作装载器应当提供的
        端口读写助手（调用者：push 端口 / push 值,端口；返回值在 AX）。

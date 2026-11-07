@@ -4953,6 +4953,42 @@ execx86_new(int cycs)
             break;
         ++m808x_cpu.instruction_count;
 
+        /* PCX_PCHIST=1: which 16-byte pages the guest executes, in this core
+           (the 80186 machines take execx86_new, so probes in 808x.c never run
+           for them).  Prints the eight hottest pages every two million
+           instructions. */
+        {
+            static int      h_on = -1;
+            static long     h_n;
+            static uint32_t h[256];
+
+            if (h_on < 0)
+                h_on = (getenv("PCX_PCHIST") != NULL);
+            if (h_on) {
+                uint16_t ip = m808x_arch_ip();
+
+                if ((uint16_t) CS == 0xFC00)
+                    h[(ip >> 4) & 0xff]++;
+                if ((++h_n % 2L) == 0 && h_n <= 20) {
+                    int i, k;
+
+                    pclog("[PCH] n=%ld", h_n);
+                    for (k = 0; k < 8; k++) {
+                        int best = -1;
+
+                        for (i = 0; i < 256; i++)
+                            if ((h[i] > 0) && ((best < 0) || (h[i] > h[best])))
+                                best = i;
+                        if (best < 0)
+                            break;
+                        pclog(" %03X0:%lu", best, (unsigned long) h[best]);
+                        h[best] = 0;
+                    }
+                    pclog("\n");
+                }
+            }
+        }
+
         const bool nmi_was_pending = m808x_cpu.nmi_pin;
         finish_instruction(&m808x_cpu);
         if (nmi_was_pending && !m808x_cpu.nmi_pin)

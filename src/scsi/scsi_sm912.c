@@ -283,6 +283,17 @@ scsi_sm912_execute(scsi_sm912_t *dev)
 
         dev->status_byte = dev->sd->status;
 
+        /* PCX_SCSILOG=1: the command stream the guest actually sends. */
+        if (getenv("PCX_SCSILOG") != NULL) {
+            static long q_n;
+
+            pclog("[SCSIEX] #%ld op=%02X cdb=%02X %02X %02X %02X %02X %02X "
+                  "st=%02X phase=%d len=%d\n",
+                  ++q_n, dev->cdb[0], dev->cdb[1], dev->cdb[2], dev->cdb[3],
+                  dev->cdb[4], dev->cdb[5], dev->cdb[6], dev->sd->status,
+                  dev->sd->phase, (int) dev->sd->buffer_length);
+        }
+
         scsi_sm912_log("[SM912] exec op %02X status %02X phase %d len %d buf %p\n",
                        dev->cdb[0], dev->sd->status, dev->sd->phase,
                        (int) dev->sd->buffer_length,

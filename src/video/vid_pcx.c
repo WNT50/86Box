@@ -297,8 +297,10 @@ pcx_term_dump(pcx_video_t *dev)
     char            line[PCX_TERM_COLS + 1];
     uint32_t        now = plat_get_ticks();
 
-    if ((n >= 40) || (getenv("PCX_TERMDUMP") == NULL) || (now < 4600u) ||
-        ((now - last) < 250u))
+    int always = (getenv("PCX_TERMDUMP_ALWAYS") != NULL);
+
+    if ((n >= (always ? 400 : 40)) || (getenv("PCX_TERMDUMP") == NULL) ||
+        (!always && (now < 4600u)) || ((now - last) < (always ? 100u : 250u)))
         return;
     last = now;
 
@@ -472,6 +474,21 @@ pcx_video_write(uint16_t addr, uint8_t val, void *priv)
                 }
             }
             dev->prev_char = val;
+            /* PCX_TERMLOG=1: every byte the host hands to the terminal. */
+            {
+                static int  t_on = -1;
+                static long t_n;
+
+                if (t_on < 0)
+                    t_on = (getenv("PCX_TERMLOG") != NULL);
+                if (t_on) {
+                    t_n++;
+                    if (t_n <= 200)
+                        pclog("[TERMW] #%ld '%c' (%02X) @%04X:%04X\n", t_n,
+                              (val >= 0x20 && val < 0x7f) ? val : '.', val,
+                              CS, cpu_state.pc);
+                }
+            }
             pcx_term_write(&dev->term, val);
             pcx_term_dump(dev);
             dev->vram_dirty = 1;   /* the page changed, rescan it */

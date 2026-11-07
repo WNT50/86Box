@@ -798,6 +798,22 @@ pic_write(uint16_t addr, uint8_t val, void *priv)
 
     pic_log("pic_write(%04X, %02X, %08X)\n", addr, val, priv);
 
+    /* PCX_EOILOG=1: count End-Of-Interrupt writes per 8259. */
+    if (!(addr & 0x0001) && ((val & 0xE0) == 0x20)) {
+        static int  e_on = -1;
+        static long e_n[2];
+
+        if (e_on < 0)
+            e_on = (getenv("PCX_EOILOG") != NULL);
+        if (e_on) {
+            int k = (dev == &pic2) ? 1 : 0;
+            e_n[k]++;
+            if ((e_n[k] <= 20) || ((e_n[k] % 200) == 0))
+                pclog("[EOI] %s addr=%04X val=%02X n=%ld @%04X:%04X\n",
+                      k ? "pic2" : "pic1", addr, val, e_n[k], CS, cpu_state.pc);
+        }
+    }
+
     dev->data_bus = val;
 
     if (addr & 0x0001) {

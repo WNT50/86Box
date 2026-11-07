@@ -820,8 +820,38 @@ i8018x_pcb_write_word(struct i8018x_pcb_t *dev, uint16_t off, uint16_t val)
        type (270788-001 Figure 87, Table 19). The register itself is write only
        (section 9.5.2.9), so a read hands back whatever the last write left
        here, which the manual does not define. */
+    /* PCX_ICULOG=1: trace the guest's ICU programming after the first tick. */
+    {
+        static int  w_on = -1;
+        static long w_n;
+
+        if (w_on < 0)
+            w_on = (getenv("PCX_ICULOG") != NULL);
+        if (w_on && (off <= 0x2e)) {
+            w_n++;
+            if (w_n <= 150)
+                pclog("[ICUW] off=%02X val=%04X @%04X:%04X\n",
+                      off, val, CS, cpu_state.pc);
+        }
+    }
+
     if (off == I8018X_ICU_EOI) {
         uint16_t clear = 0x0000u;
+
+        /* PCX_EOILOG=1: how often does the guest acknowledge an interrupt? */
+        {
+            static int  i_on = -1;
+            static long i_n;
+
+            if (i_on < 0)
+                i_on = (getenv("PCX_EOILOG") != NULL);
+            if (i_on) {
+                i_n++;
+                if ((i_n <= 30) || ((i_n % 200) == 0))
+                    pclog("[ICUEOI] #%ld val=%04X isr=%04X @%04X:%04X\n",
+                          i_n, val, dev->icu_isr, CS, cpu_state.pc);
+            }
+        }
 
         if (val & I8018X_ICU_EOI_NSPEC) {
             int i = i8018x_pcb_icu_highest(dev, dev->icu_isr);
