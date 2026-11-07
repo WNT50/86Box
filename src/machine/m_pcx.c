@@ -62,11 +62,15 @@ extern volatile int fdcinited;
 
 /* BIOS: two 8 KB halves of one 16-bit ROM.  The low byte half (.d43) is at
    even addresses, the high byte half (.d42) at odd addresses -- exactly what
-   bios_load_interleaved() wants, first argument is the even one. */
+   bios_load_interleaved() wants, first argument is the even one.
+
+   The two machines carry different builds: the PC-X (1982) runs the V2 GS
+   pair, whose console is the terminal byte stream on 0xf980/0xf981, and the
+   PC-D (1984) runs the later V3 GS4 build that talks to the SCN2674 window. */
 #define PCD_BIOS_LOW      "roms/machines/pcd/361d0359.d43"
 #define PCD_BIOS_HIGH     "roms/machines/pcd/361d0359.d42"
-#define PCX_BIOS_LOW      "roms/machines/pcx/361d0359.d43"
-#define PCX_BIOS_HIGH     "roms/machines/pcx/361d0359.d42"
+#define PCX_BIOS_LOW      "roms/machines/pcx/s26361-d359.d43"
+#define PCX_BIOS_HIGH     "roms/machines/pcx/s26361-d359.d42"
 #define PCX_BIOS_ADDR     0x000fc000
 #define PCX_BIOS_SIZE     0x00004000
 
