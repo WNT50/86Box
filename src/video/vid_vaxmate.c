@@ -265,7 +265,7 @@ vaxmate_video_recalctimings(vaxmate_video_t *vid)
 static int
 vaxmate_video_mode(vaxmate_video_t *vid)
 {
-    int code = ((vid->ctrl_a & 0x10) >> 1) | (vid->ctrl_a & 0x03);
+    int code = ((vid->ctrl_a & 0x10) >> 2) | (vid->ctrl_a & 0x03);
 
     /* 111 一档由 control B 的 252 行位再分成 D1 / D2。 */
     if (code == 7)
