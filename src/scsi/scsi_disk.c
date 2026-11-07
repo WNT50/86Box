@@ -372,6 +372,10 @@ scsi_disk_mode_sense(const scsi_disk_t *dev, uint8_t *buf, uint32_t pos,
 static void
 scsi_disk_update_request_length(scsi_disk_t *dev, int len, const int block_len)
 {
+    if (getenv("PCX_SCSILOG") != NULL)
+        pclog("[SDLEN] op=%02X blocks=%d block_len=%d len=%d max_xfer=%d\n",
+              dev->current_cdb[0], dev->requested_blocks, block_len, len,
+              dev->max_transfer_len);
     int bt;
     int min_len = 0;
 
@@ -817,6 +821,11 @@ scsi_disk_blocks(scsi_disk_t *dev, int32_t *len, const int out)
             ret = 0;
         } else {
             *len    = dev->requested_blocks * bs;
+
+            if (getenv("PCX_SCSILOG") != NULL)
+                pclog("[SDBLK] op=%02X blocks=%d bs=%d spb=%d len=%d pos=%d\n",
+                      dev->current_cdb[0], dev->requested_blocks, bs, spb, *len,
+                      dev->sector_pos);
 
             for (int i = 0; i < dev->requested_blocks; i++) {
                 if (out) {

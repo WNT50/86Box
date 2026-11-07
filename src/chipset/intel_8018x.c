@@ -1079,12 +1079,78 @@ i8018x_pcb_dma_step_ptr(struct i8018x_pcb_t *dev, int slot, int dst)
 }
 
 /* Drop the transfer count by one and answer whether this transfer ended the
-   channel. The count stops the channel when it runs out and either TC is set
-   or the channel is unsynchronized; with TC clear in a synchronized mode the
-   count wraps to 0xFFFF and transfers continue. An interrupt needs both INT
-   and TC (270788-001 section 8.2). A terminal count raises the channel's
-   request in the interrupt controller; taking that request to the CPU is
-   the board's business, the same as for the other sources. */
+   channel. A programmed count of zero means 65536 transfers, so the count may
+   wrap; with TC clear it keeps going instead of stopping (270788-001 section
+   8.2). A terminal count raises the channel's request in the interrupt
+   controller when INT is set; taking that request to the CPU is the
+   board's business, the same as for the other sources. */
+/* Source I/O port the guest programmed for a channel (0xFFFF when the channel
+   is not ours or is not armed); a slave uses it to tell whether the channel is
+   really pointed at its own data register. */
+int
+i8018x_pcb_dma_src_port(int channel)
+{
+    if (i8018x_pcb_current == NULL)
+        return 0xffff;
+
+    return i8018x_pcb_dma_io_port(i8018x_pcb_current, channel, 0);
+}
+
+/* End of process from the peripheral side: an SCSI adapter asserts EOP on the
+   last byte, which stops the channel and raises its terminal count even when
+   the programmed count has not run out. */
+void
+i8018x_pcb_dma_eop(int channel)
+{
+    int slot;
+    uint16_t ctrl;
+
+    if (i8018x_pcb_current == NULL)
+        return;
+
+    slot = i8018x_pcb_dma_slot(i8018x_pcb_current, channel);
+    if (slot < 0)
+        return;
+
+    i8018x_pcb_current->regs[I8018X_DMA_COUNT(slot) / 2] = 0;
+    ctrl = i8018x_pcb_current->regs[I8018X_DMA_CTRL(slot) / 2];
+    i8018x_pcb_current->regs[I8018X_DMA_CTRL(slot) / 2] = ctrl & (uint16_t) ~I8018X_DMA_ST;
+    if (ctrl & I8018X_DMA_INT)
+        i8018x_pcb_current->icu_dma |= I8018X_ICU_SRC_DMA(slot);
+}
+
+/* Destination pointer of a channel, for probes outside this file. */
+uint32_t
+i8018x_pcb_dma_dst(int channel)
+{
+    int slot;
+
+    if (i8018x_pcb_current == NULL)
+        return 0;
+
+    slot = i8018x_pcb_dma_slot(i8018x_pcb_current, channel);
+    if (slot < 0)
+        return 0;
+
+    return i8018x_pcb_dma_ptr(i8018x_pcb_current, slot, 1);
+}
+
+/* Remaining transfer count of a channel, for probes outside this file. */
+int
+i8018x_pcb_dma_remaining(int channel)
+{
+    int slot;
+
+    if (i8018x_pcb_current == NULL)
+        return -1;
+
+    slot = i8018x_pcb_dma_slot(i8018x_pcb_current, channel);
+    if (slot < 0)
+        return -1;
+
+    return (int) i8018x_pcb_current->regs[I8018X_DMA_COUNT(slot) / 2];
+}
+
 static int
 i8018x_pcb_dma_count_down(struct i8018x_pcb_t *dev, int slot)
 {

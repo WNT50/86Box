@@ -51,6 +51,11 @@
 #include <86box/io.h>
 #include <86box/scsi.h>
 #include <86box/dma.h>
+
+extern int i8018x_pcb_dma_remaining(int channel);
+extern uint32_t i8018x_pcb_dma_dst(int channel);
+extern void i8018x_pcb_dma_eop(int channel);
+extern int i8018x_pcb_dma_src_port(int channel);
 #include <86box/plat.h>
 #include <86box/scsi_device.h>
 #include <86box/scsi_sm912.h>
@@ -112,6 +117,7 @@ typedef struct scsi_sm912_t {
 
     int               target_present;
     int               irq_level;
+    int               pio_used;   /* the host moved bytes through the data port */
 
     scsi_sm912_irq_t  irq;
     void             *irq_priv;
@@ -136,6 +142,7 @@ scsi_sm912_update_irq(scsi_sm912_t *dev)
 }
 
 static int sm912_dma_used;
+static int sm912_in_pump;   /* the byte came from the DMA engine, not the host */
 
 /* Data phases can be driven by the DMA engine instead of the CPU: on this
    board the adapter only raises REQ, and DRQ0 makes the 80186 move the byte
@@ -153,17 +160,43 @@ scsi_sm912_dma_pump(scsi_sm912_t *dev)
        then waits for C/D without ever touching the data port.  Try the write
        and back off on DMA_NODATA instead. */
 
+    if (dev->pio_used)
+        return;
+    if (i8018x_pcb_dma_src_port(SM912_DMA_CHANNEL) != dev->base)
+        return;   /* the channel is not pointed at our data register */
+
     if (dev->phase == SM912_DATAIN) {
         if (dev->data_pos >= (uint32_t) dev->sd->buffer_length)
             return;
-        {
+        if (getenv("PCX_SCSILOG") != NULL) {
+            static long pr_n;
+
+            if (++pr_n <= 4)
+                pclog("[SMPRE] pos=%u/%d remain=%d dst=%05X drq_armed=1\n", dev->data_pos,
+                      (int) dev->sd->buffer_length,
+                      i8018x_pcb_dma_remaining(SM912_DMA_CHANNEL),
+                      (unsigned) i8018x_pcb_dma_dst(SM912_DMA_CHANNEL));
+        }
+        /* Drain the whole record while the channel accepts bytes.  The DMA
+           engine on the 80186 moves memory at bus speed, so one guest poll is
+           enough -- handing over a single byte per poll made a 512-byte READ
+           outlast the driver's timeout (SINIX: "Controller already busy"). */
+        while (dev->data_pos < (uint32_t) dev->sd->buffer_length) {
             int r;
             /* Mirror the hardware handshake: REQ raises DRQ0, the controller
                performs one byte, then DRQ drops.  Without this the 80186 DMA
                never sees the transfer end and the driver waits for TC. */
             dma_set_drq(SM912_DMA_CHANNEL, 1);
+            sm912_in_pump = 1;
             r = dma_channel_write(SM912_DMA_CHANNEL, sc->temp_buffer[dev->data_pos]);
+            sm912_in_pump = 0;
             dma_set_drq(SM912_DMA_CHANNEL, 0);
+            if (getenv("PCX_SCSILOG") != NULL) {
+                static long dp_n;
+
+                if (++dp_n <= 10)
+                    pclog("[SMDP] pos=%u r=%d\n", dev->data_pos, r);
+            }
             if (r == DMA_NODATA)
                 return;
             sm912_dma_used = 1;
@@ -181,6 +214,11 @@ scsi_sm912_dma_pump(scsi_sm912_t *dev)
             }
         }
         if (dev->data_pos >= (uint32_t) dev->sd->buffer_length) {
+            /* The record ended: assert EOP so the channel stops here even if
+               the guest programmed a longer count.  Without it the 80186 keeps
+               waiting for a terminal count that never comes and the driver
+               aborts the command ("Controller already busy"). */
+            i8018x_pcb_dma_eop(SM912_DMA_CHANNEL);
             scsi_device_command_phase1(dev->sd);
             dev->status_byte = dev->sd->status;
             dev->phase       = SM912_STATUS;
@@ -203,6 +241,14 @@ scsi_sm912_dma_pump(scsi_sm912_t *dev)
 
     /* Entering STATUS/MSGIN has to raise the interrupt: the driver waits for
        it instead of polling, and a silent transition makes it reset the bus. */
+    if (getenv("PCX_SCSILOG") != NULL) {
+        static long me_n;
+
+        if (++me_n <= 4)
+            pclog("[SMEND] phase=%d pos=%u/%d dma_used=%d remain=%d\n", dev->phase,
+                  dev->data_pos, (int) ((dev->sd != NULL) ? dev->sd->buffer_length : -1),
+                  sm912_dma_used, i8018x_pcb_dma_remaining(SM912_DMA_CHANNEL));
+    }
     scsi_sm912_update_irq(dev);
 }
 
@@ -213,6 +259,14 @@ scsi_sm912_status(scsi_sm912_t *dev)
 
     /* The driver polls this register while it waits for the command phase; a
        DMA channel armed after the selection only gets its chance here. */
+    if ((dev->phase == SM912_DATAIN) && (getenv("PCX_SCSILOG") != NULL)) {
+        static long st_n;
+
+        if ((++st_n <= 5) || ((st_n % 100000) == 0))
+            pclog("[SMST] DATAIN status polls=%ld pos=%u/%d\n", st_n,
+                  dev->data_pos, (int) ((dev->sd != NULL) ? dev->sd->buffer_length : -1));
+    }
+
     scsi_sm912_dma_pump(dev);
 
 
@@ -274,6 +328,7 @@ scsi_sm912_execute(scsi_sm912_t *dev)
     dev->status_byte  = 0x02;   /* CHECK CONDITION when nothing takes it */
     dev->message_byte = 0x00;
     dev->data_pos     = 0;
+    dev->pio_used     = (getenv("PCX_SCSI_PIO") != NULL) ? 1 : 0;
 
     if ((dev->sd != NULL) && scsi_device_present(dev->sd)) {
         sc = dev->sd->sc;
@@ -287,10 +342,13 @@ scsi_sm912_execute(scsi_sm912_t *dev)
         if (getenv("PCX_SCSILOG") != NULL) {
             static long q_n;
 
-            pclog("[SCSIEX] #%ld op=%02X cdb=%02X %02X %02X %02X %02X %02X "
+            pclog("[SCSIEX] #%ld op=%02X cdb=%02X %02X %02X %02X %02X "
+                  "[%02X %02X %02X %02X %02X %02X] "
                   "st=%02X phase=%d len=%d\n",
                   ++q_n, dev->cdb[0], dev->cdb[1], dev->cdb[2], dev->cdb[3],
-                  dev->cdb[4], dev->cdb[5], dev->cdb[6], dev->sd->status,
+                  dev->cdb[4], dev->cdb[5],
+                  dev->cdb[6], dev->cdb[7], dev->cdb[8], dev->cdb[9],
+                  dev->cdb[10], dev->cdb[11], dev->sd->status,
                   dev->sd->phase, (int) dev->sd->buffer_length);
         }
 
@@ -406,6 +464,18 @@ scsi_sm912_data_read(scsi_sm912_t *dev)
 
     switch (dev->phase) {
         case SM912_DATAIN:
+            /* The host is reading the data port itself: this command is PIO,
+               and letting the DMA pump advance the same position would steal
+               bytes from the stream. */
+            if (!sm912_in_pump)
+                dev->pio_used = 1;
+            if (getenv("PCX_SCSILOG") != NULL) {
+                static long d_n;
+
+                if ((++d_n <= 5) || ((d_n % 100000) == 0))
+                    pclog("[SMDATA] DATAIN data reads=%ld pos=%u\n", d_n,
+                          dev->data_pos);
+            }
             /* When the driver armed DMA for the transfer, the pump in the
                status handler moves the bytes; a CPU read of the data port
                must not consume a second time. */
@@ -440,13 +510,27 @@ scsi_sm912_data_read(scsi_sm912_t *dev)
                     dev->message_byte = 0x00;   /* COMMAND COMPLETE */
                     dev->phase    = SM912_MSGIN;
                 }
+                /* The line follows the phase: leaving it high after the status
+                   byte made the driver treat the command as still in progress
+                   and reset the bus. */
+                scsi_sm912_update_irq(dev);
             }
             scsi_sm912_log("[SM912] status %02X, message %s\n", ret,
                            (dev->phase == SM912_IDLE) ? "auto-acked" : "left for host");
+            if (getenv("PCX_SCSILOG") != NULL) {
+                static long sr_n;
+
+                if (++sr_n <= 6)
+                    pclog("[SMST2] status read #%ld byte=%02X new_phase=%d irq=%d\n",
+                          sr_n, ret, dev->phase, dev->irq_level);
+            }
             break;
         case SM912_MSGIN:
             ret        = dev->message_byte;
             dev->phase = SM912_IDLE;
+            scsi_sm912_update_irq(dev);
+            if (getenv("PCX_SCSILOG") != NULL)
+                pclog("[SMMSG] message read %02X, phase -> IDLE\n", ret);
             break;
         default:
             break;
@@ -496,10 +580,23 @@ scsi_sm912_read(uint16_t port, void *priv)
     uint16_t      off = (uint16_t) (port - dev->base);
 
 
-    if (off & 1)
-        return scsi_sm912_status(dev);
+    {
+        uint8_t v;
+        int     is_status = (off & 1);
 
-    return scsi_sm912_data_read(dev);
+        v = is_status ? scsi_sm912_status(dev) : scsi_sm912_data_read(dev);
+
+        if (getenv("PCX_SM912V") != NULL) {
+            static long rn;
+
+            if (rn++ < 600)
+                pclog("[SMR] %s=%02X phase=%d pos=%u @%04X:%04X\n",
+                      is_status ? "STS" : "DAT", v, dev->phase, dev->data_pos,
+                      cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
+        }
+
+        return v;
+    }
 }
 
 static void
@@ -509,12 +606,12 @@ scsi_sm912_write(uint16_t port, uint8_t val, void *priv)
     uint16_t      off = (uint16_t) (port - dev->base);
 
     if (getenv("PCX_SM912V") != NULL) {
-        static int vn = 0;
-        if (vn < 400) {
-            pclog("[V] t=%u %s val=%02X phase=%d cdbpos=%d\n", plat_get_ticks(),
-                  (off & 1) ? "CTL" : "DAT", val, dev->phase, dev->cdb_pos);
-            vn++;
-        }
+        static long wn;
+
+        if (wn++ < 600)
+            pclog("[SMW] %s=%02X phase=%d pos=%u @%04X:%04X\n",
+                  (off & 1) ? "CTL" : "DAT", val, dev->phase, dev->data_pos,
+                  cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
     }
 
 
