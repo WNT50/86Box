@@ -72,15 +72,21 @@ enum {
 
 /* Video modes, TRM Table 7-11 (control register A bits 2-0 + control B bit 7) */
 enum {
-    VMODE_TEXT40   = 0,
-    VMODE_TEXT80   = 1,
-    VMODE_G320x200x4  = 2,
-    VMODE_G320x200x16 = 3,
-    VMODE_G640x400x2  = 4,
-    VMODE_G640x200x4  = 5,
-    VMODE_G640x200x2  = 6,
-    VMODE_G640x400x4  = 7,
-    VMODE_G800x252x4  = 8
+    /* 标准模式，编号即控制寄存器 A 的 3 位模式号（TRM 1.2.2.2） */
+    VMODE_TEXT40      = 0,  /* 40x25 文本，单色 */
+    VMODE_TEXT40C     = 1,  /* 40x25 文本，彩色 */
+    VMODE_TEXT80      = 2,  /* 80x25 文本，单色 */
+    VMODE_TEXT80C     = 3,  /* 80x25 文本，彩色 */
+    VMODE_TEXT_LAST   = VMODE_TEXT80C,
+    VMODE_G320x200x4  = 4,  /* 320x200 4 色（模式 4） */
+    VMODE_G320x200x2  = 5,  /* 320x200 单色（模式 5） */
+    VMODE_G640x200x2  = 6,  /* 640x200 单色（模式 6） */
+    /* VAXmate 专有模式 */
+    VMODE_G320x200x16 = 7,  /* 320x200 16 色 */
+    VMODE_G640x200x4  = 8,  /* 640x200 4 色 */
+    VMODE_G640x400x2  = 9,  /* D0：640x400 2 色 */
+    VMODE_G640x400x4  = 10, /* D1：640x400 4 色 */
+    VMODE_G800x252x4  = 11  /* D2：800x250 4 色 */
 };
 
 /* Control register B (03DF) */
@@ -268,12 +274,12 @@ vaxmate_video_mode(vaxmate_video_t *vid)
        0xD0 -> 10h/18h，640x400 2 色；
        0xD1 -> 13h/1Bh，640x400 4 色；0xD2 用同值，靠 control B 的 252 行位区分。 */
     if ((vid->ctrl_a & 0x17) == 0x10)
-        return 4;
+        return VMODE_G640x400x2;
     if ((vid->ctrl_a & 0x17) == 0x13)
-        return (vid->ctrl_b & CTLB_MONITOR252) ? 8 : 7;
+        return (vid->ctrl_b & CTLB_MONITOR252) ? VMODE_G800x252x4 : VMODE_G640x400x4;
 
-    if (mode == 7 && (vid->ctrl_b & CTLB_MONITOR252))
-        return VMODE_G800x252x4;
+    if (mode == 7)
+        return (vid->ctrl_b & CTLB_MONITOR252) ? VMODE_G800x252x4 : VMODE_G320x200x16;
 
     return mode;
 }
@@ -297,7 +303,7 @@ vaxmate_video_write(uint32_t addr, uint8_t val, void *priv)
         return;
     }
 
-    if ((vid->ctrl_b & CTLB_FONT_ENABLE) && (vid->mode <= VMODE_TEXT80)) {
+    if ((vid->ctrl_b & CTLB_FONT_ENABLE) && (vid->mode <= VMODE_TEXT_LAST)) {
         /* B8000-B9FFF even addresses -> 4 KB font RAM */
         uint32_t off = (addr - 0xb8000) >> 1;
         if (off < VAXMATE_FONT_RAM) {
@@ -306,7 +312,7 @@ vaxmate_video_write(uint32_t addr, uint8_t val, void *priv)
         }
     }
 
-    if ((vid->ctrl_b & CTLB_VLT_ENABLE) && (vid->mode <= VMODE_TEXT80)) {
+    if ((vid->ctrl_b & CTLB_VLT_ENABLE) && (vid->mode <= VMODE_TEXT_LAST)) {
         if (addr >= 0xb8000 && addr < 0xb8020) {
             vid->vlt[(addr - 0xb8000) >> 1] = val;
             return;
@@ -326,12 +332,12 @@ vaxmate_video_read(uint32_t addr, void *priv)
 
 
     if (!(addr & 1)) {
-        if ((vid->ctrl_b & CTLB_FONT_ENABLE) && (vid->mode <= VMODE_TEXT80)) {
+        if ((vid->ctrl_b & CTLB_FONT_ENABLE) && (vid->mode <= VMODE_TEXT_LAST)) {
             uint32_t off = (addr - 0xb8000) >> 1;
             if (off < VAXMATE_FONT_RAM)
                 return vid->font_ram[off];
         }
-        if ((vid->ctrl_b & CTLB_VLT_ENABLE) && (vid->mode <= VMODE_TEXT80)) {
+        if ((vid->ctrl_b & CTLB_VLT_ENABLE) && (vid->mode <= VMODE_TEXT_LAST)) {
             if (addr >= 0xb8000 && addr < 0xb8020)
                 return vid->vlt[(addr - 0xb8000) >> 1];
         }
@@ -357,23 +363,26 @@ typedef struct {
     uint8_t  bpp;      /* bits per pixel                 */
 } vaxmate_gfx_t;
 
-static const vaxmate_gfx_t vaxmate_modes[9] = {
-    /* 0 40x25 text      */ { 640, 400, 80, 1, 0x2000, 0xb8000, 0 },
-    /* 1 80x25 text      */ { 640, 400, 160, 1, 0x2000, 0xb8000, 0 },
-    /* 2 320x200 4-color */ { 320, 200, 80, 2, 0x2000, 0xb8000, 2 },
-    /* 3 320x200 16-color*/ { 320, 200, 160, 4, 0x2000, 0xb8000, 4 },
-    /* 4 640x400 2-color */ { 640, 400, 80, 4, 0x2000, 0xb8000, 1 },
-    /* 5 640x200 4-color */ { 640, 200, 160, 2, 0x4000, 0xb8000, 2 },
-    /* 6 640x200 2-color */ { 640, 200, 80, 2, 0x2000, 0xb8000, 1 },
-    /* 7 640x400 4-color */ { 640, 400, 160, 4, 0x4000, 0xb0000, 2 },
-    /* 8 800x250 4-color */ { 800, 250, 200, 4, 0x4000, 0xb0000, 2 },
+static const vaxmate_gfx_t vaxmate_modes[12] = {
+    /* 0  40x25 text mono  */ { 640, 400, 80, 1, 0x2000, 0xb8000, 0 },
+    /* 1  40x25 text color */ { 640, 400, 80, 1, 0x2000, 0xb8000, 0 },
+    /* 2  80x25 text mono  */ { 640, 400, 160, 1, 0x2000, 0xb8000, 0 },
+    /* 3  80x25 text color */ { 640, 400, 160, 1, 0x2000, 0xb8000, 0 },
+    /* 4  320x200 4-color  */ { 320, 200, 80, 2, 0x2000, 0xb8000, 2 },
+    /* 5  320x200 mono     */ { 320, 200, 80, 1, 0x2000, 0xb8000, 1 },
+    /* 6  640x200 2-color  */ { 640, 200, 80, 2, 0x2000, 0xb8000, 1 },
+    /* 7  320x200 16-color */ { 320, 200, 160, 4, 0x2000, 0xb8000, 4 },
+    /* 8  640x200 4-color  */ { 640, 200, 160, 2, 0x4000, 0xb8000, 2 },
+    /* 9  D0 640x400 2-col */ { 640, 400, 80, 4, 0x2000, 0xb8000, 1 },
+    /* 10 D1 640x400 4-col */ { 640, 400, 160, 4, 0x4000, 0xb0000, 2 },
+    /* 11 D2 800x250 4-col */ { 800, 250, 200, 4, 0x4000, 0xb0000, 2 },
 };
 
 static void
 vaxmate_crtc_translate(vaxmate_video_t *vid)
 {
     const vaxmate_gfx_t *m = &vaxmate_modes[vid->mode];
-    int text = (vid->mode <= VMODE_TEXT80);
+    int text = (vid->mode <= VMODE_TEXT_LAST);
     int lines;
     int lpr  = 1;
     int rows;
@@ -428,7 +437,7 @@ vaxmate_crtc_translate(vaxmate_video_t *vid)
 static int
 vaxmate_mode_width(int mode)
 {
-    if ((mode < 0) || (mode > 8))
+    if ((mode < 0) || (mode >= (int) (sizeof(vaxmate_modes) / sizeof(vaxmate_modes[0]))))
         return 0;
 
     return vaxmate_modes[mode].width;
@@ -511,7 +520,7 @@ vaxmate_font_lazy_load(vaxmate_video_t *vid)
 static void
 vaxmate_video_render_text(vaxmate_video_t *vid, int line)
 {
-    int      cols = (vid->mode == VMODE_TEXT40) ? 40 : 80;
+    int      cols = ((vid->mode == VMODE_TEXT40) || (vid->mode == VMODE_TEXT40C)) ? 40 : 80;
 
     vaxmate_font_lazy_load(vid);
     int      cw   = (cols == 40) ? 16 : 8;  /* 40-column modes: 16-dot cells */
@@ -615,7 +624,7 @@ vaxmate_video_poll(void *priv)
        CRTC 的 R6/R9 是 guest 按“行业标准时序”写的值，要经门阵列的
        4Kx8 参数翻译 ROM 才变成真正的 LAD 值；我们没建模这张表，
        直接拿 R6/R9 算帧高会得出上千行（Windows 设 0xD0 时窗口被拉长）。 */
-    if (vid->mode <= VMODE_TEXT80) {
+    if (vid->mode <= VMODE_TEXT_LAST) {
         lpr        = 16;
         vdisp_rows = 25;
     } else {
@@ -671,9 +680,10 @@ vaxmate_video_poll(void *priv)
         start = ((vid->crtc[CRTC_STARTHI] & 0x3f) << 8) | vid->crtc[CRTC_STARTLO];
 
         vid->scanline = sub;
-        vid->memaddr  = start + (row * ((vid->mode == VMODE_TEXT40) ? 40 : 80));
+        vid->memaddr  = start + (row * (((vid->mode == VMODE_TEXT40) ||
+                                         (vid->mode == VMODE_TEXT40C)) ? 40 : 80));
 
-        if (vid->mode <= VMODE_TEXT80)
+        if (vid->mode <= VMODE_TEXT_LAST)
             vaxmate_video_render_text(vid, vid->displine);
         else
             vaxmate_video_render_graphics(vid, vid->displine, vid->displine);
@@ -891,7 +901,7 @@ vaxmate_video_init(UNUSED(const device_t *info))
     video_inform(VIDEO_FLAG_TYPE_MDA, &timing_vaxmate);
 
     vid->monitor_index = monitor_index_global;
-    vid->ctrl_a        = CTLA_DISPLAY_EN | VMODE_TEXT80;
+    vid->ctrl_a        = CTLA_DISPLAY_EN | VMODE_TEXT80;   /* 80x25 文本，模式号 2 */
     vid->ctrl_b        = CTLB_DISPLAY_EN | CTLB_SAVER;
     vid->mode          = VMODE_TEXT80;
     vid->spr           = SPR_DISABLE_VIDEO; /* video enabled at power-on */
