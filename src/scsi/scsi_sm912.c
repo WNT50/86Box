@@ -224,6 +224,12 @@ scsi_sm912_dma_pump(scsi_sm912_t *dev)
                 dev->status_byte = (dev->sd != NULL) ? dev->sd->status : 0x02;
                 dev->data_latch  = dev->status_byte;
                 dev->phase       = SM912_STATUS;
+                /* Same completion as the record-ended path below: a status byte
+                   waits, so REQ goes up and the line has to be raised here too.
+                   Returning without this left the guest polling for an
+                   interrupt that never came. */
+                dev->req         = 1;
+                scsi_sm912_update_irq(dev);
                 scsi_sm912_log("[SM912] dma over at %u/%u\n", dev->data_pos,
                                (dev->sd != NULL) ? (unsigned) dev->sd->buffer_length : 0);
                 return;
