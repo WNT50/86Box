@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #define HAVE_STDARG_H
+#include <86box/plat.h>
 #include <86box/86box.h>
 #include "cpu.h"
 #include "x86seg.h"
@@ -698,6 +699,21 @@ i8018x_pcb_read_word(struct i8018x_pcb_t *dev, uint16_t off)
     /* CHG/NOCHG is write only (270788-001 section 8.2). */
     if ((off == I8018X_DMA_CTRL(0)) || (off == I8018X_DMA_CTRL(1)))
         return (uint16_t) (dev->regs[off / 2] & ~I8018X_DMA_CHG);
+
+    /* PCX_DMALOG=1: what the guest reads back out of a channel's count
+       register, with where it asked.  The floppy driver decides whether a
+       transfer is still in progress from this value. */
+    if (((off == I8018X_DMA_COUNT(0)) || (off == I8018X_DMA_COUNT(1))) &&
+        (getenv("PCX_DMALOG") != NULL)) {
+        static long cn;
+
+        if (cn++ < 4000)
+            pclog("[DMA-CNTR] slot=%d read=%04X ctrl=%04X @%04X:%04X\n",
+                  (off == I8018X_DMA_COUNT(0)) ? 0 : 1,
+                  dev->regs[off / 2],
+                  dev->regs[I8018X_DMA_CTRL((off == I8018X_DMA_COUNT(0)) ? 0 : 1) / 2],
+                  (uint16_t) cpu_state.temp_CS, (uint16_t) cpu_state.temp_pc);
+    }
 
     return i8018x_pcb_decoded(off) ? dev->regs[off / 2] : 0xFFFF;
 }
