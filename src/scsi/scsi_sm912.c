@@ -124,6 +124,7 @@ typedef struct scsi_sm912_t {
     int               rst;        /* the reset write is still holding the bus */
     uint8_t           data_latch; /* byte presented on the data register */
     int               ack;        /* ACK line level */
+    int               ack_wr;     /* this pulse came from a write */
 
     scsi_sm912_irq_t  irq;
     void             *irq_priv;
@@ -501,7 +502,8 @@ scsi_sm912_ack_fall(scsi_sm912_t *dev)
 
     switch (dev->phase) {
         case SM912_CMD:
-            scsi_sm912_command_byte(dev, dev->data_latch);
+            if (dev->ack_wr)
+                scsi_sm912_command_byte(dev, dev->data_latch);
             break;
         case SM912_DATAIN:
             if (sc == NULL) {
@@ -523,7 +525,8 @@ scsi_sm912_ack_fall(scsi_sm912_t *dev)
             }
             break;
         case SM912_DATAOUT:
-            if ((sc != NULL) && (dev->data_pos < (uint32_t) dev->sd->buffer_length))
+            if (dev->ack_wr && (sc != NULL) &&
+                (dev->data_pos < (uint32_t) dev->sd->buffer_length))
                 sc->temp_buffer[dev->data_pos++] = dev->data_latch;
             if ((sc != NULL) && (dev->data_pos >= (uint32_t) dev->sd->buffer_length)) {
                 scsi_device_command_phase1(dev->sd);
@@ -565,9 +568,10 @@ scsi_sm912_ack_fall(scsi_sm912_t *dev)
 
 /* One data-register access: latch the byte, pulse ACK, let the edge commit. */
 static void
-scsi_sm912_ack_pulse(scsi_sm912_t *dev)
+scsi_sm912_ack_pulse(scsi_sm912_t *dev, int write)
 {
-    dev->ack = 1;
+    dev->ack_wr = write;
+    dev->ack    = 1;
     scsi_sm912_ack_fall(dev);
 }
 
@@ -596,11 +600,11 @@ scsi_sm912_data_read(scsi_sm912_t *dev)
             if (sm912_dma_used)
                 return 0x00;
             ret = dev->data_latch;
-            scsi_sm912_ack_pulse(dev);
+            scsi_sm912_ack_pulse(dev, 0);
             break;
         case SM912_STATUS:
             ret = dev->data_latch;      /* the status byte */
-            scsi_sm912_ack_pulse(dev);
+            scsi_sm912_ack_pulse(dev, 0);
             scsi_sm912_log("[SM912] status %02X, message %s\n", ret,
                            (dev->phase == SM912_IDLE) ? "auto-acked" : "left for host");
             if (getenv("PCX_SCSILOG") != NULL) {
@@ -613,9 +617,16 @@ scsi_sm912_data_read(scsi_sm912_t *dev)
             break;
         case SM912_MSGIN:
             ret = dev->data_latch;
-            scsi_sm912_ack_pulse(dev);
+            scsi_sm912_ack_pulse(dev, 0);
             break;
         default:
+            /* The data register keeps the last byte on the bus even when no
+               phase is active (MAME pcd.cpp scsi_r handles offsets 0 and 2
+               alike and returns the input buffer).  Returning 0xff here made
+               a driver that samples the register while idle see a bogus
+               status. */
+            ret = dev->data_latch;
+            scsi_sm912_ack_pulse(dev, 0);
             break;
     }
 
@@ -634,7 +645,7 @@ scsi_sm912_data_write(scsi_sm912_t *dev, uint8_t val)
             scsi_sm912_log("[SM912] pio cdb %02X from %04X:%04X\n", val,
                            cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
             dev->data_latch = val;
-            scsi_sm912_ack_pulse(dev);
+            scsi_sm912_ack_pulse(dev, 1);
             break;
         case SM912_DATAOUT:
             if (getenv("PCX_SCSILOG") != NULL) {
@@ -645,7 +656,7 @@ scsi_sm912_data_write(scsi_sm912_t *dev, uint8_t val)
                           (dev->sd != NULL) ? (int) dev->sd->buffer_length : -1);
             }
             dev->data_latch = val;
-            scsi_sm912_ack_pulse(dev);
+            scsi_sm912_ack_pulse(dev, 1);
             break;
         default:
             break;
