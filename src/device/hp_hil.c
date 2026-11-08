@@ -201,15 +201,20 @@ hp_hil_ap_tick(void *priv)
 {
     hp_hil_t *dev = (hp_hil_t *) priv;
     int       i, any = 0;
+    int       poll_frames = 0;
     uint8_t   addr = 0;
 
     if ((dev->w3 & HIL_W3_APE) && !dev->loop) {
         for (i = 0; i < HIL_NDEV; i++) {
+            int poll_before;
+
             if (!dev->dev[i].addr)
                 continue;
             addr = dev->dev[i].addr;
+            poll_before = dev->fifo_count;
             if (dev->dev[i].ops->poll(dev, i))
                 any = 1;
+            poll_frames += dev->fifo_count - poll_before;
         }
 
         if (any) {
@@ -219,7 +224,8 @@ hp_hil_ap_tick(void *priv)
                 hp_hil_no_irq = 1;
 
             /* fifo_push() clears APE when it raises the interrupt. */
-            hp_hil_fifo_push((uint16_t) (HIL_FRAME_CMD | ((uint16_t) addr << 8) | HIL_POL));
+            hp_hil_fifo_push((uint16_t) (HIL_FRAME_CMD | ((uint16_t) addr << 8) |
+                                         ((HIL_POL + poll_frames) & 0xff)));
             hp_hil_no_irq = 0;
         }
     }
@@ -315,6 +321,19 @@ hp_hil_reply(uint8_t addr, uint8_t data)
     return (uint16_t) (((uint16_t) (addr & 7) << 8) | data);
 }
 
+/* A Poll Record ends with the Poll command incremented by the number of data
+   frames in the record (TRM 45918A appendix E).  The command frame keeps the
+   original address and command bit; only its low opcode byte advances. */
+static uint16_t
+hp_hil_poll_command(uint16_t frame, int data_frames)
+{
+    if (data_frames <= 0)
+        return frame;
+
+    return (uint16_t) ((frame & 0xff00) | ((frame + data_frames) & 0xff));
+}
+
+
 /*
  * Walk a command frame down the link.
  *
@@ -341,6 +360,7 @@ hp_hil_link_frame(uint16_t frame)
     uint8_t   data;
     int       i;
     int       command;
+    int       poll_frames = 0;
 
     data    = (uint8_t) (frame & 0xff);
     addr    = (uint8_t) ((frame >> 8) & 0x07);
@@ -433,8 +453,11 @@ hp_hil_link_frame(uint16_t frame)
                            the axis bytes, then the incremented POLL COMMAND
                            last.  That command frame is what tells the System
                            the record has ended, so it must not lead. */
+                        int poll_before = dev->fifo_count;
+
                         if (!d->ops->poll(dev, i) && (dev->w2 & HIL_W2_IPF))
                             hp_hil_no_irq = 1; /* IPF + Auto Poll: queue silently */
+                        poll_frames += dev->fifo_count - poll_before;
                     }
                     break;
             }
@@ -445,6 +468,7 @@ hp_hil_link_frame(uint16_t frame)
                 hp_hil_no_irq = 0;
                 return;
             }
+            frame = hp_hil_poll_command(frame, poll_frames);
             hp_hil_fifo_push(frame);
             hp_hil_no_irq = 0;
             hp_hil_link_ready();
@@ -481,13 +505,17 @@ hp_hil_link_frame(uint16_t frame)
 
             default:
                 if ((data >= HIL_POL) && (data <= (HIL_POL + 0x0f))) {
+                    int poll_before = dev->fifo_count;
+
                     if (!d->ops->poll(dev, i) && (dev->w2 & HIL_W2_IPF))
                         hp_hil_no_irq = 1; /* IPF + Auto Poll: queue silently */
+                    poll_frames += dev->fifo_count - poll_before;
                 }
                 break;
         }
         if (d->pt && (i < (HIL_NDEV - 1)))
             continue;
+        frame = hp_hil_poll_command(frame, poll_frames);
         hp_hil_fifo_push(frame);
         hp_hil_no_irq = 0;
         hp_hil_link_ready();
