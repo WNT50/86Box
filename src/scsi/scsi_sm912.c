@@ -53,6 +53,8 @@
 #include <86box/dma.h>
 
 extern int i8018x_pcb_dma_remaining(int channel);
+extern int i8018x_pcb_dma_io_port(struct i8018x_pcb_t *dev, int channel, int dst);
+extern struct i8018x_pcb_t *i8018x_pcb_current;
 extern uint32_t i8018x_pcb_dma_dst(int channel);
 extern void i8018x_pcb_dma_eop(int channel);
 extern int i8018x_pcb_dma_src_port(int channel);
@@ -119,6 +121,7 @@ typedef struct scsi_sm912_t {
     int               irq_level;
     int               pio_used;   /* the host moved bytes through the data port */
     int               req;        /* REQ line: a byte waits in the data register */
+    int               rst;        /* the reset write is still holding the bus */
 
     scsi_sm912_irq_t  irq;
     void             *irq_priv;
@@ -163,8 +166,16 @@ scsi_sm912_dma_pump(scsi_sm912_t *dev)
 
     if (dev->pio_used)
         return;
-    if (i8018x_pcb_dma_src_port(SM912_DMA_CHANNEL) != dev->base)
-        return;   /* the channel is not pointed at our data register */
+    /* The channel must point at our data register on the side the adapter
+       sits on: source for a read, destination for a write.  Only checking the
+       source kept every data-out record (OMTI 0xC2 ASSIGN PARAM, FORMAT) from
+       moving, and the guest then timed out waiting for C/D to rise. */
+    if (dev->phase == SM912_DATAOUT) {
+        if (i8018x_pcb_dma_io_port(i8018x_pcb_current, SM912_DMA_CHANNEL, 1) != dev->base)
+            return;
+    } else if (i8018x_pcb_dma_src_port(SM912_DMA_CHANNEL) != dev->base) {
+        return;
+    }
 
     if (dev->phase == SM912_DATAIN) {
         if (dev->data_pos >= (uint32_t) dev->sd->buffer_length)
@@ -573,6 +584,13 @@ scsi_sm912_data_write(scsi_sm912_t *dev, uint8_t val)
             scsi_sm912_command_byte(dev, val);
             break;
         case SM912_DATAOUT:
+            if (getenv("PCX_SCSILOG") != NULL) {
+                static long do_n;
+
+                if (do_n++ < 64)
+                    pclog("[SMDO] #%ld byte=%02X pos=%u/%d\n", do_n, val, dev->data_pos,
+                          (dev->sd != NULL) ? (int) dev->sd->buffer_length : -1);
+            }
             if ((sc != NULL) && (sc->temp_buffer != NULL) &&
                 (dev->data_pos < (uint32_t) dev->sd->buffer_length))
                 sc->temp_buffer[dev->data_pos++] = val;
@@ -643,6 +661,17 @@ scsi_sm912_write(uint16_t port, uint8_t val, void *priv)
                        cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc,
                        dev->phase);
         scsi_sm912_reset(dev);
+        dev->rst = 1;
+        return;
+    }
+
+    /* The driver holds the reset with a 4 and then writes a 0 to release it
+       (wn: 110E:3112 out 4 / delay / 110E:3137 out 0).  That release must
+       not start a selection: doing so leaves BSY up, and the command the
+       driver builds right afterwards bails out with "Controller already
+       busy".  MAME's pcd.cpp scsi_w() keeps the same m_rst latch. */
+    if (dev->rst) {
+        dev->rst = 0;
         return;
     }
 
@@ -658,6 +687,8 @@ scsi_sm912_reset(scsi_sm912_t *dev)
     dev->cdb_len = 6;
     dev->sd      = NULL;
     dev->data_pos = 0;
+    dev->req     = 0;
+    dev->rst     = 0;
 
     scsi_sm912_update_irq(dev);
 }
