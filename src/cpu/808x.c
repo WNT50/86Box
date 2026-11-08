@@ -4061,6 +4061,75 @@ execx86(int cycs)
                 pic_pcx_dump("at 110E:36AB");
         }
 
+        /* PCX_FETCHRING=1: the instructions actually executed in the two
+           segments the installer loops through, with their bytes taken at
+           fetch time (the overlay may be replaced afterwards). */
+        if (getenv("PCX_FETCHRING") &&
+            (((uint16_t) CS == 0x1000) || ((uint16_t) CS == 0x110e))) {
+            static struct { uint16_t seg_; uint16_t off_; uint8_t bytes_[8]; } fr[256];
+            static uint32_t fr_n, fr_dumps;
+            uint16_t fseg = (uint16_t) CS, foff = (uint16_t) cpu_state.pc;
+            int      k;
+
+            fr[fr_n & 0xff].seg_ = fseg;
+            fr[fr_n & 0xff].off_ = foff;
+            for (k = 0; k < 8; k++)
+                fr[fr_n & 0xff].bytes_[k] = readmemb(fseg, foff + k);
+            fr_n++;
+
+            if ((fr_n % 40000u) == 0u && (fr_dumps < 3u)) {
+                FILE *f = fopen("/tmp/fetchring.txt", "a");
+
+                fr_dumps++;
+                if (f != NULL) {
+                    uint32_t base = fr_n - 256u;
+
+                    fprintf(f, "=== dump %u at entry %u ===\n", fr_dumps, fr_n);
+                    for (k = 0; k < 256; k++) {
+                        uint32_t idx = (base + k) & 0xff;
+
+                        fprintf(f, "%04X:%04X  %02X %02X %02X %02X %02X %02X\n",
+                                fr[idx].seg_, fr[idx].off_,
+                                fr[idx].bytes_[0], fr[idx].bytes_[1],
+                                fr[idx].bytes_[2], fr[idx].bytes_[3],
+                                fr[idx].bytes_[4], fr[idx].bytes_[5]);
+                    }
+                    fclose(f);
+                }
+            }
+        }
+
+        /* PCX_LIVEDUMP=1: snapshot the code the installer loop really runs. */
+        if (getenv("PCX_LIVEDUMP") && ((uint16_t) CS == 0x1000) &&
+            ((uint16_t) cpu_state.pc == 0x0b2e)) {
+            static int ld_done;
+
+            if (!ld_done) {
+                FILE *f = fopen("/tmp/live_0b00.bin", "wb");
+                int   i;
+
+                ld_done = 1;
+                if (f != NULL) {
+                    for (i = 0; i < 0x200; i++)
+                        fputc(readmemb(0x1000, 0x0b00 + i), f);
+                    fclose(f);
+                    pclog("[LIVEDUMP] wrote 512 bytes at 1000:0B00\n");
+                }
+            }
+        }
+
+        /* PCX_CONW=1: the console write call's result in the installer loop. */
+        if (getenv("PCX_CONW") && ((uint16_t) CS == 0x1000) &&
+            ((uint16_t) cpu_state.pc == 0x0b32)) {
+            static long cw_n;
+
+            if (cw_n++ < 40)
+                pclog("[CONW] #%ld ax=%04X ptr=%04X rem=%04X total=%08X\n",
+                      cw_n, (uint16_t) AX, readmemw(0x0000, 0xf836),
+                      readmemw(0x0000, 0xf838),
+                      readmemw(0x0000, 0xf83a) << 16 | readmemw(0x0000, 0xf83c));
+        }
+
         /* PCX_DEVSCAN=1: the SINIX installer's device-table scan. */
         if (getenv("PCX_DEVSCAN") && ((uint16_t) CS == 0x1000) &&
             ((uint16_t) cpu_state.pc == 0x0428)) {

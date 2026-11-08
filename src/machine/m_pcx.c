@@ -432,13 +432,12 @@ pcx_scan_read8(UNUSED(uint16_t port), UNUSED(void *priv))
 static uint8_t
 pcx_faultseg_read(UNUSED(uint16_t port), UNUSED(void *priv))
 {
-    /* 0xf842: what the NMI handler reads to name the segment the fault was
-       taken in.  The forum only knows the name the manual gives it
-       ("SPEICHER-SEGMENT") and asks whether it is the high eight bits of the
-       faulting address; nothing in the ROM or the kernel reads it back in a way
-       that settles the polarity, so report bits 19..16 of the address the card
-       refused and let the firmware print what it likes. */
-    return (uint8_t) ((pcx_mmu_fault_addr() >> 16) & 0xff);
+    /* 0xf842: the fault address register.  Servicehandbuch Teil 1, section on
+       the memory error logic: the address bits A12..A19 of the access that
+       raised the parity or bus time-out error are stored here for the processor
+       to read, so the handler can find the page that failed.  Taking A16..A23
+       instead loses the four low bits and names the wrong 64 KB block. */
+    return (uint8_t) ((pcx_mmu_fault_addr() >> 12) & 0xff);
 }
 
 static uint8_t
