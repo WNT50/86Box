@@ -677,7 +677,8 @@ pcx_mmu_peek8(uint32_t addr)
     if (e == 0x0000)
         return 0xff;
 
-    ph = ((uint32_t) ((uint16_t) ((e << 4) | (e >> 12)) & 0xff00u)) | (addr & 0x7ffu);
+    ph = ((((uint32_t) e << 3) & 0x7fc00u) | ((addr >> 1) & 0x3ffu)) << 1;
+    ph |= (addr & 1u);
     return mem_readb_phys(ph & pcx_mmu_ram_mask);
 }
 
