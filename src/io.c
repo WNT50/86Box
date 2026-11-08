@@ -509,6 +509,43 @@ outb(uint16_t port, uint8_t val)
     io_cycle_smi = 0;
     io_size = 1;
     io_write = 1;
+
+    /* PCX_TMRTRACE=1: who rewrites the 80186 timer block at 0xff40-0xff7f. */
+    if ((port >= 0xff40) && (port <= 0xff7f) && (getenv("PCX_TMRTRACE") != NULL)) {
+        static struct { uint16_t port, ip; uint32_t n; } tw[16];
+        static long tw_total, tw_dump;
+        int i, k;
+
+        tw_total++;
+        for (i = 0; i < 16; i++) {
+            if (tw[i].n && (tw[i].port == port) && (tw[i].ip == (uint16_t) cpu_state.pc)) {
+                tw[i].n++;
+                break;
+            }
+            if (!tw[i].n) {
+                tw[i].port = port;
+                tw[i].ip   = (uint16_t) cpu_state.pc;
+                tw[i].n    = 1;
+                break;
+            }
+        }
+        if ((tw_total - tw_dump) >= 2000) {
+            tw_dump = tw_total;
+            pclog("[TW] n=%ld", tw_total);
+            for (k = 0; k < 6; k++) {
+                int best = -1;
+
+                for (i = 0; i < 16; i++)
+                    if (tw[i].n && ((best < 0) || (tw[i].n > tw[best].n)))
+                        best = i;
+                if (best < 0)
+                    break;
+                pclog(" %04X@%04X:%u", tw[best].port, tw[best].ip, tw[best].n);
+                tw[best].n = 0;
+            }
+            pclog("\n");
+        }
+    }
     io_val  = val;
 
     if (cpu_dr_armed)

@@ -60,6 +60,8 @@
 #include <86box/mem.h>
 #include <86box/nmi.h>
 #include <86box/pic.h>
+#include <86box/device.h>
+#include <86box/i8018x.h>
 #include <86box/plat_unused.h>
 #include <86box/timer.h>
 #include <86box/video.h>
@@ -4927,6 +4929,21 @@ execx86_new(int cycs)
         }
 
         if (m808x_cpu.halted) {
+            /* The 80186's own interrupt controller can be the only wake-up
+               source (its timers), and it has no pin of its own to raise, so
+               it has to be polled here or a guest that HLTs while waiting for
+               a tick sleeps forever. */
+            if ((m808x_cpu.flags & I_FLAG) && (i8018x_pcb_current != NULL) &&
+                i8018x_pcb_icu_pending()) {
+                uint8_t vec = (uint8_t) i8018x_pcb_icu_int_type();
+
+                m808x_cpu.halted          = false;
+                m808x_cpu.biu.fetch.kind  = FETCH_SUSPENDED;
+                interrupt_routine(&m808x_cpu, vec, false);
+                biu_fetch_next(&m808x_cpu);
+                m808x_86box_export_arch_state(&m808x_cpu);
+                continue;
+            }
             if (m808x_cpu.nmi_pin) {
                 /* Unlike the normal instruction-boundary path, HLT wake-up
                  * bypasses finish_instruction(), so set the architectural NMI

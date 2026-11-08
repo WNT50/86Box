@@ -21,6 +21,7 @@
 #include <stdlib.h>
 
 extern void pic_pcx_dump(const char *tag);
+extern void i8018x_pcb_dump_icu(void);
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -4040,6 +4041,16 @@ execx86(int cycs)
         }
 
         execx86_instruction();
+
+        /* PCX_ICUSNAP=1: dump the 80186 ICU and timers every 5 s of host time. */
+        if (getenv("PCX_ICUSNAP")) {
+            static uint32_t ic_last;
+
+            if ((plat_get_ticks() - ic_last) >= 5000u) {
+                ic_last = plat_get_ticks();
+                i8018x_pcb_dump_icu();
+            }
+        }
 
         /* PCX_PICSNAP=1: snapshot both 8259s where the installer waits. */
         if (getenv("PCX_PICSNAP") && ((uint16_t) CS == 0x110E) &&

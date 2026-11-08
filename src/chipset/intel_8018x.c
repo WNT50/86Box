@@ -1084,6 +1084,31 @@ i8018x_pcb_dma_step_ptr(struct i8018x_pcb_t *dev, int slot, int dst)
    8.2). A terminal count raises the channel's request in the interrupt
    controller when INT is set; taking that request to the CPU is the
    board's business, the same as for the other sources. */
+/* ICU + timer snapshot for the "guest sleeps forever" case. */
+void
+i8018x_pcb_dump_icu(void)
+{
+    struct i8018x_pcb_t *d = i8018x_pcb_current;
+
+    if (d == NULL)
+        return;
+
+    pclog("[ICUSNAP] mask=%04X prio=%04X isr=%04X req=%04X status=%04X "
+          "tmr_req=%04X ext=%04X latch=%04X | "
+          "T0 cnt=%04X max=%04X con=%04X | T1 con=%04X | T2 con=%04X\n",
+          d->regs[I8018X_ICU_MASK / 2], d->regs[I8018X_ICU_PRIO_MASK / 2],
+          d->regs[I8018X_ICU_INSERVICE / 2], d->regs[I8018X_ICU_REQ / 2],
+          d->regs[I8018X_ICU_STATUS / 2], d->tmr_req, d->icu_ext,
+          d->icu_latch,
+          d->regs[I8018X_TMR_COUNT(0) / 2], d->regs[I8018X_TMR_MAXA(0) / 2],
+          d->regs[I8018X_TMR_CON(0) / 2],
+          d->regs[I8018X_TMR_CON(1) / 2], d->regs[I8018X_TMR_CON(2) / 2]);
+    pclog("[ICUSNAP2] tsc=%llu T0 base=%llu src=%llu ext_div=%u tmr_div=%u\n",
+          (unsigned long long) tsc, (unsigned long long) d->tmr_base[0],
+          (unsigned long long) d->tmr_src[0], d->tmr_ext_div[0],
+          i8018x_pcb_tmr_div());
+}
+
 /* Source I/O port the guest programmed for a channel (0xFFFF when the channel
    is not ours or is not armed); a slave uses it to tell whether the channel is
    really pointed at its own data register. */
