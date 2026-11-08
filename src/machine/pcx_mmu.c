@@ -474,8 +474,12 @@ pcx_mmu_translate(uint32_t addr, int rw)
                identity entries carry flags in their low bits, which this
                formula does not mask away. */
             static int mp = -1;
-            if (mp < 0)
-                mp = getenv("PCX_MAMEPHYS") ? 1 : 0;
+            if (mp < 0) {
+                const char *e = getenv("PCX_MAMEPHYS");
+                /* MAME's single formula is the default: it cut the spurious
+                   null-entry faults from 400+ to 4 on the same install run. */
+                mp = e ? (atoi(e) != 0) : 1;
+            }
             if (mp) {
                 uint32_t w = ((((uint32_t) pcx_mmu.pg[pcx_mmu_page_index(addr)] << 3) & 0x7fc00u) |
                               ((addr >> 1) & 0x3ffu));
