@@ -920,6 +920,7 @@ machine_pcx_init_ex(const machine_t *model)
 
     /* Two 8259s on separate 80186 interrupt inputs (pic.c helper). */
     pic_init_pcx();
+    pic_set_imr_notify_now(1);
 
     {
         struct i8018x_pcb_t *pcb = device_add(&i8018x_pcb_device);

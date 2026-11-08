@@ -76,6 +76,10 @@ static pc_timer_t pic_timer;
    IMR-write timing would otherwise silently never schedule a pending-IRQ check at all. Set once
    via pic_set_force_xt_imr_timing() by the owning device at init time. */
 static int force_xt_imr_timing = 0;
+/* 80186 boards (PC-X) do not wait for the XT-era IMR settle delay: the mask
+   write must re-evaluate pending at once, or a request that arrived while the
+   line was masked stays invisible after the driver unmasks it. */
+static int imr_notify_now = 0;
 static int pic_pci = 0;
 static int kbd_latch = 0;
 static int mouse_latch = 0;
@@ -850,7 +854,8 @@ pic_write(uint16_t addr, uint8_t val, void *priv)
                 break;
             case STATE_NONE:
                 dev->imr = (uint8_t) (val | (uint8_t) ((dev == &pic2) ? (pic_pinned_irqs >> 8) : pic_pinned_irqs));
-                if ((dev->flags & PIC_IBM5140) || (is286 && !force_xt_imr_timing) || dev->zenith)
+                if ((dev->flags & PIC_IBM5140) || (is286 && !force_xt_imr_timing) ||
+                    dev->zenith || imr_notify_now)
                     pic_notify();
                 else if (force_xt_imr_timing)
                     /* Deliberately small but non-zero, unlike the stock formula below (which
@@ -1154,6 +1159,12 @@ pic_irq_ack_instance(pic_t *dev)
 
 /* Tandy 2000 wires two 8259s to separate CPU inputs, so neither is the
    other's slave and each keeps its own vector base. */
+void
+pic_set_imr_notify_now(int enable)
+{
+    imr_notify_now = !!enable;
+}
+
 void
 pic_init_tandy2k(void)
 {
