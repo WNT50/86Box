@@ -122,6 +122,8 @@ typedef struct scsi_sm912_t {
     int               pio_used;   /* the host moved bytes through the data port */
     int               req;        /* REQ line: a byte waits in the data register */
     int               rst;        /* the reset write is still holding the bus */
+    uint8_t           data_latch; /* byte presented on the data register */
+    int               ack;        /* ACK line level */
 
     scsi_sm912_irq_t  irq;
     void             *irq_priv;
@@ -219,6 +221,7 @@ scsi_sm912_dma_pump(scsi_sm912_t *dev)
                 if (dev->sd != NULL)
                     scsi_device_command_phase1(dev->sd);
                 dev->status_byte = (dev->sd != NULL) ? dev->sd->status : 0x02;
+                dev->data_latch  = dev->status_byte;
                 dev->phase       = SM912_STATUS;
                 scsi_sm912_log("[SM912] dma over at %u/%u\n", dev->data_pos,
                                (dev->sd != NULL) ? (unsigned) dev->sd->buffer_length : 0);
@@ -233,6 +236,7 @@ scsi_sm912_dma_pump(scsi_sm912_t *dev)
             i8018x_pcb_dma_eop(SM912_DMA_CHANNEL);
             scsi_device_command_phase1(dev->sd);
             dev->status_byte = dev->sd->status;
+            dev->data_latch  = dev->status_byte;
             dev->phase       = SM912_STATUS;
             dev->req         = 1;
             scsi_sm912_log("[SM912] dma data-in done %u\n", dev->data_pos);
@@ -248,6 +252,7 @@ scsi_sm912_dma_pump(scsi_sm912_t *dev)
         if (dev->data_pos >= (uint32_t) dev->sd->buffer_length) {
             scsi_device_command_phase1(dev->sd);
             dev->status_byte = dev->sd->status;
+            dev->data_latch  = dev->status_byte;
             dev->phase       = SM912_STATUS;
         }
     }
@@ -372,9 +377,10 @@ scsi_sm912_execute(scsi_sm912_t *dev)
 
         if ((dev->sd->buffer_length > 0) && (sc != NULL) && (sc->temp_buffer != NULL)) {
             if (dev->sd->phase == SCSI_PHASE_DATA_IN) {
-                sc->buffer_pos = 0;
-                dev->phase     = SM912_DATAIN;
-                dev->req       = 1;
+                sc->buffer_pos  = 0;
+                dev->phase      = SM912_DATAIN;
+                dev->data_latch = sc->temp_buffer[0];
+                dev->req        = 1;
                 scsi_sm912_update_irq(dev);
                 return;
             }
@@ -397,6 +403,7 @@ scsi_sm912_execute(scsi_sm912_t *dev)
         scsi_device_command_phase1(dev->sd);
 
     dev->status_byte = (dev->sd != NULL) ? dev->sd->status : 0x02;
+    dev->data_latch  = dev->status_byte;
     dev->phase       = SM912_STATUS;
 
     scsi_sm912_update_irq(dev);
@@ -442,9 +449,10 @@ scsi_sm912_select(scsi_sm912_t *dev, uint8_t val)
         return;
     }
 
-    dev->cdb_len = 6;
-    dev->cdb_pos = 0;
-    dev->phase   = SM912_CMD;
+    dev->cdb_len    = 6;
+    dev->cdb_pos    = 0;
+    dev->phase      = SM912_CMD;
+    dev->data_latch = 0;
     /* The target asks for the first CDB byte as soon as it acknowledges the
        selection: REQ up with C/D set.  The kernel driver polls exactly this
        bit before every byte (110E:36A7: in 0xF941 / and 0x20 / jz), so a
@@ -478,11 +486,95 @@ scsi_sm912_command_byte(scsi_sm912_t *dev, uint8_t val)
     scsi_sm912_execute(dev);
 }
 
+/* ACK: the host adapter drives ACK on every data-register access and the
+   target commits the byte on the falling edge.  MAME does the same
+   (pcd.cpp scsi_r()/scsi_w() call write_ack(1), write_scsi_req() calls
+   write_ack(0), and scsihle.cpp input_ack() takes the byte on the falling
+   edge).  Keeping an explicit latch makes the order visible: the byte stays
+   readable until ACK drops, and only then does REQ move on. */
+static void
+scsi_sm912_ack_fall(scsi_sm912_t *dev)
+{
+    scsi_common_t *sc = (dev->sd != NULL) ? dev->sd->sc : NULL;
+
+    dev->ack = 0;
+
+    switch (dev->phase) {
+        case SM912_CMD:
+            scsi_sm912_command_byte(dev, dev->data_latch);
+            break;
+        case SM912_DATAIN:
+            if (sc == NULL) {
+                dev->req = 0;
+                break;
+            }
+            dev->data_pos++;
+            if (dev->data_pos < (uint32_t) dev->sd->buffer_length) {
+                dev->data_latch = sc->temp_buffer[dev->data_pos];
+                dev->req        = 1;
+            } else {
+                scsi_device_command_phase1(dev->sd);
+                dev->status_byte = dev->sd->status;
+                dev->data_latch  = dev->status_byte;
+                dev->phase       = SM912_STATUS;
+                dev->req         = 1;
+                scsi_sm912_log("[SM912] data-in %u/%u byte(s)\n", dev->data_pos,
+                               (unsigned) dev->sd->buffer_length);
+            }
+            break;
+        case SM912_DATAOUT:
+            if ((sc != NULL) && (dev->data_pos < (uint32_t) dev->sd->buffer_length))
+                sc->temp_buffer[dev->data_pos++] = dev->data_latch;
+            if ((sc != NULL) && (dev->data_pos >= (uint32_t) dev->sd->buffer_length)) {
+                scsi_device_command_phase1(dev->sd);
+                dev->status_byte = dev->sd->status;
+                dev->data_latch  = dev->status_byte;
+                dev->phase       = SM912_STATUS;
+                dev->req         = 1;
+            }
+            break;
+        case SM912_STATUS: {
+            static int autoack = -1;
+
+            if (autoack < 0)
+                autoack = (getenv("PCX_NOAUTOACK") != NULL) ? 0 : 1;
+            dev->req = 0;
+            if (autoack) {
+                dev->phase = SM912_IDLE;
+            } else {
+                dev->message_byte = 0x00;   /* COMMAND COMPLETE */
+                dev->data_latch   = dev->message_byte;
+                dev->phase        = SM912_MSGIN;
+                dev->req          = 1;
+            }
+            /* The line follows the phase: leaving it high after the status
+               byte made the driver treat the command as still in progress
+               and reset the bus. */
+            scsi_sm912_update_irq(dev);
+            break;
+        }
+        case SM912_MSGIN:
+            dev->req   = 0;
+            dev->phase = SM912_IDLE;
+            scsi_sm912_update_irq(dev);
+            break;
+        default:
+            break;
+    }
+}
+
+/* One data-register access: latch the byte, pulse ACK, let the edge commit. */
+static void
+scsi_sm912_ack_pulse(scsi_sm912_t *dev)
+{
+    dev->ack = 1;
+    scsi_sm912_ack_fall(dev);
+}
+
 static uint8_t
 scsi_sm912_data_read(scsi_sm912_t *dev)
 {
-    uint8_t        ret = 0xff;
-    scsi_common_t *sc  = (dev->sd != NULL) ? dev->sd->sc : NULL;
+    uint8_t ret = 0xff;
 
     switch (dev->phase) {
         case SM912_DATAIN:
@@ -503,46 +595,12 @@ scsi_sm912_data_read(scsi_sm912_t *dev)
                must not consume a second time. */
             if (sm912_dma_used)
                 return 0x00;
-            dev->req = 0;
-            if ((sc != NULL) && (sc->temp_buffer != NULL) &&
-                (dev->data_pos < (uint32_t) dev->sd->buffer_length))
-                ret = sc->temp_buffer[dev->data_pos++];
-            if (dev->data_pos < (uint32_t) dev->sd->buffer_length)
-                dev->req = 1;
-            if ((sc == NULL) || (dev->data_pos >= (uint32_t) dev->sd->buffer_length)) {
-                if (dev->sd != NULL)
-                    scsi_device_command_phase1(dev->sd);
-                dev->status_byte = (dev->sd != NULL) ? dev->sd->status : 0x02;
-                dev->phase       = SM912_STATUS;
-                dev->req         = 1;
-                scsi_sm912_log("[SM912] data-in %u/%u byte(s)\n", dev->data_pos,
-                               (dev->sd != NULL) ? (unsigned) dev->sd->buffer_length : 0);
-            }
+            ret = dev->data_latch;
+            scsi_sm912_ack_pulse(dev);
             break;
         case SM912_STATUS:
-            /* The adapter owns the message phase: the target raises REQ with
-               C/D and MSG, and the board takes the message byte itself and
-               drops BSY (MAME: write_scsi_req() reads the data register and
-               raises ACK without the CPU).  Waiting for the host to read the
-               message leaves BSY up and the driver resets the bus. */
-            ret      = dev->status_byte;
-            dev->req = 0;
-            {
-                static int autoack = -1;
-                if (autoack < 0)
-                    autoack = (getenv("PCX_NOAUTOACK") != NULL) ? 0 : 1;
-                if (autoack) {
-                    dev->phase = SM912_IDLE;
-                } else {
-                    dev->message_byte = 0x00;   /* COMMAND COMPLETE */
-                    dev->phase    = SM912_MSGIN;
-                    dev->req      = 1;
-                }
-                /* The line follows the phase: leaving it high after the status
-                   byte made the driver treat the command as still in progress
-                   and reset the bus. */
-                scsi_sm912_update_irq(dev);
-            }
+            ret = dev->data_latch;      /* the status byte */
+            scsi_sm912_ack_pulse(dev);
             scsi_sm912_log("[SM912] status %02X, message %s\n", ret,
                            (dev->phase == SM912_IDLE) ? "auto-acked" : "left for host");
             if (getenv("PCX_SCSILOG") != NULL) {
@@ -554,12 +612,8 @@ scsi_sm912_data_read(scsi_sm912_t *dev)
             }
             break;
         case SM912_MSGIN:
-            ret        = dev->message_byte;
-            dev->req   = 0;
-            dev->phase = SM912_IDLE;
-            scsi_sm912_update_irq(dev);
-            if (getenv("PCX_SCSILOG") != NULL)
-                pclog("[SMMSG] message read %02X, phase -> IDLE\n", ret);
+            ret = dev->data_latch;
+            scsi_sm912_ack_pulse(dev);
             break;
         default:
             break;
@@ -575,13 +629,12 @@ scsi_sm912_data_read(scsi_sm912_t *dev)
 static void
 scsi_sm912_data_write(scsi_sm912_t *dev, uint8_t val)
 {
-    scsi_common_t *sc = (dev->sd != NULL) ? dev->sd->sc : NULL;
-
     switch (dev->phase) {
         case SM912_CMD:
             scsi_sm912_log("[SM912] pio cdb %02X from %04X:%04X\n", val,
                            cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
-            scsi_sm912_command_byte(dev, val);
+            dev->data_latch = val;
+            scsi_sm912_ack_pulse(dev);
             break;
         case SM912_DATAOUT:
             if (getenv("PCX_SCSILOG") != NULL) {
@@ -591,16 +644,8 @@ scsi_sm912_data_write(scsi_sm912_t *dev, uint8_t val)
                     pclog("[SMDO] #%ld byte=%02X pos=%u/%d\n", do_n, val, dev->data_pos,
                           (dev->sd != NULL) ? (int) dev->sd->buffer_length : -1);
             }
-            if ((sc != NULL) && (sc->temp_buffer != NULL) &&
-                (dev->data_pos < (uint32_t) dev->sd->buffer_length))
-                sc->temp_buffer[dev->data_pos++] = val;
-            if ((sc != NULL) && (dev->data_pos >= (uint32_t) dev->sd->buffer_length)) {
-                /* Everything the command asked for is in: let the device
-                   commit it (a disk writes the sectors here). */
-                scsi_device_command_phase1(dev->sd);
-                dev->status_byte = (dev->sd != NULL) ? dev->sd->status : 0x02;
-                dev->phase       = SM912_STATUS;
-            }
+            dev->data_latch = val;
+            scsi_sm912_ack_pulse(dev);
             break;
         default:
             break;
