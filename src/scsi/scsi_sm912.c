@@ -123,12 +123,15 @@ typedef struct scsi_sm912_t {
     int               req;        /* REQ line: a byte waits in the data register */
     int               rst;        /* the reset write is still holding the bus */
     uint8_t           data_latch; /* byte presented on the data register */
+    int               phase_seen;  /* last phase written to the trace */
     int               ack;        /* ACK line level */
     int               ack_wr;     /* this pulse came from a write */
 
     scsi_sm912_irq_t  irq;
     void             *irq_priv;
 } scsi_sm912_t;
+
+static void scsi_sm912_phase_trace(scsi_sm912_t *dev, const char *where);
 
 static void
 scsi_sm912_update_irq(scsi_sm912_t *dev)
@@ -167,16 +170,26 @@ scsi_sm912_dma_pump(scsi_sm912_t *dev)
        then waits for C/D without ever touching the data port.  Try the write
        and back off on DMA_NODATA instead. */
 
-    if (dev->pio_used)
+    if (dev->pio_used) {
+        if (getenv("PCX_PHASELOG") != NULL)
+            pclog("[PH] pump skip: pio_used\n");
         return;
+    }
     /* The channel must point at our data register on the side the adapter
        sits on: source for a read, destination for a write.  Only checking the
        source kept every data-out record (OMTI 0xC2 ASSIGN PARAM, FORMAT) from
        moving, and the guest then timed out waiting for C/D to rise. */
     if (dev->phase == SM912_DATAOUT) {
-        if (i8018x_pcb_dma_io_port(i8018x_pcb_current, SM912_DMA_CHANNEL, 1) != dev->base)
+        if (i8018x_pcb_dma_io_port(i8018x_pcb_current, SM912_DMA_CHANNEL, 1) != dev->base) {
+            if (getenv("PCX_PHASELOG") != NULL)
+                pclog("[PH] pump skip: dst_port=%d\n",
+                      i8018x_pcb_dma_io_port(i8018x_pcb_current, SM912_DMA_CHANNEL, 1));
             return;
+        }
     } else if (i8018x_pcb_dma_src_port(SM912_DMA_CHANNEL) != dev->base) {
+        if (getenv("PCX_PHASELOG") != NULL)
+            pclog("[PH] pump skip: src_port=%d phase=%d\n",
+                  i8018x_pcb_dma_src_port(SM912_DMA_CHANNEL), dev->phase);
         return;
     }
 
@@ -275,6 +288,7 @@ scsi_sm912_dma_pump(scsi_sm912_t *dev)
                   sm912_dma_used, i8018x_pcb_dma_remaining(SM912_DMA_CHANNEL));
     }
     scsi_sm912_update_irq(dev);
+    scsi_sm912_phase_trace(dev, "pump");
 }
 
 static uint8_t
@@ -388,6 +402,10 @@ scsi_sm912_execute(scsi_sm912_t *dev)
                 dev->phase      = SM912_DATAIN;
                 dev->data_latch = sc->temp_buffer[0];
                 dev->req        = 1;
+                /* A driver that waits for the completion interrupt does not
+                   poll the status port, so give an armed DMA record its
+                   chance right here. */
+                scsi_sm912_dma_pump(dev);
                 scsi_sm912_update_irq(dev);
                 return;
             }
@@ -398,6 +416,7 @@ scsi_sm912_execute(scsi_sm912_t *dev)
                 /* Data-out runs the other way round but the handshake is the
                    same: REQ stays up while the target wants bytes. */
                 dev->req       = 1;
+                scsi_sm912_dma_pump(dev);
                 scsi_sm912_update_irq(dev);
                 return;
             }
@@ -414,6 +433,7 @@ scsi_sm912_execute(scsi_sm912_t *dev)
     dev->phase       = SM912_STATUS;
 
     scsi_sm912_update_irq(dev);
+    scsi_sm912_phase_trace(dev, "execute");
 }
 
 static void scsi_sm912_command_byte(scsi_sm912_t *dev, uint8_t val);
@@ -467,6 +487,7 @@ scsi_sm912_select(scsi_sm912_t *dev, uint8_t val)
     dev->req     = 1;
 
     scsi_sm912_update_irq(dev);
+    scsi_sm912_phase_trace(dev, "select");
 
     /* The DMA controller may already hold the whole CDB. */
 }
@@ -491,6 +512,26 @@ scsi_sm912_command_byte(scsi_sm912_t *dev, uint8_t val)
                    dev->cdb[4], dev->cdb[5]);
 
     scsi_sm912_execute(dev);
+}
+
+/* PCX_PHASELOG=1: every phase change with the state it was made in.  The
+   complete state is printed because a completion that never raises the line
+   looks identical to one that is never reached. */
+static void
+scsi_sm912_phase_trace(scsi_sm912_t *dev, const char *where)
+{
+    if ((getenv("PCX_PHASELOG") == NULL) || (dev->phase == dev->phase_seen))
+        return;
+
+    {
+        static long n;
+
+        pclog("[PH] #%ld %s: %d -> %d req=%d irq=%d st=%02X pos=%u len=%d\n",
+              ++n, where, dev->phase_seen, dev->phase, dev->req, dev->irq_level,
+              dev->status_byte, dev->data_pos,
+              (dev->sd != NULL) ? (int) dev->sd->buffer_length : -1);
+    }
+    dev->phase_seen = dev->phase;
 }
 
 /* ACK: the host adapter drives ACK on every data-register access and the
@@ -639,6 +680,7 @@ scsi_sm912_data_read(scsi_sm912_t *dev)
     scsi_sm912_log("[SM912] data read %02X, phase %d\n", ret, dev->phase);
 
     scsi_sm912_update_irq(dev);
+    scsi_sm912_phase_trace(dev, "data_read");
 
     return ret;
 }
@@ -669,6 +711,7 @@ scsi_sm912_data_write(scsi_sm912_t *dev, uint8_t val)
     }
 
     scsi_sm912_update_irq(dev);
+    scsi_sm912_phase_trace(dev, "data_write");
 }
 
 static uint8_t
