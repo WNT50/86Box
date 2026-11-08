@@ -191,13 +191,8 @@ pcx_mmu_page_index(uint32_t addr)
         slotoff = getenv("PCX_MMUSLOT") ? atoi(getenv("PCX_MMUSLOT")) : 0;
 
     /* 页大小 2 KB：内核在 1B58:4025 用 >>11 算条目数（0xDB7F>>11 = 27，
-       27 x 2 KB 正好覆盖 0x0000-0xD7FF），模块在 0x0E1C 也拿 0x800 做自检。
-       PCX_PG1K=1 可切回旧的 1 KB 行为做对照。 */
-    static int pg2k = -1;
-    if (pg2k < 0)
-        pg2k = getenv("PCX_PG1K") ? 0 : 1;
-
-    page = (((addr >> (pg2k ? 11 : 10)) - (uint32_t) slotoff)) & 0x3ffu;
+       27 x 2 KB 正好覆盖 0x0000-0xD7FF），模块在 0x0E1C 也拿 0x800 做自检。 */
+    page = (((addr >> 11) - (uint32_t) slotoff)) & 0x3ffu;
 
     if (pcx_mmu.type == PCX_MMU_SINIX12)
         return (int) (((page & 0xffu) | ((pcx_mmu.ctl & 0x18u) << 5)) & (PCX_MMU_PAGES - 1));
@@ -291,20 +286,6 @@ pcx_mmu_translate(uint32_t addr, int rw)
             df = getenv("PCX_DEFER") ? 1 : 0;
         if (df && pcx_mmu.defer)
             return addr;
-    }
-
-    /* PCX_MAP42=<phys>: 把逻辑页 0x42（0x10800-0x10BFF）改映射到指定物理页。
-       实测模块在这一页上只执行 0B2E/0B31/0B34/0B35/0B37/0B39/0B3D/0B40
-       八个地址，即三处端口桩的调用点；而桩表本体在物理 0xE000 页内。
-       用它验证“不改代码、改 MMU”这条路线。 */
-    {
-        static long m42 = -2;
-        if (m42 == -2) {
-            const char *e = getenv("PCX_MAP42");
-            m42 = e ? strtol(e, NULL, 16) : -1;
-        }
-        if ((m42 >= 0) && ((addr >> 10) == 0x42u))
-            return (((uint32_t) m42) & 0x7FC00u) | (addr & (PCX_MMU_PGSIZE - 1));
     }
 
     entry = pcx_mmu.pg[pcx_mmu_page_index(addr)];
@@ -437,100 +418,18 @@ pcx_mmu_translate(uint32_t addr, int rw)
        possible if those five bits are the high half of the page number.  Ten
        bits of page at 2 KB each covers the 2 MB the POST walks; the board holds
        1 MB, so the address wraps there (0x1f7800 -> 0xf7800). */
-    /* Entry layout, straight out of the loader's own table writes
-       ([TLOG], 1106 writes): the page number sits in bits 15..7 and the
-       access flags in bits 5..0 --
-           0x0030 -> page 0x000,  0x0830 -> page 0x010,  0x1030 -> page 0x020
-           0xB020 -> page 0x160 (0xB0000),  0x5022 -> page 0x0A0 (0x50000)
-       2 KB per page, so the physical address is (entry >> 7) << 11. */
+    /* 2 KB pages, translated exactly like the board does it in MAME
+       (pcd.cpp mem_r/mem_w): entries are stored nibble-rotated and the lookup
+       is a word offset, ((entry << 3) & 0x7fc00) | (offset & 0x3ff), which in
+       byte addressing becomes the two steps below.  Anything else here (the
+       old rotate-and-mask decodes, the 1 KB mode, the forced slot maps) was
+       scaffolding that also made valid pages look absent: the same install run
+       logged 400+ null-entry faults with them and four without. */
     {
-        static int pg2k3 = -1;
-        uint32_t poff;
+        uint32_t w = (((uint32_t) pcx_mmu.pg[pcx_mmu_page_index(addr)] << 3) & 0x7fc00u) |
+                     ((addr >> 1) & 0x3ffu);
 
-        if (pg2k3 < 0)
-            pg2k3 = getenv("PCX_PG1K") ? 0 : 1;
-
-        if (pg2k3) {
-            /* PCX_MAP20=<phys>: 2 KB 页下把逻辑槽 0x20（0x10000-0x107FF）
-               改指到指定物理基址。装载器把这一槽写成 0xD800（库基址），
-               而模块入口 1000:002C 需要它指向 0xEC00（模块代码）。 */
-            static long m20 = -2;
-            if (m20 == -2) {
-                const char *e = getenv("PCX_MAP20");
-                m20 = e ? strtol(e, NULL, 16) : -1;
-            }
-            if ((m20 >= 0) && ((addr >> 11) == 0x20u))
-                return (((uint32_t) m20) & 0x7FC00u) | (addr & 0x7ffu);
-
-            /* 2 KB 页：条目按“表里存的形式”解，物理基址 = 回转后的 bits 15..8。
-               依据：装载器写的恒等条目是 0x0030,0x0830,0x1030,…（步长 0x800），
-               即 bits 15..8 = 物理地址 bits 15..8，低 6 位是标志（0x30 = 存在+可写）。*/
-            uint16_t val  = (uint16_t) ((pcx_mmu.pg[pcx_mmu_page_index(addr)] << 4) |
-                                        (pcx_mmu.pg[pcx_mmu_page_index(addr)] >> 12));
-
-            /* PCX_MAMEPHYS=1: MAME's formula verbatim, in its own word
-               addressing: phys = ((reg << 3) & 0x7fc00) | (offset & 0x3ff),
-               then back to a byte address.  Kept as a switch because the
-               identity entries carry flags in their low bits, which this
-               formula does not mask away. */
-            static int mp = -1;
-            if (mp < 0) {
-                const char *e = getenv("PCX_MAMEPHYS");
-                /* MAME's single formula is the default: it cut the spurious
-                   null-entry faults from 400+ to 4 on the same install run. */
-                mp = e ? (atoi(e) != 0) : 1;
-            }
-            if (mp) {
-                uint32_t w = ((((uint32_t) pcx_mmu.pg[pcx_mmu_page_index(addr)] << 3) & 0x7fc00u) |
-                              ((addr >> 1) & 0x3ffu));
-                phys = (w << 1) | (addr & 1u);
-            } else {
-                /* PCX_PGDEC=1: decode the entry as "physical page base in bits
-                   15..10, flags in the low bits" instead of the rotated form.
-                   Identity entries read back as 0x0070, 0x0830, 0x1030, ... so
-                   the page base sits directly in the entry. */
-                /* Default: 32-bit rotate with the full 19-bit physical mask.
-                   The old 8-bit form (PCX_PGDEC=0) could only express pages
-                   below 64 KB, which folded every module/task page down into
-                   low memory and made the CPU execute zeros. */
-                static int pdec = -1;
-                if (pdec < 0)
-                    pdec = getenv("PCX_PGDEC") ? atoi(getenv("PCX_PGDEC")) : 5;
-                if (pdec == 1) {
-                    /* PCX_PGDEC=1: 16-bit rotate then mask 0x7FC00. */
-                    uint32_t v32 = ((uint32_t) ((uint16_t) ((pcx_mmu.pg[pcx_mmu_page_index(addr)] << 4) |
-                                                           (pcx_mmu.pg[pcx_mmu_page_index(addr)] >> 12)))) & 0x7fc00u;
-                    phys = v32 | (addr & 0x7ffu);
-                } else if (pdec == 2) {
-                    /* PCX_PGDEC=2: 32-bit rotate, keep bits 18..10 (1 MB space). */
-                    uint16_t en = pcx_mmu.pg[pcx_mmu_page_index(addr)];
-                    uint32_t v32 = (((uint32_t) en << 4) | ((uint32_t) en >> 12)) & 0x7fc00u;
-                    phys = v32 | (addr & 0x7ffu);
-                } else if (pdec == 5) {
-                    /* MAME's lookup formula in byte units, applied to the entry
-                       exactly as the guest wrote it:
-                       phys = ((reg << 4) & 0xff800) | (byte & 0x7ff).
-                       Calibration: the loader's identity entry 0x0830 for page 1
-                       decodes to 0x800, which is the whole point. */
-                    phys = (((uint32_t) pcx_mmu.pg[pcx_mmu_page_index(addr)] << 4) & 0xff800u) |
-                           (addr & 0x7ffu);
-                } else if (pdec == 4) {
-                    /* MAME verbatim (pcd.cpp:279 store, :431 lookup):
-                       stored = (data >> 4) | (data << 12)
-                       word offset = ((stored << 3) & 0x7fc00) | (offset & 0x3ff)
-                       -> byte address = (stored << 4) & 0xff800, plus the low bits. */
-                    uint16_t en = pcx_mmu.pg[pcx_mmu_page_index(addr)];
-                    uint16_t st = (uint16_t) ((en >> 4) | (en << 12));
-                    phys = (((uint32_t) st << 4) & 0xff800u) | (addr & 0x7ffu);
-                } else if (pdec == 3)
-                    phys = ((uint32_t) (pcx_mmu.pg[pcx_mmu_page_index(addr)] & 0xfc00u)) |
-                           (addr & 0x7ffu);
-                else
-                    phys = ((uint32_t) (val & 0xff00u)) | (addr & 0x7ffu);
-            }
-        } else {
-            phys = ((uint32_t) (entry << 3) & 0x7fc00u) | (addr & (PCX_MMU_PGSIZE - 1));
-        }
+        phys = (w << 1) | (addr & 1u);
     }
 
     {
