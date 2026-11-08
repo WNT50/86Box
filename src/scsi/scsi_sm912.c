@@ -455,7 +455,11 @@ scsi_sm912_select(scsi_sm912_t *dev, uint8_t val)
         return;
     }
 
-    dev->target_id = (uint8_t) (val & 0x07);
+    /* The board does not put the id bits on the bus: selecting drives SEL
+       with 0 on the data lines, so every selection resolves to the drive at
+       id 0 (MAME pcd.cpp scsi_w does the same).  The guest does write other
+       ids -- it probes id 1 -- but they all reach the same target. */
+    dev->target_id = 0;
     dev->sd        = &scsi_devices[dev->bus][dev->target_id];
 
     {
