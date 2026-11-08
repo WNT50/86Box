@@ -371,6 +371,9 @@ scsi_sm912_execute(scsi_sm912_t *dev)
             if (dev->sd->phase == SCSI_PHASE_DATA_OUT) {
                 sc->buffer_pos = 0;
                 dev->phase     = SM912_DATAOUT;
+                /* Data-out runs the other way round but the handshake is the
+                   same: REQ stays up while the target wants bytes. */
+                dev->req       = 1;
                 scsi_sm912_update_irq(dev);
                 return;
             }
@@ -431,6 +434,11 @@ scsi_sm912_select(scsi_sm912_t *dev, uint8_t val)
     dev->cdb_len = 6;
     dev->cdb_pos = 0;
     dev->phase   = SM912_CMD;
+    /* The target asks for the first CDB byte as soon as it acknowledges the
+       selection: REQ up with C/D set.  The kernel driver polls exactly this
+       bit before every byte (110E:36A7: in 0xF941 / and 0x20 / jz), so a
+       selection that leaves REQ low stalls the command phase for ever. */
+    dev->req     = 1;
 
     scsi_sm912_update_irq(dev);
 
