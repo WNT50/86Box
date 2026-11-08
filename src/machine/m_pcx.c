@@ -130,6 +130,7 @@ extern volatile int fdcinited;
 /* Status byte, 0xf840.  The BIOS latches the same 0xfd MAME uses for an
    undecoded access; writing a 1 clears the corresponding bit. */
 #define PCX_STAT_NMI      0xfd
+#define PCX_FDC_POST_US   3000
 
 typedef struct pcx_t {
     mem_mapping_t ram_map;   /* RAM from 640 KB up, when that much is fitted */
@@ -1015,6 +1016,12 @@ machine_pcx_init_ex(const machine_t *model)
     /* WD2791 formatter: registers at 0xf900-0xf903, INTRQ on IR6, DRQ on the
        80186 DMA channel 1.  The 0xf904 latch above feeds it drive/side/DDEN. */
     pcx.fdc = wd2791_init();
+    /* SINIX's floppy driver reads the interrupt state as "still transferring"
+       and gives up on the transfer when INTRQ lands in the same instant as the
+       last DMA byte; the real controller finishes the CRC and the gap first.
+       Three milliseconds is a few byte periods at 250 kbit/s and keeps the
+       driver's state machine in step. */
+    wd2791_set_post_us(pcx.fdc, PCX_FDC_POST_US);
     /* The Qt front end only builds the floppy indicators (and their media
        menus) when the standard controller has announced itself.  This machine
        brings its own WD2791 instead, so say so here. */
