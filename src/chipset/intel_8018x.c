@@ -1103,6 +1103,19 @@ i8018x_pcb_dump_icu(void)
           d->regs[I8018X_TMR_COUNT(0) / 2], d->regs[I8018X_TMR_MAXA(0) / 2],
           d->regs[I8018X_TMR_CON(0) / 2],
           d->regs[I8018X_TMR_CON(1) / 2], d->regs[I8018X_TMR_CON(2) / 2]);
+    {
+        uint64_t ev   = d->tmr_ext_div[0]
+                            ? ((tsc - d->tmr_base[0]) /
+                               ((uint64_t) d->tmr_ext_div[0] * 3u))
+                            : 0u;
+        uint64_t live = ev - d->tmr_src[0];
+        uint64_t max  = i8018x_pcb_tmr_max(d, 0);
+
+        pclog("[ICUSNAP3] ev=%llu done=%llu cyc=%llu max=%llu\n",
+              (unsigned long long) live, (unsigned long long) d->tmr_done[0],
+              (unsigned long long) (max ? (live / max) : 0u),
+              (unsigned long long) max);
+    }
     pclog("[ICUSNAP2] tsc=%llu T0 base=%llu src=%llu ext_div=%u tmr_div=%u\n",
           (unsigned long long) tsc, (unsigned long long) d->tmr_base[0],
           (unsigned long long) d->tmr_src[0], d->tmr_ext_div[0],
