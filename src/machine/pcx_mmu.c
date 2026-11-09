@@ -658,7 +658,7 @@ pcx_mmu_outw(uint16_t port, uint16_t val, UNUSED(void *priv))
 
         if (tl < 0)
             tl = getenv("PCX_TLOG") ? 1 : 0;
-        if (tl && (tn < 6000)) {
+        if (tl && (val != 0) && (tn < 20000)) {
             tn++;
             pclog("[TLOG] w port=%04X slot=%02X val=%04X ctl=%02X @%04X:%04X\n",
                   port, idx, val, pcx_mmu.ctl,
