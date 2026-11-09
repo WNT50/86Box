@@ -680,6 +680,17 @@ pcx_mmu_outw(uint16_t port, uint16_t val, UNUSED(void *priv))
             }
         }
 
+        /* PCX_MAPLOG=1: non-zero entry writes late in the boot, so the mapping
+           the kernel builds for a given linear address can be read off. */
+        if (getenv("PCX_MAPLOG") && (val != 0) && (plat_get_ticks() > 100000u)) {
+            static long mn;
+
+            if (mn++ < 3000)
+                pclog("[MAPW] t=%u port=%04X idx=%03X val=%04X ctl=%04X @%04X:%04X\n",
+                      plat_get_ticks(), port, idx, val, pcx_mmu.ctl,
+                      (uint16_t) cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
+        }
+
         /* Bits 0..5 hold the flags and 11..15 the page; 6..10 are the status
            lines the handler reads back, not storage (the POST at 0xfe29a
            compares through the mask 0x3f:0xf800). */
