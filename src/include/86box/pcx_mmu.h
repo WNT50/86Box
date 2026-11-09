@@ -38,6 +38,13 @@ extern void (*pcx_mmu_nmi_status)(uint8_t bits);
 
 extern void pcx_mmu_init(int type);
 extern uint16_t pcx_mmu_pg_get(int idx);
+/* A page the card answers with 0 for an access it cannot translate: MAME's
+   nmi_io_r returns 0 for the faulting read (pcd.cpp:186) while the write is
+   dropped, so the handler sees zeroes rather than 0xff.  The machine maps a
+   scratch page here. */
+#define PCX_MMU_ZERO_BASE 0x00200000u
+#define PCX_MMU_ZERO_SIZE 0x00000800u
+
 extern uint8_t  pcx_mmu_peek8(uint32_t addr);
 /* Undecoded address range (hi exclusive) that raises NMI on access; hi <= lo
    disables it.  Alternative to a CPU-only catch-all mapping -- use one, not

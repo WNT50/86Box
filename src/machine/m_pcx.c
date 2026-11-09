@@ -135,6 +135,7 @@ extern volatile int fdcinited;
 typedef struct pcx_t {
     mem_mapping_t ram_map;   /* RAM from 640 KB up, when that much is fitted */
     mem_mapping_t hole_map;  /* undecoded space above the fitted RAM */
+    mem_mapping_t zero_map;  /* scratch page for untranslatable accesses */
     rom_t         bios;
 
     uint8_t stat;    /* 0xf840: error/latch byte, write-1-to-clear */
@@ -296,6 +297,17 @@ static void
 pcx_nmi_status_set(uint8_t bits)
 {
     pcx.stat |= bits;
+}
+
+static uint8_t
+pcx_zero_readb(UNUSED(uint32_t addr), UNUSED(void *priv))
+{
+    return 0x00;
+}
+
+static void
+pcx_zero_writeb(UNUSED(uint32_t addr), UNUSED(uint8_t val), UNUSED(void *priv))
+{
 }
 
 static uint8_t
@@ -917,6 +929,12 @@ machine_pcx_init_ex(const machine_t *model)
         }
 
     }
+
+    /* Scratch page the MMU sends an untranslatable access to: the card answers
+       such a read with 0 and drops the write (MAME pcd.cpp nmi_io_r/w). */
+    mem_mapping_add(&pcx.zero_map, PCX_MMU_ZERO_BASE, PCX_MMU_ZERO_SIZE,
+                    pcx_zero_readb, NULL, NULL, pcx_zero_writeb, NULL, NULL,
+                    NULL, MEM_MAPPING_INTERNAL, NULL);
 
     /* Two 8259s on separate 80186 interrupt inputs (pic.c helper). */
     pic_init_pcx();

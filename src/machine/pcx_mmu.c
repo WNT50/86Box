@@ -354,7 +354,9 @@ pcx_mmu_translate(uint32_t addr, int rw)
             if (pcx_mmu_nmi_status != NULL)
                 pcx_mmu_nmi_status(PCX_MMU_NMI_STAT);
             nmi_raise();
-            return 0xffffffffu;
+            /* MAME hands the access to nmi_io_r/nmi_io_w: the read returns 0
+               and the write is dropped.  Answer from the scratch page. */
+            return PCX_MMU_ZERO_BASE | (addr & (PCX_MMU_ZERO_SIZE - 1u));
         }
     }
 
