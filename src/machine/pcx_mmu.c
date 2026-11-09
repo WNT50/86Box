@@ -142,6 +142,12 @@ static uint32_t pcx_mmu_ram_mask = 0x000fffffu;
    0xfe35e-0xfe36e). */
 void (*pcx_mmu_nmi_status)(uint8_t bits) = NULL;
 
+/* What MAME leaves in the status port for an access the card could not
+   translate (pcd.cpp nmi_io_r/nmi_io_w: m_stat |= 0xfd).  Without it the
+   kernel's NMI handler finds no source bits and reports the trap as a
+   "narrow power-fail spike". */
+#define PCX_MMU_NMI_STAT 0xfd
+
 
 static void
 pcx_mmu_cs_load(void)
@@ -267,6 +273,8 @@ pcx_mmu_translate(uint32_t addr, int rw)
        fitted at all -- the board decodes nothing there. */
     if ((addr >= pcx_mmu_hole_lo) && (addr < pcx_mmu_hole_hi)) {
         pcx_mmu.fault = addr;
+        if (pcx_mmu_nmi_status != NULL)
+            pcx_mmu_nmi_status(PCX_MMU_NMI_STAT);
         nmi_raise();
         return 0xffffffffu;
     }
@@ -343,6 +351,8 @@ pcx_mmu_translate(uint32_t addr, int rw)
             }
             pcx_mmu.fault = addr;
             pcx_mmu.fpend = 1;
+            if (pcx_mmu_nmi_status != NULL)
+                pcx_mmu_nmi_status(PCX_MMU_NMI_STAT);
             nmi_raise();
             return 0xffffffffu;
         }
