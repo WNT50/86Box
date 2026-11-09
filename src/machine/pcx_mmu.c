@@ -84,7 +84,7 @@ extern void pcx_ring_dump(void);
 #define PCX_MMU_ACK      0x0800                    /* 0x8800 system call */
 #define PCX_MMU_IOOFF    0x0a00                    /* 0x8a00 read and all I/O is trapped */
 #define PCX_MMU_PAGES    1024                      /* 32 banks x 32 slots */
-#define PCX_MMU_PGSIZE   0x400                     /* 1 KB */
+#define PCX_MMU_PGSIZE   0x800                     /* 2 KB, as the lookup uses */
 #define PCX_MMU_WINDOW   0x080000                  /* MAME translates 0x00000-0x7ffff only */
 
 typedef struct {
