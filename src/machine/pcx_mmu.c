@@ -148,6 +148,20 @@ void (*pcx_mmu_nmi_status)(uint8_t bits) = NULL;
    "narrow power-fail spike". */
 #define PCX_MMU_NMI_STAT 0xfd
 
+static int pcx_mmu_trace_left;
+
+void
+pcx_mmu_trace_port(uint16_t port, int wr, uint16_t val)
+{
+    if (pcx_mmu_trace_left <= 0)
+        return;
+
+    pcx_mmu_trace_left--;
+    pclog("[NTR] %s port=%04X val=%04X cs=%04X ip=%04X left=%d\n",
+          wr ? "w" : "r", port, val, (uint16_t) cpu_state.seg_cs.seg,
+          (uint16_t) cpu_state.pc, pcx_mmu_trace_left);
+}
+
 
 static void
 pcx_mmu_cs_load(void)
@@ -351,6 +365,8 @@ pcx_mmu_translate(uint32_t addr, int rw)
             }
             pcx_mmu.fault = addr;
             pcx_mmu.fpend = 1;
+            if (getenv("PCX_NMITRACE") != NULL)
+                pcx_mmu_trace_left = 400;
             /* Primary source (Bannister thread): an untranslatable access is a
                page fault on the INT 0x20 handler via IRQ0; NMI belongs to the
                power-fail / DEBUG-key / I-O-lockout sources only.  The fault is
@@ -524,6 +540,8 @@ pcx_mmu_outb(uint16_t port, uint8_t val, void *priv)
 static uint16_t
 pcx_mmu_inw(uint16_t port, UNUSED(void *priv))
 {
+    pcx_mmu_trace_port(port, 0, 0);
+
     uint16_t off = (uint16_t) (port - PCX_MMU_BASE);
     int      idx;
 
@@ -579,6 +597,8 @@ pcx_mmu_inw(uint16_t port, UNUSED(void *priv))
 static void
 pcx_mmu_outw(uint16_t port, uint16_t val, UNUSED(void *priv))
 {
+    pcx_mmu_trace_port(port, 1, val);
+
     uint16_t off = (uint16_t) (port - PCX_MMU_BASE);
     int      idx;
 

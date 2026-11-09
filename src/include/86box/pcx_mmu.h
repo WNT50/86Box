@@ -46,6 +46,9 @@ extern uint16_t pcx_mmu_pg_get(int idx);
 #define PCX_MMU_ZERO_SIZE 0x00000800u
 
 extern uint8_t  pcx_mmu_peek8(uint32_t addr);
+
+/* PCX_NMITRACE=1: log the port traffic right after an untranslatable access. */
+extern void     pcx_mmu_trace_port(uint16_t port, int wr, uint16_t val);
 /* Undecoded address range (hi exclusive) that raises NMI on access; hi <= lo
    disables it.  Alternative to a CPU-only catch-all mapping -- use one, not
    both. */

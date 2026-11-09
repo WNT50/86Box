@@ -313,6 +313,7 @@ pcx_zero_writeb(UNUSED(uint32_t addr), UNUSED(uint8_t val), UNUSED(void *priv))
 static uint8_t
 pcx_stat_read(UNUSED(uint16_t port), UNUSED(void *priv))
 {
+    pcx_mmu_trace_port(PCX_STAT_PORT, 0, pcx.stat);
     return pcx.stat;
 }
 
@@ -450,6 +451,8 @@ pcx_faultseg_read(UNUSED(uint16_t port), UNUSED(void *priv))
        raised the parity or bus time-out error are stored here for the processor
        to read, so the handler can find the page that failed.  Taking A16..A23
        instead loses the four low bits and names the wrong 64 KB block. */
+    pcx_mmu_trace_port(PCX_FAULTSEG_PORT, 0,
+                       (uint8_t) ((pcx_mmu_fault_addr() >> 12) & 0xff));
     return (uint8_t) ((pcx_mmu_fault_addr() >> 12) & 0xff);
 }
 
