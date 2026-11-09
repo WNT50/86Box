@@ -1439,23 +1439,6 @@ check_interrupts(int nec_hlt)
     int temp;
     int     i_flag = (cpu_state.flags & I_FLAG) || nec_hlt;
     int     pend   = irq_pending(nec_hlt);
-    int     inloop = ((uint16_t) CS == 0xFC00) && ((uint16_t) cpu_state.pc >= 0x0800) &&
-                     ((uint16_t) cpu_state.pc <= 0x0840);
-
-    if (pend && inloop) {
-        static int qn;
-        if (qn < 30) {
-            qn++;
-            pclog("[LOOP] pc=%04X pending=1 iflag=%d\n",
-                  (uint16_t) cpu_state.pc, (cpu_state.flags & I_FLAG) ? 1 : 0);
-        }
-    } else if (!pend && inloop) {
-        static long qm;
-        if ((++qm % 20000) == 1)
-            pclog("[LOOP] pc=%04X pending=0 iflag=%d (checks=%ld)\n",
-                  (uint16_t) cpu_state.pc, (cpu_state.flags & I_FLAG) ? 1 : 0, qm);
-    }
-
     if (pend) {
         if ((cpu_state.flags & T_FLAG) && (is80c88 ? !noint : !(noint & 1))) {
             interrupt(1);
@@ -3209,19 +3192,6 @@ execx86_instruction(void)
             case 0xa4 ... 0xa5:    /* MOVS */
             case 0xac ... 0xad:    /* LODS */
                 bits = 8 << (opcode & 1);
-                /* Large block moves are what a per-task copy of the module
-                   would use; log every one of them with its operands. */
-                if ((opcode & 8) == 0 && in_rep != 0 && cpu_state.regs[1].w > 0x400) {
-                    static uint16_t lcs, lip;
-                    if ((cpu_state.seg_cs.seg != lcs) || ((uint16_t) cpu_state.pc != lip)) {
-                        lcs = cpu_state.seg_cs.seg;
-                        lip = (uint16_t) cpu_state.pc;
-                        pclog("[REP] movs cx=%04X ds=%04X si=%04X es=%04X di=%04X @%04X:%04X\n",
-                              cpu_state.regs[1].w, cpu_state.seg_ds.seg,
-                              cpu_state.regs[6].w, cpu_state.seg_es.seg,
-                              cpu_state.regs[7].w, lcs, lip);
-                    }
-                }
                 if (!repeating) {
                     wait_cycs(1, 0);
                     if ((opcode & 8) == 0 && in_rep != 0)
