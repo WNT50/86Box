@@ -351,9 +351,16 @@ pcx_mmu_translate(uint32_t addr, int rw)
             }
             pcx_mmu.fault = addr;
             pcx_mmu.fpend = 1;
-            if (pcx_mmu_nmi_status != NULL)
-                pcx_mmu_nmi_status(PCX_MMU_NMI_STAT);
-            nmi_raise();
+            /* Primary source (Bannister thread): an untranslatable access is a
+               page fault on the INT 0x20 handler via IRQ0; NMI belongs to the
+               power-fail / DEBUG-key / I-O-lockout sources only.  The fault is
+               flagged to software by bit 6 of the entry registers. */
+            if (getenv("PCX_MMUNMI") != NULL) {
+                if (pcx_mmu_nmi_status != NULL)
+                    pcx_mmu_nmi_status(PCX_MMU_NMI_STAT);
+                nmi_raise();
+            } else
+                picint(0x0001);
             /* MAME hands the access to nmi_io_r/nmi_io_w: the read returns 0
                and the write is dropped.  Answer from the scratch page. */
             return PCX_MMU_ZERO_BASE | (addr & (PCX_MMU_ZERO_SIZE - 1u));
