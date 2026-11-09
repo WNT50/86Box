@@ -139,6 +139,8 @@ typedef struct pcx_t {
     rom_t         bios;
 
     uint8_t stat;    /* 0xf840: error/latch byte, write-1-to-clear */
+    uint8_t nmi_pending; /* 0xff2e: sources still waiting to be acknowledged */
+    uint16_t nmi_ack;    /* last value written to 0xff22 */
     uint8_t dip;     /* 0xf841: read = S9 switches, write = LED latch */
     uint8_t led;     /* what the BIOS last wrote to 0xf841 */
     uint8_t dskctl;  /* 0xf904 */
@@ -297,6 +299,27 @@ static void
 pcx_nmi_status_set(uint8_t bits)
 {
     pcx.stat |= bits;
+}
+
+/* 0xff22 / 0xff2e: interrupt-source acknowledge and status.  The ROM acks a
+   source by writing its number (8, 0xa, 0xb, 0xc) and then iret's; the boot
+   waits for 0xff2e to read back zero (FC00:1049-0x1052).  Leaving 0xff2e
+   unmapped made that loop read 0xff and spin forever. */
+static void
+pcx_nmi_ack_write(UNUSED(uint16_t port), uint16_t val, UNUSED(void *priv))
+{
+    pcx.nmi_ack     = val;
+    pcx.nmi_pending = 0;
+
+    if (getenv("PCX_FF22") != NULL)
+        pclog("[FF22] ack %04X @%04X:%04X\n", val,
+              (uint16_t) cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
+}
+
+static uint8_t
+pcx_nmi_status_read(UNUSED(uint16_t port), UNUSED(void *priv))
+{
+    return pcx.nmi_pending;
 }
 
 static uint8_t
@@ -985,6 +1008,9 @@ machine_pcx_init_ex(const machine_t *model)
         io_sethandler(0xff00, 0x0020, pcx_i186_logr, pcx_i186_logr16, NULL,
                       pcx_i186_logw, pcx_i186_logw16, NULL, NULL);
 
+    io_sethandler(0xff22, 0x0001, NULL, NULL, NULL,
+                  pcx_nmi_ack_write, pcx_nmi_ack_write, pcx_nmi_ack_write, NULL);
+    io_sethandler(0xff2e, 0x0001, pcx_nmi_status_read, NULL, NULL, NULL, NULL, NULL, NULL);
     io_sethandler(PCX_STAT_PORT, 0x0001, pcx_stat_read, NULL, NULL,
                   pcx_stat_write, NULL, NULL, NULL);
     io_sethandler(PCX_DIP_PORT, 0x0001, pcx_dip_read, NULL, NULL,
