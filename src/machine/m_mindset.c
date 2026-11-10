@@ -626,10 +626,11 @@ mind_trap_queue_access(uint16_t port, uint16_t data)
     mind_trap_push((uint16_t) ((port << 1) | 0x8000));
     mind_trap_push(data);
 
-    /* The system controller reports a finished module bus cycle in bit 0 of
-       its register 02h; nothing here holds the bus for long, so the answer is
-       available as soon as the access is queued. */
-    mindset.sys.regs[0x02] |= 0x01;
+    /* The board asks the DMA channel for the pair; the channel reads it back
+       through 8040h and writes it into memory, and the last read raises the
+       module interrupt. */
+    if (mind_pcb != NULL)
+        i8018x_pcb_dma_request(mind_pcb, 1);
 
     /* The board's DMA reads the pair back out of 8040h and writes it into
        memory, so the guest never sees the bus cycle itself. */
@@ -923,11 +924,6 @@ static void
 mind_io_write(uint16_t port, uint8_t val, void *priv)
 {
     mind_trace("w", port, val, 1);
-
-    /* A cycle to a module slot is answered by the system controller, which
-       reports it in bit 0 of register 02h once the bus has settled. */
-    if ((port >= 0x8064) && (port <= 0x827f))
-        mindset.sys.regs[0x02] |= 0x01;
 }
 
 static void

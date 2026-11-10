@@ -1208,6 +1208,17 @@ static const dma_ctrl_t i8018x_pcb_dma_ops = {
 /* The board wires the two on-chip channels onto 86Box channel numbers (-1
    leaves one unused) and calls this once, after the device exists and after
    the machine's dma_init(), which drops every channel owner first. */
+/* A board raises this when one of its peripherals wants a transfer. */
+void
+i8018x_pcb_dma_request(struct i8018x_pcb_t *dev, int channel)
+{
+    if (dev == NULL)
+        return;
+
+    i8018x_pcb_dma_set_drq(channel, 1, dev);
+    i8018x_pcb_dma_set_drq(channel, 0, dev);
+}
+
 void
 i8018x_pcb_set_dma_channels(struct i8018x_pcb_t *dev, int dma0_ch, int dma1_ch)
 {
