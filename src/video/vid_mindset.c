@@ -39,6 +39,8 @@
 #include "../cpu/cpu.h"
 #include <86box/video.h>
 
+static int mind_vtrace_left = 0;   /* MIND_VTRACE=<n> logs the first n writes */
+
 #define MIND_VRAM_SIZE   0x00008000
 #define MIND_VRAM_BASE   0x000b8000
 #define MIND_XSIZE       751      /* the raster the board actually produces */
@@ -105,6 +107,12 @@ mind_vram_readl(uint32_t addr, void *priv)
 static void
 mind_vram_write(uint32_t addr, uint8_t val, void *priv)
 {
+    if (mind_vtrace_left > 0) {
+        mind_vtrace_left--;
+        pclog("[MIND] vw1 %05X %02X @%04X:%04X\n", addr & 0x7fff, val,
+              cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
+    }
+
     ((uint8_t *) priv)[addr & (MIND_VRAM_SIZE - 1)] = val;
 }
 
@@ -113,6 +121,12 @@ mind_vram_writew(uint32_t addr, uint16_t val, void *priv)
 {
     uint8_t *vram = (uint8_t *) priv;
     uint32_t off  = addr & (MIND_VRAM_SIZE - 2);
+
+    if (mind_vtrace_left > 0) {
+        mind_vtrace_left--;
+        pclog("[MIND] vw2 %05X %04X @%04X:%04X\n", off, val,
+              cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
+    }
 
     vram[off]     = (uint8_t) (val & 0xff);
     vram[off + 1] = (uint8_t) (val >> 8);
@@ -569,6 +583,13 @@ mind_vid_init(UNUSED(const device_t *info))
 
     mindset_vid = vid;
     mindset_log = (getenv("MIND_LOG") != NULL);
+
+    {
+        const char *e = getenv("MIND_VTRACE");
+
+        if (e != NULL)
+            mind_vtrace_left = atoi(e);
+    }
 
     /* Until the guest uploads a palette the display shows the mono ramp the
        board powers up with; the BIOS only sends colours once it believes the
