@@ -1040,8 +1040,19 @@ mind_fdc_ctrl_write(uint16_t port, uint8_t val, void *priv)
     /* The board's bit 2 is a reset pulse, the opposite sense of the PC's DOR
        bit, so the controller is pulsed here and stays enabled for the PC side
        of the model. */
-    if (val & 0x04)
-        fdc_reset(mindset.fdc);
+    if (val & 0x04) {
+        /* A reset starts the controller over: whatever the previous command
+           left pending is gone and this reset raises its own interrupt.  The
+           enable bit is dropped and raised again because that edge, not a
+           bare reset call, is what the controller answers with an interrupt. */
+        mindset.fdc_sched = 0;
+        mindset.fdc_irq   = 0;
+
+        if (mind_pcb != NULL)
+            i8018x_pcb_icu_int(mind_pcb, 0, 0);
+
+        fdc_write(0x03f2, (uint8_t) (dor & ~0x04), mindset.fdc);
+    }
 
     fdc_write(0x03f2, dor, mindset.fdc);
 }
