@@ -3616,6 +3616,17 @@ execx86(int cycs)
                         }
                     }
 
+                    if (lin == 0x000fd3b5u) {
+                        uint32_t a = ((uint32_t) cpu_state.seg_ds.seg << 4);
+                        static int bn;
+                        if (bn < 6) {
+                            pclog("[SASICHK] ds=%04X [ds:0]=%02X [ds:1]=%02X [ds:2]=%02X\n",
+                                  cpu_state.seg_ds.seg, ram[a & 0xfffff],
+                                  ram[(a + 1) & 0xfffff], ram[(a + 2) & 0xfffff]);
+                            bn++;
+                        }
+                    }
+
                     if ((lin == 0x000fd3f0u) || (lin == 0x000fd411u)) {
                         static int sn;
                         if (sn < 10) {
