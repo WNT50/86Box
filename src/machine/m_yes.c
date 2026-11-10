@@ -244,23 +244,13 @@ static int        yes_key_phase;
 static void
 yes_key_tick(void *priv)
 {
-    int line = 0;
-    const char *l = getenv("YES_KEYIRQ");
-
-    if (l != NULL)
-        line = atoi(l);
-
+    /* The keyboard is one of the MUART's interrupt sources: level 1, which the
+       part answers with vector 0x41 -- the handler the ROM installs for the
+       keyboard.  The scancode itself is read back from 0x5a0. */
     if (yes_key_phase == 0) {
         yes_key_phase = 1;
-        i8018x_pcb_icu_int(yes.pcb, line, 1);
-        if (yes_log > 0)
-            pclog("[YES] key %02X -> INT%d high\n", yes.kbd_code, line);
-        timer_set_delay_u64(&yes_key_timer, 500 * TIMER_USEC);
-    } else {
-        yes_key_phase = 2;
-        i8018x_pcb_icu_int(yes.pcb, line, 0);
-        if (yes_log > 0)
-            pclog("[YES] key %02X -> INT%d low\n", yes.kbd_code, line);
+        pclog("[YES] key %02X -> MUART level 1\n", yes.kbd_code);
+        intel_8256_set_level(yes.muart, 1);
     }
 }
 

@@ -46,5 +46,6 @@ extern void          intel_8256_set_irq_handler(intel_8256_t *dev,
                                                 void (*cb)(void *priv, int level),
                                                 void *priv);
 extern uint8_t       intel_8256_acknowledge(intel_8256_t *dev);
+extern void          intel_8256_set_level(intel_8256_t *dev, int level);
 
 #endif /* EMU_INTEL_8256_H */
