@@ -69,10 +69,17 @@ extern uint8_t       *mindset_video_vram(void);
 extern void           mindset_video_set_irq(void (*cb)(void *priv, int level), void *priv);
 
 typedef struct {
-    int          log;
-    int          vramdump;
-    int          kicks;
-    pc_timer_t   sample_timer;
+    uint8_t idx;         /* register index latched from the index port */
+    uint8_t regs[256];
+} mind_mailbox_t;
+
+typedef struct {
+    int            log;
+    int            vramdump;
+    int            kicks;
+    mind_mailbox_t sys;  /* system controller register file */
+    mind_mailbox_t snd;  /* sound controller register file */
+    pc_timer_t     sample_timer;
 } mindset_t;
 
 static mindset_t mindset;
@@ -427,28 +434,145 @@ mind_trap_writew(uint16_t port, uint16_t val, void *priv)
     mind_trace("w", port, val, 2);
 }
 
-/* FDC, both 8042s and the module slots.  The display registers belong to the
-   display device and the kick port to the blitter above. */
+/* The system controller's mailbox.  The BIOS talks to it with an index port, a
+   status port and a data port; the firmware behind that keeps a small register
+   file, and the values below are what it answers on real hardware (harvested
+   from MAME's emulation of the same firmware).  The status byte reports "ready"
+   in every direction, which is what the synchronous BIOS handshake expects. */
+static void
+mind_mcu_reset(mindset_t *m)
+{
+    int i;
+
+    memset(&m->sys, 0x00, sizeof(m->sys));
+    memset(&m->snd, 0x00, sizeof(m->snd));
+
+    m->sys.regs[0x00] = 0xbf;  /* POST control byte */
+    m->sys.regs[0x01] = 0x7b;  /* configuration byte */
+    m->sys.regs[0x81] = 0x01;
+    m->sys.regs[0x82] = 0x07;  /* machine state block */
+
+    for (i = 0x83; i <= 0x8b; i++)
+        m->sys.regs[i] = 0x01;
+
+    m->sys.regs[0x9d] = 0x01;  /* keyboard status */
+    m->sys.regs[0x9e] = 0x01;  /* display type */
+}
+
+static uint8_t
+mind_sys_status_read(UNUSED(uint16_t port), UNUSED(void *priv))
+{
+    return 0x00;
+}
+
+static void
+mind_sys_index_write(UNUSED(uint16_t port), uint8_t val, UNUSED(void *priv))
+{
+    if (mindset.log)
+        pclog("[MIND] mcu idx %02X @%04X:%04X\n", val,
+              cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
+
+    mindset.sys.idx = val;
+}
+
+static uint8_t
+mind_sys_data_read(UNUSED(uint16_t port), UNUSED(void *priv))
+{
+    uint8_t ret = mindset.sys.regs[mindset.sys.idx];
+
+    if (mindset.log)
+        pclog("[MIND] mcu r %02X -> %02X @%04X:%04X\n", mindset.sys.idx, ret,
+              cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
+
+    return ret;
+}
+
+static void
+mind_sys_data_write(UNUSED(uint16_t port), uint8_t val, UNUSED(void *priv))
+{
+    if (mindset.log) {
+        /* The mailbox primitives push four registers, so the caller's address
+           sits eight bytes above the stack pointer. */
+        uint32_t base = ((uint32_t) cpu_state.seg_ss.seg << 4) + cpu_state.regs[4].w + 8;
+        uint16_t ret  = (uint16_t) (mem_readb_phys(base) | (mem_readb_phys(base + 1) << 8));
+
+        pclog("[MIND] mcu w %02X = %02X @%04X:%04X caller %04X\n", mindset.sys.idx, val,
+              cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc, ret);
+    }
+
+    /* The BIOS writes a value twice; keeping the last one is what the
+       firmware does too.  Bit 6 of the configuration byte is an input the
+       firmware feeds from the board, so writing it changes nothing. */
+    if (mindset.sys.idx == 0x01)
+        mindset.sys.regs[0x01] = (uint8_t) ((val & ~0x40) | 0x40);
+    else
+        mindset.sys.regs[mindset.sys.idx] = val;
+}
+
+static uint16_t
+mind_sys_status_readw(uint16_t port, void *priv)
+{
+    return (uint16_t) (mind_sys_status_read(port, priv) |
+                       (mind_sys_data_read(port + 1, priv) << 8));
+}
+
+static void
+mind_sys_index_writew(uint16_t port, uint16_t val, void *priv)
+{
+    mind_sys_index_write(port, (uint8_t) (val & 0xff), priv);
+    mind_sys_data_write(port + 1, (uint8_t) (val >> 8), priv);
+}
+
+/* The sound controller takes a two-byte command and never has to answer: the
+   BIOS polls its status and never reads a data byte back. */
+static uint8_t
+mind_snd_status_read(UNUSED(uint16_t port), UNUSED(void *priv))
+{
+    return 0x00;
+}
+
+static uint8_t
+mind_snd_data_read(UNUSED(uint16_t port), UNUSED(void *priv))
+{
+    return 0xff;
+}
+
+static void
+mind_snd_index_write(UNUSED(uint16_t port), uint8_t val, UNUSED(void *priv))
+{
+    mindset.snd.idx = val;
+}
+
+static void
+mind_snd_data_write(UNUSED(uint16_t port), uint8_t val, UNUSED(void *priv))
+{
+    mindset.snd.regs[mindset.snd.idx] = val;
+}
+
+static uint16_t
+mind_snd_status_readw(uint16_t port, void *priv)
+{
+    return (uint16_t) (mind_snd_status_read(port, priv) |
+                       (mind_snd_data_read(port + 1, priv) << 8));
+}
+
+static void
+mind_snd_index_writew(uint16_t port, uint16_t val, void *priv)
+{
+    mind_snd_index_write(port, (uint8_t) (val & 0xff), priv);
+    mind_snd_data_write(port + 1, (uint8_t) (val >> 8), priv);
+}
+
+/* Everything else in the board's I/O block: the FDC, the module slots.  The
+   display registers belong to the display device and the kick port to the
+   blitter above. */
 static uint8_t
 mind_io_read(uint16_t port, void *priv)
 {
-    uint8_t ret = 0xff;
-
-    switch (port) {
-        case 0x8282: /* system MCU status: report idle, nothing pending */
-            ret = 0x00;
-            break;
-
-        case 0x82a2: /* sound MCU status */
-            ret = 0x00;
-            break;
-
-        default:
-            break;
-    }
-
-    mind_trace("r", port, ret, 1);
-    return ret;
+    /* Nothing sits here on a bare board: the bus floats low, which is what
+       the firmware and the BIOS both expect to see. */
+    mind_trace("r", port, 0x00, 1);
+    return 0x00;
 }
 
 static uint16_t
@@ -516,6 +640,7 @@ machine_mindset_init(const machine_t *model)
         return ret;
 
     memset(&mindset, 0x00, sizeof(mindset));
+    mind_mcu_reset(&mindset);
     mindset.log      = (getenv("MIND_LOG") != NULL);
     mindset.vramdump = (getenv("MIND_VRAMDUMP") != NULL);
     if (getenv("MIND_SAMPLE") != NULL)
@@ -548,10 +673,30 @@ machine_mindset_init(const machine_t *model)
                   mind_trap_read, mind_trap_readw, NULL,
                   mind_trap_write, mind_trap_writew, NULL, NULL);
 
-    /* 8040-82FF: FDC, both MCUs and the module slots. */
-    io_sethandler(0x8040, 0x02c0,
+    /* 8040-827F, 8284-829F and 82A4-82FF: the FDC and the module slots. */
+    io_sethandler(0x8040, 0x0240,
                   mind_io_read, mind_io_readw, NULL,
                   mind_io_write, mind_io_writew, NULL, NULL);
+    io_sethandler(0x8284, 0x001c,
+                  mind_io_read, mind_io_readw, NULL,
+                  mind_io_write, mind_io_writew, NULL, NULL);
+    io_sethandler(0x82a4, 0x005c,
+                  mind_io_read, mind_io_readw, NULL,
+                  mind_io_write, mind_io_writew, NULL, NULL);
+    /* 8280-8283: the system controller's data and index/status ports. */
+    io_sethandler(0x8280, 0x0001,
+                  mind_sys_data_read, NULL, NULL,
+                  mind_sys_data_write, NULL, NULL, NULL);
+    io_sethandler(0x8282, 0x0001,
+                  mind_sys_status_read, mind_sys_status_readw, NULL,
+                  mind_sys_index_write, mind_sys_index_writew, NULL, NULL);
+    /* 82A0-82A3: the sound controller's data and command ports. */
+    io_sethandler(0x82a0, 0x0001,
+                  mind_snd_data_read, NULL, NULL,
+                  mind_snd_data_write, NULL, NULL, NULL);
+    io_sethandler(0x82a2, 0x0001,
+                  mind_snd_status_read, mind_snd_status_readw, NULL,
+                  mind_snd_index_write, mind_snd_index_writew, NULL, NULL);
     /* The GCP is commanded through one write-only port. */
     io_sethandler(0x8300, 0x0002,
                   NULL, NULL, NULL,
