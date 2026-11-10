@@ -35,6 +35,8 @@
 #include <86box/mem.h>
 #include <86box/plat.h>
 #include <86box/timer.h>
+
+#include "../cpu/cpu.h"
 #include <86box/video.h>
 
 #define MIND_VRAM_SIZE   0x00008000
@@ -305,8 +307,9 @@ mind_dispctrl_write16(uint16_t port, uint16_t val, void *priv)
         pclog("[MIND] io w16 8322 %04X\n", val);
 
     if (mindset_log)
-        pclog("[MIND] dispctrl = %04X (ibm=%d bank=%d big=%d ppb=%d 400=%d)\n",
-              val, (val & 0x2000) ? 1 : 0, (val & 0x4000) ? 1 : 0,
+        pclog("[MIND] dispctrl = %04X @%04X:%04X (ibm=%d bank=%d big=%d ppb=%d 400=%d)\n",
+              val, cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc,
+              (val & 0x2000) ? 1 : 0, (val & 0x4000) ? 1 : 0,
               (val & 0x0100) ? 1 : 0, (val >> 9) & 3, (val & 0x0800) ? 1 : 0);
 
     vid->dispctrl = val;
