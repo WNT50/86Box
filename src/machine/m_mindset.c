@@ -526,7 +526,7 @@ mind_mcu_reset(mindset_t *m)
         m->sys.regs[i] = 0x01;
 
     m->sys.regs[0x9d] = 0x01;  /* keyboard status */
-    m->sys.regs[0x9e] = 0x01;  /* display type */
+    m->sys.regs[0x9e] = 0x01;  /* monitor type; MIND_MON overrides it */
 }
 
 static void
@@ -730,11 +730,22 @@ mind_io_writew(uint16_t port, uint16_t val, void *priv)
 
 /* MIND_KEYTEST=1 pushes a space bar press once the BIOS is waiting for a key,
    so the boot path can be exercised before the real keyboard is wired. */
+static pc_timer_t mind_key2_timer;
+
+static void
+mind_key_test2(void *priv)
+{
+    pclog("[MIND] key test: second space\n");
+    mind_keyboard_send(0x39);
+}
+
 static void
 mind_key_test(void *priv)
 {
     pclog("[MIND] key test: pushing space\n");
     mind_keyboard_send(0x39);
+
+    timer_set_delay_u64(&mind_key2_timer, 1500000ULL * TIMER_USEC);
 }
 
 /* Sampler: without a serial console the only way to tell "the CPU is still
@@ -787,6 +798,9 @@ machine_mindset_init(const machine_t *model)
     mindset.log      = (getenv("MIND_LOG") != NULL);
     mindset.vramdump = (getenv("MIND_VRAMDUMP") != NULL);
     mindset.keytest  = (getenv("MIND_KEYTEST") != NULL);
+
+    if (getenv("MIND_MON") != NULL)
+        mindset.sys.regs[0x9e] = (uint8_t) strtoul(getenv("MIND_MON"), NULL, 16);
     if (getenv("MIND_SAMPLE") != NULL)
         mind_interval = atoi(getenv("MIND_SAMPLE"));
 
@@ -858,6 +872,8 @@ machine_mindset_init(const machine_t *model)
                   mind_io_write, mind_io_writew, NULL, NULL);
 
     timer_add(&mindset.mcu_timer, mind_mcu_ready, NULL, 0);
+    timer_add(&mind_key2_timer, mind_key_test2, NULL, 0);
+
     if (mindset.keytest) {
         static pc_timer_t key_timer;
 

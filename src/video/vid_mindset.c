@@ -185,7 +185,7 @@ static void
 mind_dispreg_write(mindset_vid_t *vid, uint16_t val)
 {
     if (mindset_log)
-        pclog("[MIND] io w16 8320 %04X\n", val);
+        pclog("[MIND] io w16 8320 %04X idx=%d\n", val, vid->dispctrl & 7);
 
     switch (vid->dispctrl & 7) {
         case 0:
