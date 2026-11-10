@@ -585,25 +585,74 @@ mind_gcp_kick(uint16_t port, uint16_t val, void *priv)
 }
 
 /* The module bus.  On the real board these cycles are serialised to the
-   system MCU, which answers for whatever module sits in the slot. */
+   system MCU, which answers for whatever module sits in the slot: each access
+   is queued as a pair of words, the queue is drained by the board's DMA into
+   memory, and the end of the transfer raises the module interrupt. */
+#define MIND_TRAP_SIZE 0x100
+
+static uint16_t mind_trap_queue[MIND_TRAP_SIZE];
+static int      mind_trap_head, mind_trap_tail, mind_trap_count;
+static int      mind_trap_int;
+
+static void
+mind_trap_push(uint16_t word)
+{
+    if (mind_trap_count >= MIND_TRAP_SIZE)
+        return;
+
+    mind_trap_queue[mind_trap_tail] = word;
+    mind_trap_tail = (mind_trap_tail + 1) & (MIND_TRAP_SIZE - 1);
+    mind_trap_count++;
+}
+
+static uint16_t
+mind_trap_pop(void)
+{
+    uint16_t word;
+
+    if (mind_trap_count == 0)
+        return 0x0000;
+
+    word = mind_trap_queue[mind_trap_head];
+    mind_trap_head = (mind_trap_head + 1) & (MIND_TRAP_SIZE - 1);
+    mind_trap_count--;
+
+    return word;
+}
+
+static void
+mind_trap_queue_access(uint16_t port, uint16_t data)
+{
+    mind_trap_push((uint16_t) ((port << 1) | 0x8000));
+    mind_trap_push(data);
+
+    /* The board's DMA reads the pair back out of 8040h and writes it into
+       memory, so the guest never sees the bus cycle itself. */
+}
+
 static uint8_t
 mind_trap_read(uint16_t port, void *priv)
 {
-    mind_trace("r", port, 0xff, 1);
-    return 0xff;
+    mind_trace("r", port, 0x00, 1);
+    mind_trap_queue_access(port, 0x0000);
+
+    return 0x00;
 }
 
 static uint16_t
 mind_trap_readw(uint16_t port, void *priv)
 {
-    mind_trace("r", port, 0xffff, 2);
-    return 0xffff;
+    mind_trace("r", port, 0x0000, 2);
+    mind_trap_queue_access(port, 0x0000);
+
+    return 0x0000;
 }
 
 static void
 mind_trap_write(uint16_t port, uint8_t val, void *priv)
 {
     mind_trace("w", port, val, 1);
+    mind_trap_queue_access(port, val);
 }
 
 static void
@@ -812,6 +861,37 @@ mind_snd_index_writew(uint16_t port, uint16_t val, void *priv)
 /* Everything else in the board's I/O block: the FDC, the module slots.  The
    display registers belong to the display device and the kick port to the
    blitter above. */
+/* 8040h hands the queued module bus pairs back one word at a time; when the
+   queue runs dry the transfer is over and the module interrupt goes up. */
+static uint16_t
+mind_trap_dma_read(UNUSED(uint16_t port), void *priv)
+{
+    uint16_t word = mind_trap_pop();
+
+    if (mind_trap_count == 0) {
+        mind_trap_int = 1;
+
+        if (mind_pcb != NULL)
+            i8018x_pcb_icu_int(mind_pcb, 0, 1);
+
+        mindset.sys.regs[0x02] |= 0x01;
+    }
+
+    return word;
+}
+
+static uint16_t
+mind_trap_clear_int(UNUSED(uint16_t port), void *priv)
+{
+    mind_trap_int = 0;
+    mindset.sys.regs[0x02] &= (uint8_t) ~0x01;
+
+    if (mind_pcb != NULL)
+        i8018x_pcb_icu_int(mind_pcb, 0, 0);
+
+    return 0x0000;
+}
+
 static uint8_t
 mind_io_read(uint16_t port, void *priv)
 {
@@ -1327,7 +1407,13 @@ machine_mindset_init(const machine_t *model)
 
     /* 8040-804F, 8064-827F, 8284-829F and 82A4-82FF: the module slots and the
        leftovers of the board's I/O block (the controller owns 8050-8063). */
-    io_sethandler(0x8040, 0x0010,
+    io_sethandler(0x8040, 0x0002,
+                  NULL, mind_trap_dma_read, NULL,
+                  NULL, NULL, NULL, NULL);
+    io_sethandler(0x8048, 0x0002,
+                  NULL, mind_trap_clear_int, NULL,
+                  NULL, NULL, NULL, NULL);
+    io_sethandler(0x804a, 0x0006,
                   mind_io_read, mind_io_readw, NULL,
                   mind_io_write, mind_io_writew, NULL, NULL);
     io_sethandler(0x8064, 0x021c,
