@@ -80,6 +80,7 @@ add_library(vid OBJECT
     vid_pcjx.c
     vid_tandy1k.c
     vid_tandy2k.c
+    vid_mindset.c
     vid_tandy_vis.c
 
     # Hercules

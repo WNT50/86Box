@@ -13,16 +13,19 @@
  *          controller) and an 8749 keyboard scanner, a 8272A floppy
  *          controller, eight blitter blend modes and a stereo DAC.
  *
- *          Step 1 (M0): CPU, RAM, display RAM and the BIOS window, plus an
- *          optional trace (MIND_LOG=1) of every port the ROM touches and of
- *          where the CPU is every 20 ms.  The GCP, the three MCUs, the FDC
- *          and the modules are not modelled yet; this build exists to find
- *          out what the ROM expects before any of that is written.
+ *          Step 2 (M1): the display device and the GCP blitter.  The blitter
+ *          takes its orders from a command block at the top of display RAM
+ *          (status word, global mode, packet address and segment), reads a
+ *          14-word packet out of physical memory, applies one of eight blend
+ *          modes to 16-bit slices of display RAM and marks the command done.
+ *          The two 8042s, the 8749, the FDC and the modules are not
+ *          modelled yet.
  *
  * Authors: WNT50
  *
  *          Copyright 2026 WNT50.
  */
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,6 +39,7 @@
 #include <86box/device.h>
 #include <86box/plat.h>
 #include <86box/timer.h>
+#include <86box/video.h>
 #include <86box/i8018x.h>
 
 #include "../cpu/cpu.h"
@@ -49,24 +53,47 @@
 #define MIND_VRAM_BASE    0x000b8000
 #define MIND_VRAM_SIZE    0x00008000
 
+/* The GCP's command block lives at the top of display RAM. */
+#define MIND_CMD_STATUS   0x000bfd74
+#define MIND_CMD_MODE     0x000bfd76
+#define MIND_CMD_PACKET   0x000bfd78
+#define MIND_CMD_SEGMENT  0x000bfd7a
+
 /* Everything from 8000h up is the real I/O space; 0000h-7FFFh is the module
    bus, where the system MCU watches every access the CPU makes. */
 #define MIND_TRAP_BASE    0x0000
 #define MIND_TRAP_SIZE    0x8000
-#define MIND_IO_BASE      0x8040
-#define MIND_IO_SIZE      0x0300      /* 8040-833F: FDC, MCUs, GCP, display */
+
+extern const device_t mindset_video_device;
+extern uint8_t       *mindset_video_vram(void);
+extern void           mindset_video_set_irq(void (*cb)(void *priv, int level), void *priv);
 
 typedef struct {
-    uint8_t      vram[MIND_VRAM_SIZE];
-    mem_mapping_t vram_map;
     int          log;
+    int          vramdump;
     pc_timer_t   sample_timer;
 } mindset_t;
 
 static mindset_t mindset;
 
+static struct i8018x_pcb_t *mind_pcb;
+
+/* The display's frame interrupt lands on line 2 of the 80186's own ICU. */
+static void
+mind_display_irq(void *priv, int level)
+{
+    if (mind_pcb != NULL)
+        i8018x_pcb_icu_int(mind_pcb, 2, level);
+}
+
 /* MIND_SAMPLE=<us>: how often the sampler prints CS:IP (default 20 ms). */
 static int mind_interval = 20000;
+
+static uint16_t
+sw16(uint16_t v)
+{
+    return (uint16_t) ((v << 8) | (v >> 8));
+}
 
 static void
 mind_trace(const char *dir, uint16_t port, uint32_t val, int width)
@@ -79,45 +106,251 @@ mind_trace(const char *dir, uint16_t port, uint32_t val, int width)
           port, width * 2, val, cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
 }
 
-/* Display RAM: written by the CPU and by the GCP, read back by both. */
-static uint8_t
-mind_vram_read(uint32_t addr, void *priv)
+/* The GCP is a bus master, so it sees physical memory, not the CPU's view. */
+static uint16_t
+mind_phys_rdw(uint32_t addr)
 {
-    return mindset.vram[addr & (MIND_VRAM_SIZE - 1)];
+    return (uint16_t) (mem_readb_phys(addr & 0x0fffff) |
+                       (mem_readb_phys((addr + 1) & 0x0fffff) << 8));
+}
+
+static void
+mind_phys_wrw(uint32_t addr, uint16_t val)
+{
+    mem_writeb_phys(addr & 0x0fffff, (uint8_t) (val & 0xff));
+    mem_writeb_phys((addr + 1) & 0x0fffff, (uint8_t) (val >> 8));
 }
 
 static uint16_t
-mind_vram_readw(uint32_t addr, void *priv)
+mind_mask(int bits)
 {
-    addr &= (MIND_VRAM_SIZE - 2);
-    return *(uint16_t *) &mindset.vram[addr];
+    return (uint16_t) ((bits >= 16) ? 0xffff : ((1 << bits) - 1));
 }
 
-static uint32_t
-mind_vram_readl(uint32_t addr, void *priv)
-{
-    addr &= (MIND_VRAM_SIZE - 4);
-    return *(uint32_t *) &mindset.vram[addr];
-}
+/* Blend modes, in the order the command word selects them. */
+static uint16_t mind_blend_0(uint16_t src, uint16_t dst) { return src; }
+static uint16_t mind_blend_1(uint16_t src, uint16_t dst) { return (uint16_t) (src & dst); }
+static uint16_t mind_blend_2(uint16_t src, uint16_t dst) { return (uint16_t) (src | dst); }
+static uint16_t mind_blend_3(uint16_t src, uint16_t dst) { return (uint16_t) (src ^ dst); }
+static uint16_t mind_blend_4(uint16_t src, uint16_t dst) { return (uint16_t) ~src; }
+static uint16_t mind_blend_5(uint16_t src, uint16_t dst) { return (uint16_t) ((~src) & dst); }
+static uint16_t mind_blend_6(uint16_t src, uint16_t dst) { return (uint16_t) ((~src) | dst); }
+static uint16_t mind_blend_7(uint16_t src, uint16_t dst) { return (uint16_t) ((~src) ^ dst); }
 
+static uint16_t (*const mind_blend[8])(uint16_t, uint16_t) = {
+    mind_blend_0, mind_blend_1, mind_blend_2, mind_blend_3,
+    mind_blend_4, mind_blend_5, mind_blend_6, mind_blend_7
+};
+
+/* One blit command: a 14-word packet whose fields are all byte-swapped in
+   memory, with 16-bit segment bases for the source and the destination. */
 static void
-mind_vram_write(uint32_t addr, uint8_t val, void *priv)
+mind_blit(uint32_t packet)
 {
-    mindset.vram[addr & (MIND_VRAM_SIZE - 1)] = val;
+    uint16_t mode    = sw16(mind_phys_rdw(packet + 0));
+    uint16_t src_adr = sw16(mind_phys_rdw(packet + 2));
+    uint16_t src_sft = sw16(mind_phys_rdw(packet + 4));
+    uint16_t dst_adr = sw16(mind_phys_rdw(packet + 6));
+    uint16_t dst_sft = sw16(mind_phys_rdw(packet + 8));
+    uint16_t width   = sw16(mind_phys_rdw(packet + 10));
+    uint16_t height  = sw16(mind_phys_rdw(packet + 12));
+    uint16_t sy      = sw16(mind_phys_rdw(packet + 14));
+    uint16_t dy      = sw16(mind_phys_rdw(packet + 16));
+    uint16_t rmask   = sw16(mind_phys_rdw(packet + 18));
+    uint16_t src_seg = sw16(mind_phys_rdw(packet + 20));
+    uint16_t dst_seg = sw16(mind_phys_rdw(packet + 22));
+    uint16_t wmask   = sw16(mind_phys_rdw(packet + 24));
+    uint16_t kmask   = sw16(mind_phys_rdw(packet + 26));
+
+    uint32_t src_base = (uint32_t) src_seg << 4;
+    uint32_t dst_base = (uint32_t) dst_seg << 4;
+
+    if (mindset.log)
+        pclog("[MIND] gcp mode=%04X %04X:%04X.%X -> %04X:%04X.%X %dx%d step %d/%d mask %04X/%04X k=%04X\n",
+              mode, src_seg, src_adr, src_sft, dst_seg, dst_adr, dst_sft,
+              width, height, sy, dy, rmask, wmask, kmask);
+
+    if (mode & 0x0200) {
+        /* Pattern fill: one source word repeated across the row. */
+        uint16_t pattern = sw16(mind_phys_rdw(src_base + src_adr));
+
+        for (uint16_t w = 0; w != width / 2; w++) {
+            mind_phys_wrw(dst_base + dst_adr, pattern);
+            dst_adr += 2;
+        }
+
+        return;
+    }
+
+    if (mode & 0x4000) {
+        /* Fast mode: a straight word copy. */
+        uint32_t nw = (uint32_t) ((width + 15) >> 4);
+
+        for (uint32_t y = 0; y < height; y++) {
+            uint16_t src_cadr = src_adr;
+            uint16_t dst_cadr = dst_adr;
+
+            for (uint32_t w = 0; w != nw; w++) {
+                mind_phys_wrw(dst_base + dst_cadr, mind_phys_rdw(src_base + src_cadr));
+                src_cadr += 2;
+                dst_cadr += 2;
+            }
+
+            src_adr += sy;
+            dst_adr += dy;
+        }
+
+        return;
+    }
+
+    {
+        uint16_t (*blend)(uint16_t, uint16_t) = mind_blend[(mode >> 2) & 7];
+        uint16_t awmask  = (uint16_t) (((uint32_t) ((wmask << 16) | wmask)) >> (15 - dst_sft));
+        uint16_t swmask;
+        uint16_t mwmask;
+        uint16_t ewmask;
+        bool     preload;
+        int      src_do_sft;
+        int      dst_do_sft;
+        uint16_t nw;
+
+        if (dst_sft >= width) {
+            swmask = (uint16_t) (mind_mask(dst_sft + 1) & ~mind_mask(dst_sft - width + 1));
+            mwmask = 0xffff;
+            ewmask = swmask;
+        } else {
+            swmask = mind_mask(dst_sft + 1);
+            mwmask = 0xffff;
+            ewmask = (uint16_t) ~mind_mask((dst_sft - width + 1) & 15);
+        }
+
+        swmask &= awmask;
+        mwmask &= awmask;
+        ewmask &= awmask;
+
+        preload    = dst_sft > src_sft;
+        src_do_sft = 15 - src_sft;
+        dst_do_sft = (preload ? 31 : 15) - dst_sft;
+        nw         = (uint16_t) ((width + (15 - dst_sft) + 15) >> 4);
+
+        for (uint32_t y = 0; y < height; y++) {
+            uint16_t src_cadr = src_adr;
+            uint16_t dst_cadr = dst_adr;
+            uint16_t cmask    = swmask;
+            uint16_t nw1      = nw;
+            uint32_t srcs     = 0;
+
+            if (preload) {
+                srcs = (uint32_t) sw16(mind_phys_rdw(src_base + src_cadr)) << src_do_sft;
+
+                if (mode & 0x0100)
+                    src_cadr += 2;
+            }
+
+            do {
+                uint16_t src;
+                uint16_t dst;
+                uint16_t res;
+
+                srcs = (srcs << 16) | ((uint32_t) sw16(mind_phys_rdw(src_base + src_cadr)) << src_do_sft);
+
+                src = (uint16_t) ((srcs >> dst_do_sft) & rmask);
+                dst = sw16(mind_phys_rdw(dst_base + dst_cadr));
+                res = blend(src, dst);
+
+                if (mode & 0x0040) {
+                    uint16_t tmask;
+
+                    switch ((mode >> 11) & 3) {
+                        case 0:
+                        default:
+                            tmask = src;
+                            break;
+
+                        case 1:
+                            tmask = (uint16_t) ((src >> 1) | src);
+                            tmask = (uint16_t) ((tmask & 0x5555) * 0x3);
+                            break;
+
+                        case 2:
+                            tmask = (uint16_t) ((src >> 2) | src);
+                            tmask = (uint16_t) ((tmask >> 1) | tmask);
+                            tmask = (uint16_t) ((tmask & 0x1111) * 0xf);
+                            break;
+
+                        case 3:
+                            tmask = (uint16_t) ((src >> 4) | src);
+                            tmask = (uint16_t) ((tmask >> 2) | tmask);
+                            tmask = (uint16_t) ((tmask >> 1) | tmask);
+                            tmask = (uint16_t) ((tmask & 0x0101) * 0xff);
+                            break;
+                    }
+
+                    cmask &= tmask;
+                }
+
+                res = (uint16_t) ((dst & ~cmask) | (res & cmask));
+
+                mind_phys_wrw(dst_base + dst_cadr, sw16(res));
+
+                if (mode & 0x0100)
+                    src_cadr += 2;
+                dst_cadr += 2;
+
+                nw1--;
+
+                cmask = (nw1 == 1) ? ewmask : mwmask;
+            } while (nw1);
+
+            if (mode & 0x0100)
+                src_adr += sy;
+            dst_adr += dy;
+        }
+    }
 }
 
+/* Writing the kick port runs whatever the command block describes. */
 static void
-mind_vram_writew(uint32_t addr, uint16_t val, void *priv)
+mind_gcp_kick(uint16_t port, uint16_t val, void *priv)
 {
-    addr &= (MIND_VRAM_SIZE - 2);
-    *(uint16_t *) &mindset.vram[addr] = val;
-}
+    uint16_t gmode = sw16(mind_phys_rdw(MIND_CMD_MODE));
+    uint16_t padr  = sw16(mind_phys_rdw(MIND_CMD_PACKET));
+    uint16_t pseg  = sw16(mind_phys_rdw(MIND_CMD_SEGMENT));
 
-static void
-mind_vram_writel(uint32_t addr, uint32_t val, void *priv)
-{
-    addr &= (MIND_VRAM_SIZE - 4);
-    *(uint32_t *) &mindset.vram[addr] = val;
+    if (mindset.log) {
+        uint8_t *vram = mindset_video_vram();
+        int      shown = 0;
+
+        pclog("[MIND] gcp raw: status=%04X mode=%04X pkt=%04X seg=%04X  phys[BFD74]=%02X\n",
+              mind_phys_rdw(MIND_CMD_STATUS), mind_phys_rdw(MIND_CMD_MODE),
+              mind_phys_rdw(MIND_CMD_PACKET), mind_phys_rdw(MIND_CMD_SEGMENT),
+              mem_readb_phys(MIND_CMD_STATUS));
+
+        if (vram != NULL) {
+            for (int i = 0; (i < MIND_VRAM_SIZE) && (shown < 8); i++) {
+                if (vram[i] != 0x00) {
+                    pclog("[MIND] vram[%04X] = %02X\n", i, vram[i]);
+                    shown++;
+                }
+            }
+        }
+    }
+
+    switch (gmode) {
+        case 0x0005:
+        case 0x0101:
+            mind_blit(((uint32_t) pseg << 4) + padr);
+            break;
+
+        default:
+            if (mindset.log)
+                pclog("[MIND] gcp kick with global mode %04X (not implemented)\n", gmode);
+            break;
+    }
+
+    /* The blitter is instantaneous here, so the done bits go up at once. */
+    mind_phys_wrw(MIND_CMD_STATUS,
+                  (uint16_t) (mind_phys_rdw(MIND_CMD_STATUS) | 0x0700));
 }
 
 /* The module bus.  On the real board these cycles are serialised to the
@@ -148,8 +381,8 @@ mind_trap_writew(uint16_t port, uint16_t val, void *priv)
     mind_trace("w", port, val, 2);
 }
 
-/* FDC, both 8042s, the GCP, the display registers and the module slots.
-   Until the real devices exist this just records who asks for what. */
+/* FDC, both 8042s and the module slots.  The display registers belong to the
+   display device and the kick port to the blitter above. */
 static uint8_t
 mind_io_read(uint16_t port, void *priv)
 {
@@ -175,10 +408,8 @@ mind_io_read(uint16_t port, void *priv)
 static uint16_t
 mind_io_readw(uint16_t port, void *priv)
 {
-    uint16_t ret = (uint16_t) (mind_io_read(port, priv) |
-                               (mind_io_read(port + 1, priv) << 8));
-
-    return ret;
+    return (uint16_t) (mind_io_read(port, priv) |
+                       (mind_io_read(port + 1, priv) << 8));
 }
 
 static void
@@ -193,12 +424,27 @@ mind_io_writew(uint16_t port, uint16_t val, void *priv)
     mind_trace("w", port, val, 2);
 }
 
-/* Sampler: without a display device the only way to tell "the CPU is still
+/* Sampler: without a serial console the only way to tell "the CPU is still
    running the ROM" from "it wedged in a loop" is where it is over time. */
 static void
 mind_sample(void *priv)
 {
+    static int tick = 0;
+
     pclog("[MIND] pc=%04X:%04X\n", cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
+
+    /* MIND_VRAMDUMP=1: drop the display RAM to /tmp so it can be decoded
+       offline, which separates "the guest drew nothing" from "the renderer
+       maps the pixels wrongly". */
+    if (mindset.vramdump && (++tick % 50) == 0) {
+        uint8_t *vram = mindset_video_vram();
+        FILE    *f    = fopen("/tmp/mind-vram.bin", "wb");
+
+        if ((vram != NULL) && (f != NULL))
+            fwrite(vram, 1, MIND_VRAM_SIZE, f);
+        if (f != NULL)
+            fclose(f);
+    }
 
     timer_set_delay_u64(&mindset.sample_timer, mind_interval * TIMER_USEC);
 }
@@ -206,7 +452,7 @@ mind_sample(void *priv)
 int
 machine_mindset_init(const machine_t *model)
 {
-    int ret;
+    int      ret;
 
     ret = bios_load_interleaved(MIND_BIOS_EVEN, MIND_BIOS_ODD, MIND_BIOS_ADDR,
                                 MIND_BIOS_SIZE, 0);
@@ -214,7 +460,8 @@ machine_mindset_init(const machine_t *model)
         return ret;
 
     memset(&mindset, 0x00, sizeof(mindset));
-    mindset.log = (getenv("MIND_LOG") != NULL);
+    mindset.log      = (getenv("MIND_LOG") != NULL);
+    mindset.vramdump = (getenv("MIND_VRAMDUMP") != NULL);
     if (getenv("MIND_SAMPLE") != NULL)
         mind_interval = atoi(getenv("MIND_SAMPLE"));
 
@@ -227,23 +474,37 @@ machine_mindset_init(const machine_t *model)
        an open bus.  The display RAM is a window inside the chip's 1 MB. */
     mem_set_mem_state_both(0x00000000, MIND_RAM_SIZE,
                            MEM_READ_INTERNAL | MEM_WRITE_INTERNAL);
-    mem_mapping_add(&mindset.vram_map, MIND_VRAM_BASE, MIND_VRAM_SIZE,
-                    mind_vram_read, mind_vram_readw, mind_vram_readl,
-                    mind_vram_write, mind_vram_writew, mind_vram_writel,
-                    NULL, MEM_MAPPING_INTERNAL, NULL);
+
+    /* The display device owns the 32 KB of display RAM and installs its own
+       window at B8000h; the blitter reaches the same memory through the
+       physical bus. */
+    device_add(&mindset_video_device);
 
     /* 80186 on-chip peripherals.  Neither DMA channel has a device yet, and
        the chip selects are stored but not decoded (intel_8018x.c:13). */
-    {
-        struct i8018x_pcb_t *pcb = device_add(&i8018x_pcb_device);
-
-        i8018x_pcb_set_dma_channels(pcb, -1, -1);
+    mind_pcb = device_add(&i8018x_pcb_device);
+    if (mind_pcb != NULL) {
+        i8018x_pcb_set_dma_channels(mind_pcb, -1, -1);
+        mindset_video_set_irq(mind_display_irq, NULL);
     }
 
     io_sethandler(MIND_TRAP_BASE, MIND_TRAP_SIZE,
                   mind_trap_read, mind_trap_readw, NULL,
                   mind_trap_write, mind_trap_writew, NULL, NULL);
-    io_sethandler(MIND_IO_BASE, MIND_IO_SIZE,
+
+    /* 8040-82FF: FDC, both MCUs and the module slots. */
+    io_sethandler(0x8040, 0x02c0,
+                  mind_io_read, mind_io_readw, NULL,
+                  mind_io_write, mind_io_writew, NULL, NULL);
+    /* The GCP is commanded through one write-only port. */
+    io_sethandler(0x8300, 0x0002,
+                  NULL, NULL, NULL,
+                  NULL, mind_gcp_kick, NULL, NULL);
+    /* 8302-831F and 8324-833F: the rest of the board's I/O block. */
+    io_sethandler(0x8302, 0x001e,
+                  mind_io_read, mind_io_readw, NULL,
+                  mind_io_write, mind_io_writew, NULL, NULL);
+    io_sethandler(0x8324, 0x001c,
                   mind_io_read, mind_io_readw, NULL,
                   mind_io_write, mind_io_writew, NULL, NULL);
 
