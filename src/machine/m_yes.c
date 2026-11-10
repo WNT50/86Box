@@ -74,7 +74,7 @@ typedef struct yes_t {
     uint8_t  dsksel;
     uint16_t mmcs;
     uint32_t vid_base; /* frame buffer base, derived from MMCS */
-    wd2791_t *fdc;     /* WD2797 formatter at 0x480 */
+    wd279x_t *fdc;     /* WD2797 formatter at 0x480 */
     struct i8018x_pcb_t *pcb;
     intel_8256_t *muart; /* serial / parallel / timers / interrupt levels */
     void         *video;
@@ -209,7 +209,7 @@ yes_dsksel_write(uint16_t port, uint8_t val, void *priv)
         }
     }
 
-    wd2791_set_dskctl(yes.fdc, val);
+    wd279x_set_dskctl(yes.fdc, val);
 }
 
 /* INTRQ from the formatter.  The board feeds it to the 80186's INT2 input:
@@ -419,9 +419,16 @@ machine_yes_init(const machine_t *model)
         i8018x_pcb_set_timer_input(pcb, 0, 16);
     }
 
-    yes.fdc = wd2791_init_at(YES_FDC_BASE);
+    yes.fdc = wd279x_init_at(YES_FDC_BASE);
+    {
+        const char *sb = getenv("YES_SBASE");
+
+        if (sb != NULL)
+            wd279x_set_sector_base(yes.fdc, atoi(sb));
+        wd279x_set_reg_step(yes.fdc, 2); /* the ROM uses 0x480/2/4/6 */
+    }
     if (yes.fdc != NULL) {
-        wd2791_set_irq_handler(yes.fdc, yes_fdc_irq, NULL);
+        wd279x_set_irq_handler(yes.fdc, yes_fdc_irq, NULL);
         fdcinited = 1;
     }
 
