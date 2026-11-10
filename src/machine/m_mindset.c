@@ -106,6 +106,7 @@ typedef struct {
 
 typedef struct {
     int            keytest;
+    int            dump_at;
     int            log;
     int            vramdump;
     int            kicks;
@@ -456,6 +457,9 @@ mind_gcp_kick(uint16_t port, uint16_t val, void *priv)
 
     mindset.kicks++;
 
+    if ((mindset.dump_at != 0) && (mindset.kicks == mindset.dump_at))
+        mind_dump_vram("at");
+
     if (mindset.vramdump) {
         switch (mindset.kicks) {
             case 1:
@@ -481,6 +485,18 @@ mind_gcp_kick(uint16_t port, uint16_t val, void *priv)
 
             case 100:
                 mind_dump_vram("kick100");
+                break;
+
+            case 400:
+                mind_dump_vram("kick400");
+                break;
+
+            case 800:
+                mind_dump_vram("kick800");
+                break;
+
+            case 1200:
+                mind_dump_vram("kick1200");
                 break;
 
             default:
@@ -1098,6 +1114,10 @@ machine_mindset_init(const machine_t *model)
     mind_mcu_reset(&mindset);
     mindset.log      = (getenv("MIND_LOG") != NULL);
     mindset.vramdump = (getenv("MIND_VRAMDUMP") != NULL);
+    mindset.dump_at  = 0;
+
+    if (getenv("MIND_DUMP_AT") != NULL)
+        mindset.dump_at = atoi(getenv("MIND_DUMP_AT"));
     mindset.keytest  = (getenv("MIND_KEYTEST") != NULL);
 
     if (getenv("MIND_MON") != NULL)
