@@ -107,6 +107,7 @@ typedef struct {
 typedef struct {
     int            keytest;
     int            dump_at;
+    int            badwrites;
     int            log;
     int            vramdump;
     int            kicks;
@@ -392,6 +393,18 @@ mind_blit(uint32_t packet)
                 res = (uint16_t) ((dst & ~cmask) | (res & cmask));
 
                 mind_phys_wrw(dst_base + dst_cadr, sw16(res));
+
+                /* A blit whose destination does not read back is writing into
+                   something other than display RAM. */
+                if (mindset.log && (mindset.badwrites < 8)) {
+                    uint16_t back = sw16(mind_phys_rdw(dst_base + dst_cadr));
+
+                    if (back != res) {
+                        pclog("[MIND] blit write lost at %05X: wrote %04X read %04X\n",
+                              dst_base + dst_cadr, res, back);
+                        mindset.badwrites++;
+                    }
+                }
 
                 if (mode & 0x0100)
                     src_cadr += 2;
@@ -811,32 +824,18 @@ static const struct {
     uint64_t delay_us;
     uint8_t  code;
 } mind_key_script[] = {
-    { 0,       0x39 },  /* space: leave the diagnostics screen   */
-    { 1000000, 0x38 },  /* Alt down                              */
-    {  200000, 0x57 },  /* Reset                                 */
-    {  300000, 0xd7 },  /* Reset up                              */
-    {  200000, 0xb8 },  /* Alt up                                */
-    { 6000000, 0x38 },  /* the machine is on the configuration screen now:
+    { 3000000, 0x39 },  /* space: leave the diagnostics screen   */
+    {  300000, 0xb9 },
+    { 6000000, 0x38 },  /* by now the configuration screen is up:
                            Alt down ...                            */
-    {   80000, 0x57 },  /* ... Reset, which is how the screen is left */
+    {   80000, 0x57 },  /* ... Reset, which saves and leaves it   */
     {  300000, 0xd7 },
     {  200000, 0xb8 },
-    { 3000000, 0x39 },  /* the POST that follows asks for a key again, so
-                           keep answering it while the boot gets going */
+    { 5000000, 0x39 },  /* answer the POST that follows           */
     {  300000, 0xb9 },
-    { 2500000, 0x39 },
+    { 4000000, 0x39 },
     {  300000, 0xb9 },
-    { 2500000, 0x39 },
-    {  300000, 0xb9 },
-    { 2500000, 0x39 },
-    {  300000, 0xb9 },
-    { 2500000, 0x39 },
-    {  300000, 0xb9 },
-    { 2500000, 0x39 },
-    {  300000, 0xb9 },
-    { 2500000, 0x39 },
-    {  300000, 0xb9 },
-    { 2500000, 0x39 },
+    { 4000000, 0x39 },
     {  300000, 0xb9 },
 };
 
