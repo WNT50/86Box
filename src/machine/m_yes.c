@@ -344,6 +344,7 @@ yes_sasi_read(uint16_t port, void *priv)
         uint8_t     idle = (v != NULL) ? (uint8_t) strtoul(v, NULL, 16) : 0x00;
 
 
+
         {
             static int n;
 
