@@ -20,6 +20,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
 #define HAVE_STDARG_H
@@ -724,6 +725,16 @@ static void i8080_port_out(UNUSED(void* priv), uint8_t port, uint8_t val)
 void
 reset_808x(int hard)
 {
+    /* YES_TRACE=1: a machine that resets in a loop re-enters POST and dies in
+       the same place every time; the previous CS:IP says where from. */
+    if (getenv("YES_TRACE") != NULL) {
+        static long n;
+
+        n++;
+        pclog("[YRESET] #%ld hard=%d prev=%04X:%04X\n", n, hard,
+              cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
+    }
+
     i808x_hook_prefetch_queue(pfq_set_pos, pfq_set_ip, pfq_set_prefetching,
                               pfq_get_pos, pfq_get_ip, pfq_get_prefetching,
                               pfq_get_size, i808x_wait);
@@ -3560,6 +3571,20 @@ execx86(int cycs)
                     /* Who sets the handler's saved stack slot, and who finds it
                        wrong: entry points of the two handlers and the shared
                        epilogue. */
+                    /* How deep the interrupt stack goes: the BIOS data area
+                       variables start at 0x2e, so anything below that is the
+                       handler treading on its own saved state. */
+                    if (cpu_state.seg_ss.seg == 0x1f88) {
+                        static uint16_t min_sp = 0xffff;
+
+                        if (cpu_state.regs[4].w < min_sp) {
+                            min_sp = cpu_state.regs[4].w;
+                            if (min_sp <= 0x40)
+                                pclog("[YSP] min SP=%04X @%04X:%04X\n", min_sp,
+                                      cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
+                        }
+                    }
+
                     switch (lin) {
                         case 0x0fcc4eu:
                             /* Overlap test: the helper uses globals, so a call
