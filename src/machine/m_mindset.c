@@ -826,7 +826,7 @@ static const struct {
 } mind_key_script[] = {
     { 3000000, 0x39 },  /* space: leave the diagnostics screen   */
     {  300000, 0xb9 },
-    { 6000000, 0x38 },  /* by now the configuration screen is up:
+    { 6000000, 0x38 },  /* the configuration screen is up by now:
                            Alt down ...                            */
     {   80000, 0x57 },  /* ... Reset, which saves and leaves it   */
     {  300000, 0xd7 },
@@ -835,9 +835,6 @@ static const struct {
     {  300000, 0xb9 },
     { 4000000, 0x39 },
     {  300000, 0xb9 },
-    { 4000000, 0x39 },
-    {  300000, 0xb9 },
-};
 
 static int        mind_key_pos;
 static pc_timer_t mind_key_timer;
