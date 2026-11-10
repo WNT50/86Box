@@ -41,6 +41,7 @@
 #include <86box/timer.h>
 #include <86box/video.h>
 #include <86box/i8018x.h>
+#include <86box/keyboard.h>
 
 #include "../cpu/cpu.h"
 
@@ -73,13 +74,22 @@ typedef struct {
     uint8_t regs[256];
 } mind_mailbox_t;
 
+/* The keyboard scanner hands one byte at a time to the system controller,
+   which raises its interrupt line until the BIOS has picked the byte up. */
 typedef struct {
+    uint8_t key;
+    int     pending;
+} mind_keyboard_t;
+
+typedef struct {
+    int            keytest;
     int            log;
     int            vramdump;
     int            kicks;
     mind_mailbox_t sys;  /* system controller register file */
     mind_mailbox_t snd;  /* sound controller register file */
-    uint8_t        sys_sts; /* status byte the controller reports */
+    uint8_t         sys_sts; /* status byte the controller reports */
+    mind_keyboard_t kbd;
     pc_timer_t     mcu_timer;
     pc_timer_t     sample_timer;
 } mindset_t;
@@ -98,6 +108,28 @@ mind_display_irq(void *priv, int level)
 {
     if (mind_pcb != NULL)
         i8018x_pcb_icu_int(mind_pcb, 2, level);
+}
+
+/* The keyboard scanner sits behind the system controller: it leaves a byte for
+   the controller, which raises line 3 until the BIOS reads it out of register
+   8Ch inside its interrupt handler. */
+static void
+mind_keyboard_send(uint16_t val)
+{
+    if ((val & 0xff00) != 0x0000)
+        return;
+
+    if (mindset.log)
+        pclog("[MIND] kbd send %04X pending=%d\n", val, mindset.kbd.pending);
+
+    if (mindset.kbd.pending)
+        return;
+
+    mindset.kbd.key     = (uint8_t) (val & 0xff);
+    mindset.kbd.pending = 1;
+
+    if (mind_pcb != NULL)
+        i8018x_pcb_icu_int(mind_pcb, 3, 1);
 }
 
 /* MIND_SAMPLE=<us>: how often the sampler prints CS:IP (default 20 ms). */
@@ -530,7 +562,17 @@ mind_sys_index_write(UNUSED(uint16_t port), uint8_t val, UNUSED(void *priv))
 static uint8_t
 mind_sys_data_read(UNUSED(uint16_t port), UNUSED(void *priv))
 {
-    uint8_t ret = mindset.sys.regs[mindset.sys.idx];
+    uint8_t ret;
+
+    if ((mindset.sys.idx == 0x8c) && mindset.kbd.pending) {
+        ret = mindset.kbd.key;
+
+        mindset.kbd.pending = 0;
+        if (mind_pcb != NULL)
+            i8018x_pcb_icu_int(mind_pcb, 3, 0);
+    } else {
+        ret = mindset.sys.regs[mindset.sys.idx];
+    }
 
     mind_trace("r", 0x8280, ret, 1);
 
@@ -658,6 +700,15 @@ mind_io_writew(uint16_t port, uint16_t val, void *priv)
     mind_trace("w", port, val, 2);
 }
 
+/* MIND_KEYTEST=1 pushes a space bar press once the BIOS is waiting for a key,
+   so the boot path can be exercised before the real keyboard is wired. */
+static void
+mind_key_test(void *priv)
+{
+    pclog("[MIND] key test: pushing space\n");
+    mind_keyboard_send(0x39);
+}
+
 /* Sampler: without a serial console the only way to tell "the CPU is still
    running the ROM" from "it wedged in a loop" is where it is over time. */
 static void
@@ -707,6 +758,7 @@ machine_mindset_init(const machine_t *model)
     mind_mcu_reset(&mindset);
     mindset.log      = (getenv("MIND_LOG") != NULL);
     mindset.vramdump = (getenv("MIND_VRAMDUMP") != NULL);
+    mindset.keytest  = (getenv("MIND_KEYTEST") != NULL);
     if (getenv("MIND_SAMPLE") != NULL)
         mind_interval = atoi(getenv("MIND_SAMPLE"));
 
@@ -732,6 +784,10 @@ machine_mindset_init(const machine_t *model)
         i8018x_pcb_set_dma_channels(mind_pcb, -1, -1);
         mindset_video_set_irq(mind_display_irq, NULL);
     }
+
+    /* The BIOS expects XT-style scan codes in register 8Ch. */
+    keyboard_set_table(scancode_xt);
+    keyboard_send = mind_keyboard_send;
 
     io_sethandler(MIND_TRAP_BASE, MIND_TRAP_SIZE,
                   mind_trap_read, mind_trap_readw, NULL,
@@ -774,6 +830,12 @@ machine_mindset_init(const machine_t *model)
                   mind_io_write, mind_io_writew, NULL, NULL);
 
     timer_add(&mindset.mcu_timer, mind_mcu_ready, NULL, 0);
+    if (mindset.keytest) {
+        static pc_timer_t key_timer;
+
+        timer_add(&key_timer, mind_key_test, NULL, 0);
+        timer_set_delay_u64(&key_timer, 6ULL * 1000000ULL * TIMER_USEC);
+    }
     timer_add(&mindset.sample_timer, mind_sample, NULL, 0);
     timer_set_delay_u64(&mindset.sample_timer, mind_interval * TIMER_USEC);
 
