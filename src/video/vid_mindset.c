@@ -524,6 +524,24 @@ mind_poll(void *priv)
 
     video_wait_for_buffer();
 
+    /* MIND_DUMP_FRAME=<n>: write the display RAM from inside the render loop,
+       where the buffer being drawn is by definition the live one. */
+    if (getenv("MIND_DUMP_FRAME") != NULL) {
+        static int frame_no;
+
+        frame_no++;
+
+        if (frame_no == atoi(getenv("MIND_DUMP_FRAME"))) {
+            FILE *f = fopen("/tmp/mind-frame.bin", "wb");
+
+            if (f != NULL) {
+                fwrite(vid->vram, 1, MIND_VRAM_SIZE, f);
+                fclose(f);
+                pclog("[MIND] frame %d dumped, dispctrl %04X\n", frame_no, vid->dispctrl);
+            }
+        }
+    }
+
     mind_render(vid);
 
     video_blit_memtoscreen(0, 0, xsize, ysize);

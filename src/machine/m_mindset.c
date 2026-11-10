@@ -852,6 +852,14 @@ static const struct {
     {  300000, 0xb9 },
     { 4000000, 0x39 },
     {  300000, 0xb9 },
+    {10000000, 0x1c },  /* DOS asks for the date: press Return    */
+    {  300000, 0x9c },
+    { 8000000, 0x1c },  /* ... and the time                       */
+    {  300000, 0x9c },
+    { 8000000, 0x0d },  /* the command prompt itself waits too    */
+    {  300000, 0x8d },
+    { 8000000, 0x1c },
+    {  300000, 0x9c },
 };
 
 static int        mind_key_pos;
