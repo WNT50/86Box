@@ -335,6 +335,15 @@ yes_sasi_read(uint16_t port, void *priv)
     }
 }
 
+static uint16_t
+yes_sasi_read16(uint16_t port, void *priv)
+{
+    const char *v = getenv("YES_SASI");
+    uint8_t     idle = (v != NULL) ? (uint8_t) strtoul(v, NULL, 16) : 0x00;
+
+    return (uint16_t) (idle | (idle << 8));
+}
+
 /*
  * 80186 MMCS (mid-range memory chip select).  The BIOS writes the frame
  * buffer's base here: 0x01f8 -> 0x10000, 0x21f8 -> 0x30000, 0x81f8 ->
@@ -388,9 +397,9 @@ yes_io_init(void)
                   yes_sysctl_write, NULL, NULL, NULL);
     io_sethandler(YES_RTC, 0x0001, yes_rtc_read, NULL, NULL, yes_rtc_write, NULL,
                   NULL, NULL);
-    io_sethandler(YES_SASI_DATA, 0x0001, yes_sasi_read, NULL, NULL,
+    io_sethandler(YES_SASI_DATA, 0x0001, yes_sasi_read, yes_sasi_read16, NULL,
                   yes_sasi_write, NULL, NULL, NULL);
-    io_sethandler(YES_SASI_STAT, 0x0001, yes_sasi_read, NULL, NULL,
+    io_sethandler(YES_SASI_STAT, 0x0001, yes_sasi_read, yes_sasi_read16, NULL,
                   yes_sasi_write, NULL, NULL, NULL);
     io_sethandler(YES_MMCS, 0x0002, yes_mmcs_read8, yes_mmcs_read16, NULL,
                   yes_mmcs_write8, yes_mmcs_write16, NULL, NULL);
