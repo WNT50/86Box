@@ -115,6 +115,8 @@ yes_render(yes_video_t *dev)
     uint32_t start = ((uint32_t) dev->crtc[CRTC_R12] << 8) | dev->crtc[CRTC_R13];
     uint32_t cursor = ((uint32_t) dev->crtc[CRTC_R14] << 8) | dev->crtc[CRTC_R15];
     int      row, col, y, x;
+    /* R9 says how many scan lines a character row takes, minus one. */
+    int      lh = dev->crtc[CRTC_R9] + 1;
     /* 80-column mode puts a character in eight pixels, 40-column mode in
        sixteen: the board halves the character clock, so the glyph keeps its
        eight dots and the rest of the cell carries the background. */
@@ -124,8 +126,14 @@ yes_render(yes_video_t *dev)
        modes leave the rest of the line alone), but never more than fits. */
     if ((cols < 1) || (cols > 80))
         cols = 80;
-    if ((rows < 1) || (rows > 25))
-        rows = 25;
+    if (lh < 8)
+        lh = 8;
+    if (lh > 16)
+        lh = 16;
+    if ((rows < 1) || (rows > (YES_YSIZE / lh)))
+        rows = YES_YSIZE / lh;
+
+    memset(dev->fb, 0x00, YES_XSIZE * YES_YSIZE * sizeof(uint32_t));
 
     for (row = 0; row < rows; row++) {
         for (col = 0; col < cols; col++) {
@@ -158,8 +166,8 @@ yes_render(yes_video_t *dev)
             else
                 glyph = &dev->font[(ch & 0xff) * 16];
 
-            for (y = 0; y < 16; y++) {
-                uint32_t *line = &dev->fb[((uint32_t) row * 16 + (uint32_t) y) * YES_XSIZE];
+            for (y = 0; y < lh; y++) {
+                uint32_t *line = &dev->fb[((uint32_t) row * (uint32_t) lh + (uint32_t) y) * YES_XSIZE];
                 uint8_t bits = dev->font_ok ? glyph[y] : 0x00;
 
                 if (!dev->font_ok)
@@ -181,8 +189,8 @@ yes_render(yes_video_t *dev)
 
             /* A block cursor, so the ROM's cursor address shows up. */
             if (cell == cursor) {
-                for (y = 13; y < 16; y++) {
-                    uint32_t *line = &dev->fb[((uint32_t) row * 16 + (uint32_t) y) * YES_XSIZE];
+                for (y = lh - 3; y < lh; y++) {
+                    uint32_t *line = &dev->fb[((uint32_t) row * (uint32_t) lh + (uint32_t) y) * YES_XSIZE];
                     for (x = 0; x < 8; x++)
                         line[(uint32_t) col * (uint32_t) cw + (uint32_t) x] = fg;
                 }
