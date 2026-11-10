@@ -71,6 +71,7 @@ extern void           mindset_video_set_irq(void (*cb)(void *priv, int level), v
 typedef struct {
     int          log;
     int          vramdump;
+    int          kicks;
     pc_timer_t   sample_timer;
 } mindset_t;
 
@@ -311,8 +312,53 @@ mind_blit(uint32_t packet)
 
 /* Writing the kick port runs whatever the command block describes. */
 static void
+mind_dump_vram(const char *tag)
+{
+    uint8_t *vram = mindset_video_vram();
+    char     path[64];
+    FILE    *f;
+
+    if (vram == NULL)
+        return;
+
+    snprintf(path, sizeof(path), "/tmp/mind-%s.bin", tag);
+    f = fopen(path, "wb");
+    if (f == NULL)
+        return;
+
+    fwrite(vram, 1, MIND_VRAM_SIZE, f);
+    fclose(f);
+    pclog("[MIND] vram dumped to %s\n", path);
+}
+
+static void
 mind_gcp_kick(uint16_t port, uint16_t val, void *priv)
 {
+    mindset.kicks++;
+
+    if (mindset.vramdump) {
+        switch (mindset.kicks) {
+            case 20:
+                mind_dump_vram("kick20");
+                break;
+
+            case 40:
+                mind_dump_vram("kick40");
+                break;
+
+            case 56:
+                mind_dump_vram("kick56");
+                break;
+
+            case 100:
+                mind_dump_vram("kick100");
+                break;
+
+            default:
+                break;
+        }
+    }
+
     uint16_t gmode = sw16(mind_phys_rdw(MIND_CMD_MODE));
     uint16_t padr  = sw16(mind_phys_rdw(MIND_CMD_PACKET));
     uint16_t pseg  = sw16(mind_phys_rdw(MIND_CMD_SEGMENT));
@@ -429,21 +475,31 @@ mind_io_writew(uint16_t port, uint16_t val, void *priv)
 static void
 mind_sample(void *priv)
 {
-    static int tick = 0;
+    pclog("[MIND] pc=%04X:%04X frames=%d\n", cpu_state.seg_cs.seg,
+          (uint16_t) cpu_state.pc, frames);
 
-    pclog("[MIND] pc=%04X:%04X\n", cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
+    /* MIND_VRAMDUMP=1: drop the display RAM to /tmp at fixed frame numbers,
+       which separates "the guest drew nothing" from "the renderer maps the
+       pixels wrongly" and lets the same frames be compared with another
+       emulator's dump. */
+    if (mindset.vramdump && (frames >= 100) && ((frames % 100) == 0)) {
+        static uint64_t dumped = 0;
+        uint8_t        *vram   = mindset_video_vram();
 
-    /* MIND_VRAMDUMP=1: drop the display RAM to /tmp so it can be decoded
-       offline, which separates "the guest drew nothing" from "the renderer
-       maps the pixels wrongly". */
-    if (mindset.vramdump && (++tick % 50) == 0) {
-        uint8_t *vram = mindset_video_vram();
-        FILE    *f    = fopen("/tmp/mind-vram.bin", "wb");
+        if ((vram != NULL) && (dumped != frames)) {
+            char path[64];
+            FILE *f;
 
-        if ((vram != NULL) && (f != NULL))
-            fwrite(vram, 1, MIND_VRAM_SIZE, f);
-        if (f != NULL)
-            fclose(f);
+            snprintf(path, sizeof(path), "/tmp/mind-vram-%llu.bin",
+                     (unsigned long long) frames);
+            f = fopen(path, "wb");
+            if (f != NULL) {
+                fwrite(vram, 1, MIND_VRAM_SIZE, f);
+                fclose(f);
+                dumped = frames;
+                pclog("[MIND] vram dumped at frame %llu\n", (unsigned long long) frames);
+            }
+        }
     }
 
     timer_set_delay_u64(&mindset.sample_timer, mind_interval * TIMER_USEC);

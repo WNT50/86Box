@@ -146,12 +146,15 @@ static uint16_t
 mind_dispreg_read(mindset_vid_t *vid)
 {
     switch ((vid->dispctrl >> 4) & 7) {
-        case 1: /* display word at the interrupt position */
+        case 1: /* the display word at the interrupt position, shifted */
             {
-                uint16_t v = (uint16_t) (vid->vram[(vid->intaddr >> 1) & (MIND_VRAM_SIZE - 1)] |
-                                         (vid->vram[((vid->intaddr >> 1) + 1) & (MIND_VRAM_SIZE - 1)] << 8));
+                uint32_t byte = vid->intaddr & (MIND_VRAM_SIZE - 2);
+                uint16_t v    = (uint16_t) (vid->vram[byte] | (vid->vram[byte + 1] << 8));
 
-                return (uint16_t) (sw16(v) << 4);
+                if (vid->intaddr & 1)
+                    v >>= 8;
+
+                return (uint16_t) (sw16((uint16_t) (v << 4)));
             }
 
         case 5: /* the palette upload path wants this set */
