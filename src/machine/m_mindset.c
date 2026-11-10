@@ -346,6 +346,10 @@ mind_gcp_kick(uint16_t port, uint16_t val, void *priv)
 
     if (mindset.vramdump) {
         switch (mindset.kicks) {
+            case 1:
+                mind_dump_vram("kick1");
+                break;
+
             case 20:
                 mind_dump_vram("kick20");
                 break;
