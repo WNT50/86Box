@@ -78,7 +78,8 @@ typedef struct {
    which raises its interrupt line until the BIOS has picked the byte up. */
 typedef struct {
     uint8_t key;
-    int     pending;
+    int     valid;      /* a byte is waiting to be read out of register 8Ch */
+    int     ready;      /* the BIOS sees this as status bit 5 */
 } mind_keyboard_t;
 
 typedef struct {
@@ -120,13 +121,14 @@ mind_keyboard_send(uint16_t val)
         return;
 
     if (mindset.log)
-        pclog("[MIND] kbd send %04X pending=%d\n", val, mindset.kbd.pending);
+        pclog("[MIND] kbd send %04X ready=%d\n", val, mindset.kbd.ready);
 
-    if (mindset.kbd.pending)
+    if (mindset.kbd.valid)
         return;
 
-    mindset.kbd.key     = (uint8_t) (val & 0xff);
-    mindset.kbd.pending = 1;
+    mindset.kbd.key   = (uint8_t) (val & 0xff);
+    mindset.kbd.valid = 1;
+    mindset.kbd.ready = 1;
 
     if (mind_pcb != NULL)
         i8018x_pcb_icu_int(mind_pcb, 3, 1);
@@ -545,15 +547,40 @@ mind_mcu_busy(void)
 static uint8_t
 mind_sys_status_read(UNUSED(uint16_t port), UNUSED(void *priv))
 {
-    mind_trace("r", 0x8282, mindset.sys_sts, 1);
+    uint8_t ret = mindset.sys_sts;
 
-    return mindset.sys_sts;
+    /* Bit 5 tells the interrupt handler that a keyboard byte is waiting; it
+       acknowledges with a 40h write and then reads register 8Ch. */
+    if (mindset.kbd.ready)
+        ret |= 0x20;
+
+    mind_trace("r", 0x8282, ret, 1);
+
+    return ret;
 }
 
 static void
 mind_sys_index_write(UNUSED(uint16_t port), uint8_t val, UNUSED(void *priv))
 {
     mind_trace("w", 0x8282, val, 1);
+
+    /* 40h and 41h are the two acknowledgement codes the handler sends; the
+       first one releases the keyboard interrupt line. */
+    switch (val) {
+        case 0x40:
+            if (mindset.kbd.ready) {
+                mindset.kbd.ready = 0;
+                if (mind_pcb != NULL)
+                    i8018x_pcb_icu_int(mind_pcb, 3, 0);
+            }
+            return;
+
+        case 0x41:
+            return;
+
+        default:
+            break;
+    }
 
     mindset.sys.idx = val;
     mind_mcu_busy();
@@ -564,10 +591,11 @@ mind_sys_data_read(UNUSED(uint16_t port), UNUSED(void *priv))
 {
     uint8_t ret;
 
-    if ((mindset.sys.idx == 0x8c) && mindset.kbd.pending) {
+    if ((mindset.sys.idx == 0x8c) && mindset.kbd.valid) {
         ret = mindset.kbd.key;
 
-        mindset.kbd.pending = 0;
+        mindset.kbd.valid = 0;
+        mindset.kbd.ready = 0;
         if (mind_pcb != NULL)
             i8018x_pcb_icu_int(mind_pcb, 3, 0);
     } else {

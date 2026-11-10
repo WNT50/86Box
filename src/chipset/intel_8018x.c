@@ -540,6 +540,10 @@ i8018x_pcb_icu_int(struct i8018x_pcb_t *pcb, int line, int level)
 
     uint16_t bit    = I8018X_ICU_SRC_INT(line);
     int      rising = level && !(pcb->icu_ext & bit);
+
+    if (getenv("MIND_ICU_LOG") != NULL)
+        pclog("[ICU] int line=%d level=%d latch=%04X mask=%04X con=%04X\n", line, level,
+              pcb->icu_latch, pcb->regs[I8018X_ICU_MASK / 2], pcb->regs[I8018X_ICU_INT_CON(line) / 2]);
     int      edge   = !(pcb->regs[I8018X_ICU_INT_CON(line) / 2] & I8018X_ICU_CON_LTM);
 
     if (level)
