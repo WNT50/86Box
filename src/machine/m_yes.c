@@ -61,6 +61,7 @@ extern int fdcinited;
 #define YES_PALETTE    0x05c0
 #define YES_SYSCtl     0x05e0
 #define YES_RTC        0x066a
+#define YES_RTCD       0x066e
 #define YES_BOARD      0x0422
 #define YES_SASI_DATA  0x067a
 #define YES_SASI_STAT  0x067c
@@ -310,6 +311,17 @@ yes_rtc_write(uint16_t port, uint8_t val, void *priv)
 }
 
 static uint8_t
+yes_rtcd_read(uint16_t port, void *priv)
+{
+    /* The RTC answers bit-serially on bit 0; the value is a probe knob until
+       the protocol itself is modelled. */
+    const char *v = getenv("YES_RTCD");
+    uint8_t     b = (v != NULL) ? (uint8_t) strtoul(v, NULL, 16) : 0x00;
+
+    return b;
+}
+
+static uint8_t
 yes_rtc_read(uint16_t port, void *priv)
 {
     return yes_log_read("rtc", port, 0x00);
@@ -402,6 +414,8 @@ yes_io_init(void)
                   NULL);
     io_sethandler(YES_SYSCtl, 0x0001, yes_sysctl_read, NULL, NULL,
                   yes_sysctl_write, NULL, NULL, NULL);
+    io_sethandler(YES_RTCD, 0x0001, yes_rtcd_read, NULL, NULL, NULL, NULL, NULL,
+                  NULL);
     io_sethandler(YES_RTC, 0x0001, yes_rtc_read, NULL, NULL, yes_rtc_write, NULL,
                   NULL, NULL);
     io_sethandler(YES_SASI_DATA, 0x0001, yes_sasi_read, yes_sasi_read16, NULL,
