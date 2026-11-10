@@ -209,6 +209,15 @@ yes_poll(void *priv)
                     }
                 }
                 fclose(f);
+
+                /* The raw cells next to the picture, for offline calibration. */
+                f = fopen("/tmp/yes_cells.bin", "wb");
+                if (f != NULL) {
+                    uint32_t st = ((uint32_t) dev->crtc[CRTC_R12] << 8) | dev->crtc[CRTC_R13];
+                    fwrite(ram + ((dev->base + st * 4u) & 0xfffff), 1, 8192, f);
+                    fclose(f);
+                }
+
                 pclog(":YES video: wrote %s (R1=%02X R6=%02X R9=%02X R12/13=%02X%02X R14/15=%02X%02X)\n",
                       shot, dev->crtc[CRTC_R1], dev->crtc[CRTC_R6], dev->crtc[CRTC_R9],
                       dev->crtc[CRTC_R12], dev->crtc[CRTC_R13],
