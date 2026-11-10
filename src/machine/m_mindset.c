@@ -170,6 +170,16 @@ mind_keyboard_send(uint16_t val)
             mindset.kbd.qtail = (mindset.kbd.qtail + 1) % (int) sizeof(mindset.kbd.queue);
             mindset.kbd.qcount++;
         }
+
+        /* The request is retriggered so a byte that was acknowledged but
+           never read out of 8Ch does not silence the controller: without a
+           fresh edge the interrupt controller has nothing left to deliver. */
+        if ((mind_pcb != NULL) && !mindset.kbd.ready) {
+            mindset.kbd.ready = 1;
+            i8018x_pcb_icu_int(mind_pcb, 3, 0);
+            i8018x_pcb_icu_int(mind_pcb, 3, 1);
+        }
+
         return;
     }
 
