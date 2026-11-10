@@ -179,7 +179,7 @@ static uint8_t  i8018x_pcb_inb(uint16_t port, void *priv);
 static uint16_t i8018x_pcb_inw(uint16_t port, void *priv);
 static void     i8018x_pcb_outb(uint16_t port, uint8_t val, void *priv);
 static void     i8018x_pcb_outw(uint16_t port, uint16_t val, void *priv);
-static void     i8018x_pcb_dma_freerun(struct i8018x_pcb_t *dev, int slot);
+static int      i8018x_pcb_dma_freerun(struct i8018x_pcb_t *dev, int slot);
 
 /* Timer control register (270788-001 Figure 56). EN and INH work as a pair: a
    write reaches the ENable bit only when it sets the INHibit bit alongside it,
@@ -1135,7 +1135,7 @@ i8018x_pcb_dump_icu(void)
     pclog("[ICUSNAP2] tsc=%llu T0 base=%llu src=%llu ext_div=%u tmr_div=%u\n",
           (unsigned long long) tsc, (unsigned long long) d->tmr_base[0],
           (unsigned long long) d->tmr_src[0], d->tmr_ext_div[0],
-          i8018x_pcb_tmr_div());
+          I8018X_TMR_TSC_PER_EVENT);
 }
 
 /* Source I/O port the guest programmed for a channel (0xFFFF when the channel
@@ -1434,49 +1434,6 @@ i8018x_pcb_dma_write(int channel, uint16_t val, void *priv)
     return i8018x_pcb_dma_count_down(dev, slot) ? DMA_OVER : 0;
 }
 
-/* An unsynchronized channel generates its own requests and moves the whole
-   block at once as soon as ST is set, keeping the bus to itself until the
-   count runs out (270788-001 sections 8.2 and 8.7). Both sides have to be
-   memory: with an I/O side the byte would come from a port, which a board
-   hands over through its own data handlers instead. */
-static void
-i8018x_pcb_dma_freerun(struct i8018x_pcb_t *dev, int slot)
-{
-    uint16_t ctrl = dev->regs[I8018X_DMA_CTRL(slot)];
-
-    if (((ctrl & I8018X_DMA_SYN) != 0x0000u) ||
-        !(ctrl & I8018X_DMA_SRC_MIO) || !(ctrl & I8018X_DMA_DST_MIO))
-        return;
-
-    /* The count is 16 bits, so the guard only keeps a misprogrammed
-       channel from holding the port write for good. */
-    for (uint32_t guard = 0; guard < 0x10000u; guard++) {
-        uint32_t src;
-        uint32_t dst;
-
-        if (!i8018x_pcb_dma_armed(dev, slot))
-            return;
-
-        src = i8018x_pcb_dma_ptr(dev, slot, 0);
-        dst = i8018x_pcb_dma_ptr(dev, slot, 1);
-
-        if (dev->regs[I8018X_DMA_CTRL(slot)] & I8018X_DMA_BW)
-            if (!i8018x_dma_xlate(&dst, 1) || !i8018x_dma_xlate(&src, 0))
-                return;
-            mem_writew_phys(dst, mem_readw_phys(src));
-        else {
-            if (!i8018x_dma_xlate(&dst, 1) || !i8018x_dma_xlate(&src, 0))
-                return;
-            mem_writeb_phys(dst, mem_readb_phys(src));
-        }
-
-        i8018x_pcb_dma_step_ptr(dev, slot, 0);
-        i8018x_pcb_dma_step_ptr(dev, slot, 1);
-
-        if (i8018x_pcb_dma_count_down(dev, slot))
-            return;
-    }
-}
 
 static void
 i8018x_pcb_dma_set_drq(int channel, int set, void *priv)
