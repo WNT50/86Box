@@ -301,7 +301,12 @@ yes_sasi_read(uint16_t port, void *priv)
     /* No SASI target is fitted: the status port reads idle instead of an open
        bus, so the ROM's poll sees "nothing to do" rather than "busy for ever"
        (0xff has bit 3 set, which is the bit the boot code waits to clear). */
-    return yes_log_read("sasi", port, 0x00);
+    {
+        const char *v = getenv("YES_SASI");
+        uint8_t     idle = (v != NULL) ? (uint8_t) strtoul(v, NULL, 16) : 0x00;
+
+        return yes_log_read("sasi", port, idle);
+    }
 }
 
 /*

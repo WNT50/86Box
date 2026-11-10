@@ -201,6 +201,18 @@ intel_8256_tick(void *priv)
                   dev->timer_run[2], dev->regs[MUART_INTEN], dev->pending);
     }
 
+    /* MODE bits 3/4 turn timer 2 or 3 into an event counter on Port 1 bit 2/3
+       (data sheet, CT2/CT3): such a timer never counts the internal clock, it
+       only decrements on an external edge, which this board does not drive. */
+    {
+        uint8_t ct = dev->regs[MUART_MODE];
+
+        if ((ct & 0x08) && dev->timer_run[2])
+            dev->timer_run[2] = 0;
+        if ((ct & 0x10) && dev->timer_run[1])
+            dev->timer_run[1] = 0;
+    }
+
     for (int i = 0; i < 5; i++) {
         if (!dev->timer_run[i])
             continue;

@@ -3560,12 +3560,48 @@ execx86(int cycs)
                     /* Who sets the handler's saved stack slot, and who finds it
                        wrong: entry points of the two handlers and the shared
                        epilogue. */
-                    if ((lin == 0x0fcc33u) || (lin == 0x0fcc4du)) {
-                        static int wh;
-                        if (++wh <= 400)
-                            pclog("[YWAIT] %05X ss:sp=%04X:%04X if=%d\n", lin,
-                                  cpu_state.seg_ss.seg, cpu_state.regs[4].w,
-                                  (cpu_state.flags & 0x200) ? 1 : 0);
+                    switch (lin) {
+                        case 0x0fcc4eu:
+                            /* Overlap test: the helper uses globals, so a call
+                               from the interrupt context while the main one is
+                               still inside it clobbers them. */
+                            {
+                                static int in_main;
+
+                                if (cpu_state.seg_ss.seg == 0x0f00)
+                                    in_main = 1;
+                                else if (in_main) {
+                                    static int ov;
+
+                                    if (++ov <= 20)
+                                        pclog("[YOVERLAP] isr call while main inside helper (#%d)\n", ov);
+                                }
+                            }
+                            /* fall through */
+                        case 0x0fcc27u: case 0x0fcc33u: case 0x0fcc38u:
+                        case 0x0fcc3cu: case 0x0fcc43u: case 0x0fcc4du:
+                        case 0x0fccfbu: case 0x0fcd03u:
+                            {
+                                static int wh;
+
+                                if (++wh <= 240)
+                                    pclog("[YWAIT] %05X ss:sp=%04X:%04X ax=%04X bx=%04X if=%d\n",
+                                          lin, cpu_state.seg_ss.seg,
+                                          cpu_state.regs[4].w,
+                                          (uint16_t) cpu_state.regs[0].w,
+                                          (uint16_t) cpu_state.regs[3].w,
+                                          (cpu_state.flags & 0x200) ? 1 : 0);
+                            }
+                            break;
+
+                        case 0x0fcc3du:
+                            /* Return of the helper: the main context is out. */
+                            break;
+
+                        default:
+                            if ((lin == 0x0fcc4du + 1u) && (cpu_state.seg_ss.seg == 0x0f00))
+                                pclog("");
+                            break;
                     }
 
                     if ((lin == 0x0fd038u) || (lin == 0x0ff35fu) ||
