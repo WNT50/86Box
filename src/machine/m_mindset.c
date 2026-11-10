@@ -70,7 +70,7 @@
 
 extern const device_t mindset_video_device;
 extern uint8_t       *mindset_video_vram(void);
-extern void           mindset_video_set_irq(void (*cb)(void *priv, int level), void *priv);
+extern void           mindset_video_set_irq(void (*cb)(void *priv, int line, int level), void *priv);
 
 typedef struct {
     uint8_t idx;         /* register index latched from the index port */
@@ -140,18 +140,20 @@ static struct i8018x_pcb_t *mind_pcb;
 
 /* The display's frame interrupt lands on line 2 of the 80186's own ICU. */
 static void
-mind_display_irq(void *priv, int level)
+mind_display_irq(void *priv, int line, int level)
 {
     if (mind_pcb == NULL)
         return;
 
-    /* The display raises two interrupts: INT1 at the start of vertical blank
-       and INT2 where the scan line compare register says so (mindset.cpp
-       wires screen_vblank to int1 and the scanline callback to int2).  The
-       BIOS's display bookkeeping - the pending mode-change flags - runs on
-       the vblank one. */
-    i8018x_pcb_icu_int(mind_pcb, 1, level);
-    i8018x_pcb_icu_int(mind_pcb, 2, level);
+    /* Two lines leave the display: INT1 at vertical blank (a level) and INT2
+       at the scan line compare.  The BIOS's display bookkeeping - the pending
+       mode-change flags - runs on the vblank one. */
+    if (line == 1) {
+        if (getenv("MIND_NOINT1") == NULL)
+            i8018x_pcb_icu_int(mind_pcb, 1, level);
+    } else {
+        i8018x_pcb_icu_int(mind_pcb, 2, level);
+    }
 }
 
 /* The keyboard scanner sits behind the system controller: it leaves a byte for
@@ -1179,6 +1181,10 @@ mind_sample(void *priv)
         pclog("[MIND] flags [0x12]=%02X [0x15]=%04X [0x1e]=%04X int0D=%04X:%04X\n",
               mem_readb_phys(0x412), mem_readw_phys(0x415), mem_readw_phys(0x41e),
               mem_readw_phys(0x36), mem_readw_phys(0x34));
+    if (mindset.log)
+        pclog("[MIND] mode=%02X cols=%04X disp=%04X cur=%04X\n",
+              mem_readb_phys(0x449), mem_readw_phys(0x44a),
+              mem_readw_phys(0x462), mem_readw_phys(0x450));
 
     pclog("[MIND] pc=%04X:%04X frames=%d\n", cpu_state.seg_cs.seg,
           (uint16_t) cpu_state.pc, frames);

@@ -62,8 +62,9 @@ typedef struct {
     uint64_t      frames;
     mem_mapping_t vram_map;
     pc_timer_t    timer;
-    pc_timer_t    irq_timer;
-    void        (*irq)(void *priv, int level);
+    pc_timer_t    vblank_timer;
+    pc_timer_t    scan_timer;
+    void        (*irq)(void *priv, int line, int level);
     void         *irq_priv;
 } mindset_vid_t;
 
@@ -340,19 +341,42 @@ mind_dispctrl_write8(uint16_t port, uint8_t val, void *priv)
         vid->dispctrl = (uint16_t) ((vid->dispctrl & 0xff00) | val);
 }
 
-/* The board pulses the frame interrupt when the display reaches the address
-   in the interrupt-position register; it is a short pulse, not a level. */
+/* Two separate interrupt lines leave the display: the scan line compare at
+   line 398 pulls INT2 for a moment, while vertical blank holds INT1 as a
+   level for the whole blanking period (mindset.cpp wires screen_vblank to
+   int1_w and the scanline callback to int2_w). */
 static void
-mind_irq_lower(void *priv)
+mind_vblank_end(void *priv)
 {
     mindset_vid_t *vid = (mindset_vid_t *) priv;
 
     if (vid->irq != NULL)
-        vid->irq(vid->irq_priv, 0);
+        vid->irq(vid->irq_priv, 1, 0);
+}
+
+static void
+mind_scan_lower(void *priv)
+{
+    mindset_vid_t *vid = (mindset_vid_t *) priv;
+
+    if (vid->irq != NULL)
+        vid->irq(vid->irq_priv, 2, 0);
+}
+
+static void
+mind_scan_raise(void *priv)
+{
+    mindset_vid_t *vid = (mindset_vid_t *) priv;
+
+    if (vid->irq != NULL) {
+        vid->irq(vid->irq_priv, 2, 1);
+        timer_set_delay_u64(&vid->scan_timer, 10 * TIMER_USEC);
+        vid->scan_timer.callback = mind_scan_lower;
+    }
 }
 
 void
-mindset_video_set_irq(void (*cb)(void *priv, int level), void *priv)
+mindset_video_set_irq(void (*cb)(void *priv, int line, int level), void *priv)
 {
     if (mindset_vid == NULL)
         return;
@@ -564,8 +588,13 @@ mind_poll(void *priv)
     video_blit_memtoscreen(0, 0, xsize, ysize);
 
     if (vid->irq != NULL) {
-        vid->irq(vid->irq_priv, 1);
-        timer_set_delay_u64(&vid->irq_timer, 10 * TIMER_USEC);
+        /* vertical blank: a level that lasts the blanking period */
+        vid->irq(vid->irq_priv, 1, 1);
+        timer_set_delay_u64(&vid->vblank_timer, (uint64_t) (TIMER_USEC * 1400.0));
+
+        /* scan line 398: a short pulse, a little before the next frame */
+        timer_set_delay_u64(&vid->scan_timer, (uint64_t) (TIMER_USEC * 13800.0));
+        vid->scan_timer.callback = mind_scan_raise;
     }
 
     video_res_x = xsize;
@@ -618,7 +647,8 @@ mind_vid_init(UNUSED(const device_t *info))
                   mind_dispctrl_read8, mind_dispctrl_read16, NULL,
                   mind_dispctrl_write8, mind_dispctrl_write16, NULL, vid);
 
-    timer_add(&vid->irq_timer, mind_irq_lower, vid, 0);
+    timer_add(&vid->vblank_timer, mind_vblank_end, vid, 0);
+    timer_add(&vid->scan_timer, mind_scan_raise, vid, 0);
     timer_add(&vid->timer, mind_poll, vid, 1);
     timer_set_delay_u64(&vid->timer, (uint64_t) (TIMER_USEC * (1000000.0 / 60.0)));
 
