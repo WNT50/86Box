@@ -115,6 +115,10 @@ yes_render(yes_video_t *dev)
     uint32_t start = ((uint32_t) dev->crtc[CRTC_R12] << 8) | dev->crtc[CRTC_R13];
     uint32_t cursor = ((uint32_t) dev->crtc[CRTC_R14] << 8) | dev->crtc[CRTC_R15];
     int      row, col, y, x;
+    /* 80-column mode puts a character in eight pixels, 40-column mode in
+       sixteen: the board halves the character clock, so the glyph keeps its
+       eight dots and the rest of the cell carries the background. */
+    int      cw = YES_XSIZE / ((cols > 0) ? cols : 80);
 
     /* The window is 80x25 cells; the CRTC is allowed to name more (40-column
        modes leave the rest of the line alone), but never more than fits. */
@@ -161,10 +165,10 @@ yes_render(yes_video_t *dev)
                 if (!dev->font_ok)
                     bits = 0x18; /* a marker so a missing font is visible */
 
-                for (x = 0; x < 8; x++) {
-                    colour = (bits & (0x80 >> x)) ? fg : bg;
-                    if (((uint32_t) col * 8 + (uint32_t) x) < YES_XSIZE)
-                        line[(uint32_t) col * 8 + (uint32_t) x] = colour;
+                for (x = 0; x < cw; x++) {
+                    colour = ((x < 8) && (bits & (0x80 >> x))) ? fg : bg;
+                    if (((uint32_t) col * (uint32_t) cw + (uint32_t) x) < YES_XSIZE)
+                        line[(uint32_t) col * (uint32_t) cw + (uint32_t) x] = colour;
                 }
             }
 
@@ -173,7 +177,7 @@ yes_render(yes_video_t *dev)
                 for (y = 13; y < 16; y++) {
                     uint32_t *line = &dev->fb[((uint32_t) row * 16 + (uint32_t) y) * YES_XSIZE];
                     for (x = 0; x < 8; x++)
-                        line[(uint32_t) col * 8 + (uint32_t) x] = fg;
+                        line[(uint32_t) col * (uint32_t) cw + (uint32_t) x] = fg;
                 }
             }
         }
