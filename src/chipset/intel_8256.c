@@ -183,6 +183,11 @@ intel_8256_tick(void *priv)
     if (dev == NULL)
         return;
 
+    /* The timers count either 16 kHz or 1 kHz (CMD1 FRQ) derived from the
+       part's 1.024 MHz internal clock.  CMD2 C1-C0 pick the divider that turns
+       the board's CLK pin into that reference (5, 3, 4 or 2 according to the
+       data sheet), so they normalise the pin rather than change the timer
+       rate -- which is why the rate below follows FRQ alone. */
     hz = (dev->regs[MUART_CMD1] & MUART_C1_FRQ) ? 1000 : 16000;
 
 
@@ -294,6 +299,8 @@ intel_8256_write(uint16_t port, uint8_t val, void *priv)
 
     switch (idx) {
         case MUART_CMD1:
+            if (getenv("YES_MUARTLOG") != NULL)
+                pclog("[MUART] CMD1=%02X (FRQ=%d)\n", val, val & 1);
             dev->regs[idx] = val;
             if (val & MUART_C1_FRQ) {
                 timer_set_delay_u64(&dev->timer, TIMER_USEC * 1000);
