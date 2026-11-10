@@ -289,6 +289,11 @@ intel_8256_read(uint16_t port, void *priv)
         case MUART_PORT1:
         case MUART_PORT2:
             ret = dev->regs[idx];
+            if (getenv("YES_MUARTLOG") != NULL) {
+                static int n;
+                if (n++ < 40)
+                    pclog("[MUARTR] port=%04X -> %02X\n", 0x400 + idx, ret);
+            }
             break;
 
         case MUART_BUF:
