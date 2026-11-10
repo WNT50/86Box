@@ -214,6 +214,8 @@ typedef struct fdc_t {
     int (*ext_data)(void *ext, uint8_t data, int last);
     int (*ext_getdata)(void *ext, int last);
     void (*ext_noidam)(void *ext);
+    void (*ext_sectorid)(void *ext, uint8_t c, uint8_t h, uint8_t r, uint8_t n);
+    void (*ext_error)(void *ext, int st5, int st6);
     void (*ext_seek_done)(void *ext, int drive);
     void (*ext_diskchange)(void *ext, int drive);
 } fdc_t;

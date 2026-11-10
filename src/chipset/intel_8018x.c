@@ -924,6 +924,49 @@ i8018x_pcb_dma_ptr(struct i8018x_pcb_t *dev, int slot, int dst)
     return ((uint32_t) dev->regs[lo] | (((uint32_t) dev->regs[hi] & 0x000Fu) << 16)) & 0x000FFFFFu;
 }
 
+/* Port the channel reads from (dst == 0) or writes to (dst != 0) when that
+   side of the descriptor is on the I/O bus; -1 when it is memory or the
+   channel is not wired.  A floppy controller uses this to tell an armed
+   block transfer from the memory-to-memory descriptor the POST leaves
+   behind (270788-001 section 8.2). */
+int
+i8018x_pcb_dma_io_port(struct i8018x_pcb_t *pcb, int channel, int dst)
+{
+    int      slot;
+    uint16_t ctrl;
+
+    if (pcb == NULL)
+        return -1;
+
+    slot = i8018x_pcb_dma_slot(pcb, channel);
+    if (slot < 0)
+        return -1;
+
+    ctrl = pcb->regs[I8018X_DMA_CTRL(slot)];
+    if (dst ? (ctrl & I8018X_DMA_DST_MIO) : (ctrl & I8018X_DMA_SRC_MIO))
+        return -1;
+
+    return (int) i8018x_pcb_dma_ptr(pcb, slot, dst);
+}
+
+/* The board's TC pin ends a synchronized block: the device owns the length,
+   so the pin stops the channel the way a terminal count would (270788-001
+   section 8.2). */
+void
+i8018x_pcb_dma_tc(struct i8018x_pcb_t *pcb, int channel)
+{
+    int slot;
+
+    if (pcb == NULL)
+        return;
+
+    slot = i8018x_pcb_dma_slot(pcb, channel);
+    if (slot < 0)
+        return;
+
+    pcb->regs[I8018X_DMA_CTRL(slot)] &= (uint16_t) ~I8018X_DMA_ST;
+}
+
 /* Move one pointer on as its INC/DEC bits ask; all 20 bits are affected, and a
    word transfer moves it by two. The manual's third state, leaving the pointer
    alone, is what the ROM asks for with both bits set, to keep a channel on the

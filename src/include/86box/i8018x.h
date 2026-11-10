@@ -30,6 +30,8 @@ extern int  i8018x_pcb_icu_acknowledge(struct i8018x_pcb_t *pcb);
 extern void i8018x_pcb_icu_int(struct i8018x_pcb_t *pcb, int line, int level);
 extern void i8018x_pcb_set_irq_map(struct i8018x_pcb_t *pcb, int pic_irq, int line);
 extern void i8018x_pcb_set_dma_channels(struct i8018x_pcb_t *pcb, int dma0_ch, int dma1_ch);
+extern void i8018x_pcb_dma_tc(struct i8018x_pcb_t *pcb, int channel);
+extern int  i8018x_pcb_dma_io_port(struct i8018x_pcb_t *pcb, int channel, int dst);
 extern void i8018x_pcb_set_ext_ack(struct i8018x_pcb_t *pcb, int line, ext_ack_t ack, void *priv);
 extern void i8018x_pcb_set_timer_input(struct i8018x_pcb_t *pcb, int tmr, uint32_t cpu_clocks_per_event);
 

@@ -39,6 +39,9 @@ extern "C" {
 extern int fdd_swap;
 
 extern void fdd_set_motor_enable(void *priv, int motor_enable);
+
+/* Time one data byte occupies on the medium, in timer units. */
+extern uint64_t fdd_get_byte_period(void *priv);
 extern void fdd_do_seek(void *priv, int track);
 extern void fdd_forced_seek(void *priv, int track_diff);
 extern void fdd_seek(void *priv, int track_diff);
