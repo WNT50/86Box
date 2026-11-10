@@ -835,6 +835,7 @@ static const struct {
     {  300000, 0xb9 },
     { 4000000, 0x39 },
     {  300000, 0xb9 },
+};
 
 static int        mind_key_pos;
 static pc_timer_t mind_key_timer;
