@@ -3805,6 +3805,60 @@ const machine_t machines[] = {
         .aliases                  = { "Tandy 2000 HD", "" }
     },
 
+    /* Philips :YES (1985): 80186 at 16 MHz, 128/256/640 KB of RAM, a 64 KB
+       BIOS at 0xf0000, an HD6845S text display whose frame buffer the ROM
+       places at the top of RAM through the 80186's MMCS register, a WD2797
+       floppy controller, an i8256 MUART and a SASI port.  Step 1 models the
+       CPU, the RAM, the ROM and the I/O decode only. */
+    {
+        .name              = "Philips :YES",
+        .internal_name     = "yes",
+        .type              = MACHINE_TYPE_186,
+        .chipset           = MACHINE_CHIPSET_PROPRIETARY,
+        .init              = machine_yes_init,
+        .p1_handler        = NULL,
+        .gpio_handler      = NULL,
+        .available_flag    = MACHINE_AVAILABLE,
+        .gpio_acpi_handler = NULL,
+        .cpu               = {
+            .package     = CPU_PKG_186,
+            .block       = CPU_BLOCK_NONE,
+            .min_bus     = 8000000,
+            .max_bus     = 16000000,
+            .min_voltage = 0,
+            .max_voltage = 0,
+            .min_multi   = 0,
+            .max_multi   = 0
+        },
+        .bus_flags = MACHINE_PC,
+        .flags     = MACHINE_VIDEO_FIXED | MACHINE_KEYBOARD | MACHINE_MFM,
+        .ram       = {
+            .min  = 128,
+            .max  = 640,
+            .step = 128
+        },
+        .nvrmask                  = 63,
+        .jumpered_ecp_dma         = 0,
+        .default_jumpered_ecp_dma = -1,
+        .kbc_device               = NULL,
+        .kbc_params               = 0x00000000,
+        .nvr_device               = NULL,
+        .nvr_params               = 0x00000000,
+        .sio_device               = NULL,
+        .sio_params               = 0x00000000,
+        .kbc_p1                   = 0xff,
+        .gpio                     = 0xffffffff,
+        .gpio_acpi                = 0xffffffff,
+        .device                   = NULL,
+        .kbd_device               = NULL,
+        .fdc_device               = NULL,
+        .vid_device               = NULL,
+        .snd_device               = NULL,
+        .net_device               = NULL,
+        .scsi_device              = NULL,
+        .aliases                  = { ":YES", "" }
+    },
+
     /* 286 AT machines */
     /* Has IBM AT KBC firmware. */
     {

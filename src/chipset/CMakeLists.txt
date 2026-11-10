@@ -42,6 +42,7 @@ add_library(chipset OBJECT
     headland.c
     ims8848.c
     intel_8018x.c
+    intel_8256.c
     intel_82335.c
     intel_386ex.c
     intel_386ex_csu.c
