@@ -118,7 +118,7 @@ yes_render(yes_video_t *dev)
     /* 80-column mode puts a character in eight pixels, 40-column mode in
        sixteen: the board halves the character clock, so the glyph keeps its
        eight dots and the rest of the cell carries the background. */
-    int      cw = YES_XSIZE / ((cols > 0) ? cols : 80);
+    int      cw = (dev->crtc[CRTC_R1] < 0x50) ? (YES_XSIZE / 40) : (YES_XSIZE / 80);
 
     /* The window is 80x25 cells; the CRTC is allowed to name more (40-column
        modes leave the rest of the line alone), but never more than fits. */
@@ -166,7 +166,14 @@ yes_render(yes_video_t *dev)
                     bits = 0x18; /* a marker so a missing font is visible */
 
                 for (x = 0; x < cw; x++) {
-                    colour = ((x < 8) && (bits & (0x80 >> x))) ? fg : bg;
+                    /* The 6845 shifts eight dots per character, so a sixteen
+                       dot cell means the board halves the character clock:
+                       every glyph dot is displayed twice.  Padding the cell
+                       with background instead left the letters thin with wide
+                       gaps, which is not how the narrow mode looks. */
+                    int gx = x / (cw / 8);
+
+                    colour = ((gx < 8) && (bits & (0x80 >> gx))) ? fg : bg;
                     if (((uint32_t) col * (uint32_t) cw + (uint32_t) x) < YES_XSIZE)
                         line[(uint32_t) col * (uint32_t) cw + (uint32_t) x] = colour;
                 }
@@ -222,6 +229,9 @@ yes_poll(void *priv)
                     fclose(f);
                 }
 
+                pclog(":YES video: CRTC R0=%02X R1=%02X R2=%02X R3=%02X R4=%02X R5=%02X R6=%02X R9=%02X\n",
+                      dev->crtc[0], dev->crtc[1], dev->crtc[2], dev->crtc[3],
+                      dev->crtc[4], dev->crtc[5], dev->crtc[6], dev->crtc[9]);
                 pclog(":YES video: wrote %s (R1=%02X R6=%02X R9=%02X R12/13=%02X%02X R14/15=%02X%02X)\n",
                       shot, dev->crtc[CRTC_R1], dev->crtc[CRTC_R6], dev->crtc[CRTC_R9],
                       dev->crtc[CRTC_R12], dev->crtc[CRTC_R13],
