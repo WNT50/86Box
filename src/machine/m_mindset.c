@@ -620,10 +620,23 @@ mind_snd_index_writew(uint16_t port, uint16_t val, void *priv)
 static uint8_t
 mind_io_read(uint16_t port, void *priv)
 {
-    /* Nothing sits here on a bare board: the bus floats low, which is what
-       the firmware and the BIOS both expect to see. */
-    mind_trace("r", port, 0x00, 1);
-    return 0x00;
+    uint8_t ret = 0xff;
+
+    /* An empty module slot leaves the bus pulled high, which is what makes the
+       BIOS skip it; the floppy controller's status ports read low instead. */
+    switch (port) {
+        case 0x8048:
+        case 0x804c:
+        case 0x805c:
+            ret = 0x00;
+            break;
+
+        default:
+            break;
+    }
+
+    mind_trace("r", port, ret, 1);
+    return ret;
 }
 
 static uint16_t
