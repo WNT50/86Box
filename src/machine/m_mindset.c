@@ -111,6 +111,7 @@ typedef struct {
     int            boot_at;
     int            fdc_irqs;
     int            dma_logged;
+    int            probes;
     int            log;
     int            vramdump;
     int            kicks;
@@ -398,6 +399,17 @@ mind_blit(uint32_t packet)
 
                 mind_phys_wrw(dst_base + dst_cadr, sw16(res));
 
+                if (mindset.log && (mindset.probes < 4) && (dst_base + dst_cadr >= 0xB8000) &&
+                    (dst_base + dst_cadr < 0xC0000)) {
+                    uint8_t *v = mindset_video_vram();
+
+                    pclog("[MIND] blit probe %05X wrote %04X vram[%04X]=%02X\n",
+                          dst_base + dst_cadr, res,
+                          dst_base + dst_cadr - 0xB8000,
+                          (v != NULL) ? v[dst_base + dst_cadr - 0xB8000] : 0xff);
+                    mindset.probes++;
+                }
+
                 /* A blit whose destination does not read back is writing into
                    something other than display RAM. */
                 if (mindset.log && (mindset.badwrites < 8)) {
@@ -462,10 +474,7 @@ mind_dump_vram(const char *tag)
     if (f == NULL)
         return;
 
-    /* Read it back through the window the guest writes, so what the dump
-       holds is what the display device actually answers. */
-    for (int i = 0; i < MIND_VRAM_SIZE; i++)
-        fputc(mem_readb_phys(0xB8000 + i), f);
+    fwrite(vram, 1, MIND_VRAM_SIZE, f);
 
     fclose(f);
     pclog("[MIND] vram dumped to %s (%p)\n", path, vram);
