@@ -1361,6 +1361,10 @@ check_interrupts(int nec_hlt)
                 temp = pic_irq_ack_instance(pic.int_pending ? &pic : &pic2);
             else /* ACK to PIC */
                 temp = pic_irq_ack();
+
+            if (getenv("YES_ACKLOG") != NULL)
+                pclog("[CPU] icu=%d cascade=%d ext=%d vec=%02X\n", icu, cascade,
+                      x86_external_interrupt_pending(), temp);
             wait_cycs(4, 1);
             wait_cycs(1, 0);
             /* ACK to PIC */
@@ -3535,6 +3539,70 @@ execx86(int cycs)
             cpu_state.temp_CS = CS;
             cpu_state.temp_cs = cs;
             cpu_state.temp_pc = cpu_state.pc;
+
+            /* YES_TRACE=1: keep the last 64 instruction addresses.  The :YES
+               ROM dispatches its BIOS routines through tables built in RAM,
+               and at some point the CPU ends up executing the data bytes that
+               follow the iret stub at FC80:029E.  The ring says how it got
+               there. */
+            {
+                static int      yt = -1;
+                static uint32_t ring[64];
+                static unsigned rn;
+
+                if (yt < 0)
+                    yt = (getenv("YES_TRACE") != NULL);
+
+                if (yt) {
+                    uint32_t lin = ((uint32_t) cpu_state.seg_cs.seg << 4) +
+                                   (uint16_t) cpu_state.pc;
+
+                    /* Who sets the handler's saved stack slot, and who finds it
+                       wrong: entry points of the two handlers and the shared
+                       epilogue. */
+                    if ((lin == 0x0fcc33u) || (lin == 0x0fcc4du)) {
+                        static int wh;
+                        if (++wh <= 400)
+                            pclog("[YWAIT] %05X ss:sp=%04X:%04X if=%d\n", lin,
+                                  cpu_state.seg_ss.seg, cpu_state.regs[4].w,
+                                  (cpu_state.flags & 0x200) ? 1 : 0);
+                    }
+
+                    if ((lin == 0x0fd038u) || (lin == 0x0ff35fu) ||
+                        (lin == 0x0fd497u)) {
+                        static int hits;
+                        uint16_t s23, s25;
+                        uint32_t bd = (0x1f88u << 4);
+
+                        memcpy(&s23, ram + bd + 0x23, 2);
+                        memcpy(&s25, ram + bd + 0x25, 2);
+                        if (++hits <= 40)
+                            pclog("[YHIT] %05X ss:sp=%04X:%04X save=%04X:%04X\n",
+                                  lin, cpu_state.seg_ss.seg,
+                                  cpu_state.regs[4].w, s23, s25);
+                    }
+
+                    ring[rn++ & 63] = ((uint32_t) cpu_state.seg_cs.seg << 16) |
+                                      (uint16_t) cpu_state.pc;
+
+                    if ((cpu_state.seg_cs.seg == 0xfc80) &&
+                        (cpu_state.pc >= 0x0295) && (cpu_state.pc <= 0x02a8)) {
+                        static int dumped;
+
+                        if (!dumped) {
+                            dumped = 1;
+                            pclog("[YTRACE] entered the data at FC80:029F, last 24:\n");
+                            for (int k = 24; k > 0; k--) {
+                                uint32_t a = ring[(rn - (unsigned) k) & 63];
+                                pclog("[YTRACE]   %04X:%04X\n",
+                                      (unsigned) (a >> 16) & 0xffff,
+                                      (unsigned) a & 0xffff);
+                            }
+                        }
+                    }
+                }
+            }
+
             opcode            = pfq_fetchb();
             oldc              = cpu_state.flags & C_FLAG;
             if (clear_lock) {

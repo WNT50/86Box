@@ -37,6 +37,7 @@
 #include <86box/i8018x.h>
 #include <86box/wd2791.h>
 #include <86box/intel_8256.h>
+#include <86box/yes_video.h>
 
 #include "../cpu/cpu.h"
 
@@ -75,6 +76,7 @@ typedef struct yes_t {
     wd2791_t *fdc;     /* WD2797 formatter at 0x480 */
     struct i8018x_pcb_t *pcb;
     intel_8256_t *muart; /* serial / parallel / timers / interrupt levels */
+    void         *video;
     uint8_t  kbd_code; /* 0x5a0: last scan code from the keyboard */
 } yes_t;
 
@@ -108,6 +110,12 @@ yes_dump_vram(void *priv)
 
     /* The interrupt vectors say which handlers the ROM installed, and those
        tell which subsystem is supposed to end the wait. */
+    f = fopen("/tmp/yes_ram.bin", "wb");
+    if (f != NULL) {
+        fwrite(ram, 1, 0x00100000, f);
+        fclose(f);
+    }
+
     f = fopen("/tmp/yes_low.bin", "wb");
     if (f != NULL) {
         fwrite(ram, 1, 0x00001000, f);
@@ -118,11 +126,16 @@ yes_dump_vram(void *priv)
 static void
 yes_sample(void *priv)
 {
-    if (yes_log > 0)
-        pclog("[YES] pc=%04X:%04X\n", cpu_state.seg_cs.seg,
-              (uint16_t) cpu_state.pc);
+    if (getenv("YES_PC") != NULL) {
+        /* Skip the idle wait loop at FCB0:013C-0143 so the samples show the
+           code around it. */
+        if (!((cpu_state.seg_cs.seg == 0xfcb0) &&
+              (cpu_state.pc >= 0x0130) && (cpu_state.pc <= 0x0150)))
+            pclog("[YES] pc=%04X:%04X if=%d\n", cpu_state.seg_cs.seg,
+                  (uint16_t) cpu_state.pc, (cpu_state.flags & 0x200) ? 1 : 0);
+    }
 
-    timer_set_delay_u64(&yes_sample_timer, 20000 * TIMER_USEC);
+    timer_set_delay_u64(&yes_sample_timer, 2000 * TIMER_USEC);
 }
 
 static void
@@ -156,25 +169,17 @@ yes_muart_irq(void *priv, int level)
     i8018x_pcb_icu_int(yes.pcb, line, level);
 }
 
-static void
-yes_crtc_addr(uint16_t port, uint8_t val, void *priv)
+/* The MUART supplies its own vector (40h + priority level) during the
+   acknowledge cycle, so the 80186's fixed vector for the pin is not used. */
+static int
+yes_muart_ack(void *priv)
 {
-    yes.crtc_idx = val & 0x1f;
-    yes_log_write("crtc.addr", port, val);
-}
+    uint8_t vec = intel_8256_acknowledge(yes.muart);
 
-static void
-yes_crtc_data(uint16_t port, uint8_t val, void *priv)
-{
-    yes.crtc_reg[yes.crtc_idx] = val;
     if (yes_log > 0)
-        pclog("[YES] w crtc[%02X]  = %02X\n", yes.crtc_idx, val);
-}
+        pclog("[YES] muart ack -> vector %02X\n", vec);
 
-static uint8_t
-yes_crtc_data_read(uint16_t port, void *priv)
-{
-    return yes_log_read("crtc.data", port, yes.crtc_reg[yes.crtc_idx]);
+    return vec;
 }
 
 static void
@@ -182,6 +187,27 @@ yes_dsksel_write(uint16_t port, uint8_t val, void *priv)
 {
     yes.dsksel = val;
     yes_log_write("dsksel", port, val);
+
+    /* YES_STK=1: the floppy reset routine selects a drive a few instructions
+       before it resets the formatter, so the stack at this point carries the
+       return address of whoever asked for the reset. */
+    if (getenv("YES_STK") != NULL) {
+        static int n;
+        if (n < 8) {
+            uint32_t lin = ((uint32_t) cpu_state.seg_ss.seg << 4) +
+                           cpu_state.regs[4].w;
+            n++;
+            pclog("[YES] sel=%02X @%04X:%04X stk:", val,
+                  cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
+            for (int i = 0; i < 6; i++) {
+                uint16_t w = 0;
+                memcpy(&w, ram + ((lin + (uint32_t) i * 2) & 0xfffff), 2);
+                pclog(" %04X", w);
+            }
+            pclog("\n");
+        }
+    }
+
     wd2791_set_dskctl(yes.fdc, val);
 }
 
@@ -239,14 +265,6 @@ yes_key_tick(void *priv)
 }
 
 static void
-yes_palette_write(uint16_t port, uint8_t val, void *priv)
-{
-    if ((port - YES_PALETTE) < 16)
-        yes.palette[port - YES_PALETTE] = val;
-    yes_log_write("palette", port, val);
-}
-
-static void
 yes_sysctl_write(uint16_t port, uint8_t val, void *priv)
 {
     yes.sysctl = val;
@@ -280,7 +298,10 @@ yes_sasi_write(uint16_t port, uint8_t val, void *priv)
 static uint8_t
 yes_sasi_read(uint16_t port, void *priv)
 {
-    return yes_log_read("sasi", port, 0xff);
+    /* No SASI target is fitted: the status port reads idle instead of an open
+       bus, so the ROM's poll sees "nothing to do" rather than "busy for ever"
+       (0xff has bit 3 set, which is the bit the boot code waits to clear). */
+    return yes_log_read("sasi", port, 0x00);
 }
 
 /*
@@ -292,8 +313,8 @@ static void
 yes_mmcs_write16(uint16_t port, uint16_t val, void *priv)
 {
     yes.mmcs = val;
-    if (yes_log > 0)
-        pclog("[YES] w MMCS      %03X = %04X  -> vid_base %05X\n", port, val,
+    yes_video_set_base(yes.video, (uint32_t) (((val >> 11) & 0x1f) << 15) + 0x10000u);
+    pclog("[YES] MMCS = %04X -> vid_base %05X\n", val,
               (uint32_t) (((val >> 11) & 0x1f) << 15) + 0x10000);
 }
 
@@ -304,6 +325,8 @@ yes_mmcs_write8(uint16_t port, uint8_t val, void *priv)
         yes.mmcs = (yes.mmcs & 0xff00) | val;
     else
         yes.mmcs = (yes.mmcs & 0x00ff) | (val << 8);
+
+    yes_video_set_base(yes.video, (uint32_t) (((yes.mmcs >> 11) & 0x1f) << 15) + 0x10000u);
 
     if (yes_log > 0)
         pclog("[YES] w MMCS8     %03X = %02X  -> %04X\n", port, val, yes.mmcs);
@@ -324,16 +347,10 @@ yes_mmcs_read8(uint16_t port, void *priv)
 static void
 yes_io_init(void)
 {
-    io_sethandler(YES_CRTC_ADDR, 0x0001, NULL, NULL, NULL, yes_crtc_addr, NULL,
-                  NULL, NULL);
-    io_sethandler(YES_CRTC_DATA, 0x0001, yes_crtc_data_read, NULL, NULL,
-                  yes_crtc_data, NULL, NULL, NULL);
     io_sethandler(YES_DSKSEL, 0x0001, NULL, NULL, NULL, yes_dsksel_write, NULL,
                   NULL, NULL);
     io_sethandler(YES_KBD, 0x0001, yes_kbd_read, NULL, NULL, NULL, NULL, NULL,
                   NULL);
-    io_sethandler(YES_PALETTE, 0x0010, NULL, NULL, NULL, yes_palette_write, NULL,
-                  NULL, NULL);
     io_sethandler(YES_SYSCtl, 0x0001, yes_sysctl_read, NULL, NULL,
                   yes_sysctl_write, NULL, NULL, NULL);
     io_sethandler(YES_RTC, 0x0001, yes_rtc_read, NULL, NULL, yes_rtc_write, NULL,
@@ -396,9 +413,16 @@ machine_yes_init(const machine_t *model)
     }
 
     yes.muart = intel_8256_init(YES_MUART_BASE);
-    if (yes.muart != NULL)
-        intel_8256_set_irq_handler(yes.muart, yes_muart_irq, NULL);
+    if (getenv("YES_NONOMVIDEO") == NULL)
+        yes.video = device_add(&yes_video_device);
 
+    if (yes.muart != NULL) {
+        intel_8256_set_irq_handler(yes.muart, yes_muart_irq, NULL);
+        /* The ICU leaves INT0 and INT3 masked (mask register reads 0x9c), so the
+           MUART's interrupt output is on INT1; the acknowledge cycle asks the
+           part for its vector. */
+        i8018x_pcb_set_ext_ack(yes.pcb, 1, yes_muart_ack, NULL);
+    }
     yes_io_init();
 
     timer_add(&yes_sample_timer, yes_sample, NULL, 0);
@@ -416,7 +440,7 @@ machine_yes_init(const machine_t *model)
 
     if (getenv("YES_DUMP") != NULL) {
         timer_add(&yes_vram_timer, yes_dump_vram, NULL, 0);
-        timer_set_delay_u64(&yes_vram_timer, 4000000 * TIMER_USEC);
+        timer_set_delay_u64(&yes_vram_timer, 2000000 * TIMER_USEC);
     }
 
     /* The frame buffer sits inside RAM at 0x10000 (128 KB machine) up to

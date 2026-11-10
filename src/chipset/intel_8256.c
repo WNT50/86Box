@@ -83,6 +83,22 @@ enum {
 static void intel_8256_tick(void *priv);
 static void intel_8256_update_irq(intel_8256_t *dev);
 
+/* The request is dropped once the acknowledge cycle is over, not while the
+   controller is still picking the vector: the CPU reads the vector first and
+   only then pushes the interrupt frame. */
+static void
+intel_8256_ack_done(void *priv)
+{
+    intel_8256_t *dev = (intel_8256_t *) priv;
+
+    if ((dev == NULL) || (dev->ack_level < 0))
+        return;
+
+    dev->pending &= (uint8_t) ~(1u << dev->ack_level);
+    dev->ack_level = -1;
+    intel_8256_update_irq(dev);
+}
+
 intel_8256_t *
 intel_8256_init(uint16_t base)
 {
@@ -98,6 +114,8 @@ intel_8256_init(uint16_t base)
         dev->timer_load[i] = 0x00;
 
     timer_add(&dev->timer, intel_8256_tick, dev, 0);
+    timer_add(&dev->ack_timer, intel_8256_ack_done, dev, 0);
+    dev->ack_level = -1;
 
     io_sethandler(base, 0x0020,
                   intel_8256_read, NULL, NULL,
@@ -120,6 +138,37 @@ intel_8256_set_irq_handler(intel_8256_t *dev,
 }
 
 /*
+ * The part answers an interrupt acknowledge with a vector: in 8086 mode the
+ * data sheet has it place 40H-47H on the bus, one per priority level.  The
+ * :YES firmware relies on that -- its table has real handlers at 0x41, 0x43,
+ * 0x44, 0x45 and 0x47, and the 80186's own fixed vectors are left pointing
+ * at whatever the ROM had there.
+ */
+uint8_t
+intel_8256_acknowledge(intel_8256_t *dev)
+{
+    uint8_t active;
+    int     level;
+
+    if (dev == NULL)
+        return 0x00;
+
+    active = (uint8_t) (dev->pending & dev->regs[MUART_INTEN]);
+    if (active == 0)
+        return 0x00;
+
+    for (level = 0; level < MUART_LVL_COUNT; level++) {
+        if (active & (1u << level))
+            break;
+    }
+
+    dev->ack_level = level;
+    timer_set_delay_u64(&dev->ack_timer, 2 * TIMER_USEC);
+
+    return (uint8_t) (0x40 + level);
+}
+
+/*
  * A timer counts down at the rate CMD1 FRQ picks.  The five timers share one
  * prescaler (CMD2 C1-C0); the serial clock divider is not modelled because
  * nothing is transmitted.  A count of 0 means 256, which is what the part
@@ -136,6 +185,17 @@ intel_8256_tick(void *priv)
 
     hz = (dev->regs[MUART_CMD1] & MUART_C1_FRQ) ? 1000 : 16000;
 
+
+    if (getenv("YES_MUARTLOG") != NULL) {
+        static long n;
+
+        n++;
+        if ((n % 1000) == 0)
+            pclog("[MUART] ticks=%ld hz=%d tmr3=%d/%d run=%d inten=%02X pend=%02X\n",
+                  n, hz, dev->timer_val[2], dev->timer_load[2],
+                  dev->timer_run[2], dev->regs[MUART_INTEN], dev->pending);
+    }
+
     for (int i = 0; i < 5; i++) {
         if (!dev->timer_run[i])
             continue;
@@ -144,7 +204,13 @@ intel_8256_tick(void *priv)
             /* The counter reloads from its register and, in interrupt mode,
                asks for service.  Only timer 2 is wired to a level here. */
             dev->timer_val[i] = dev->timer_load[i];
-            if ((i == 1) && !(dev->regs[MUART_CMD1] & MUART_C1_BITI))
+            /* Timer 3 asks on level 3: the :YES firmware writes 1 into the
+               TMR3 register and then enables level 3 alone (0x08), which is
+               the tick its boot code waits for.  Timer 2 keeps level 1, the
+               one the data sheet documents (CMD1 BITI selects it or P17). */
+            if (i == 2)
+                dev->pending |= 0x08;
+            else if ((i == 1) && !(dev->regs[MUART_CMD1] & MUART_C1_BITI))
                 dev->pending |= MUART_LVL_TMR2;
         } else {
             dev->timer_val[i]--;
@@ -166,6 +232,7 @@ intel_8256_update_irq(intel_8256_t *dev)
         return;
 
     dev->irq_line = level;
+
     if (dev->irq_cb != NULL)
         dev->irq_cb(dev->irq_priv, level);
 }
@@ -236,7 +303,10 @@ intel_8256_write(uint16_t port, uint8_t val, void *priv)
             break;
 
         case MUART_CMD3:
-            /* RST reloads the counters; SET/L1-L0 arm the levels. */
+            /* RST reloads the counters; SET/L1-L0 arm the levels.  The :YES
+               tick handler acknowledges its level by writing 0x88 (SET with
+               END) right after the 80186 EOI, so that pair ends the request;
+               without it the level re-enters the handler on every return. */
             if (val & 0x01)
                 intel_8256_reset(dev);
             dev->regs[idx] = val;

@@ -1799,6 +1799,9 @@ extern const device_t  tandy_2000_video_device;
 extern int             machine_tandy2000_init(const machine_t *);
 
 /* m_yes.c */
+#ifdef EMU_DEVICE_H
+extern const device_t  yes_video_device;
+#endif
 extern int             machine_yes_init(const machine_t *);
 
 /* m_v86p.c */
