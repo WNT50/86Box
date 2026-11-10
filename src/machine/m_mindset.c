@@ -730,22 +730,49 @@ mind_io_writew(uint16_t port, uint16_t val, void *priv)
 
 /* MIND_KEYTEST=1 pushes a space bar press once the BIOS is waiting for a key,
    so the boot path can be exercised before the real keyboard is wired. */
-static pc_timer_t mind_key2_timer;
+/* MIND_KEYTEST plays a short key script so the boot path can be exercised
+   without a keyboard: space gets past the diagnostics, then Alt and the Reset
+   key (57h) ask the BIOS to leave the configuration screen. */
+static const struct {
+    uint64_t delay_us;
+    uint8_t  code;
+} mind_key_script[] = {
+    { 0,       0x39 },  /* space: leave the diagnostics screen   */
+    { 1000000, 0x38 },  /* Alt down                              */
+    {  200000, 0x57 },  /* Reset                                 */
+    {  300000, 0xd7 },  /* Reset up                              */
+    {  200000, 0xb8 },  /* Alt up                                */
+    { 7000000, 0x39 },  /* space again: the POST after the reset  */
+    {  300000, 0xb9 },
+};
+
+static int        mind_key_pos;
+static pc_timer_t mind_key_timer;
 
 static void
-mind_key_test2(void *priv)
+mind_key_next(void *priv)
 {
-    pclog("[MIND] key test: second space\n");
-    mind_keyboard_send(0x39);
+    if (mind_key_pos >= (int) (sizeof(mind_key_script) / sizeof(mind_key_script[0])))
+        return;
+
+    uint8_t code = mind_key_script[mind_key_pos].code;
+
+    pclog("[MIND] key test: sending %02X\n", code);
+    mind_keyboard_send(code);
+    mind_key_pos++;
+
+    if (mind_key_pos < (int) (sizeof(mind_key_script) / sizeof(mind_key_script[0]))) {
+        uint64_t delay = mind_key_script[mind_key_pos].delay_us;
+
+        timer_set_delay_u64(&mind_key_timer, delay * TIMER_USEC);
+    }
 }
 
 static void
 mind_key_test(void *priv)
 {
-    pclog("[MIND] key test: pushing space\n");
-    mind_keyboard_send(0x39);
-
-    timer_set_delay_u64(&mind_key2_timer, 1500000ULL * TIMER_USEC);
+    timer_set_delay_u64(&mind_key_timer, 0);
+    mind_key_next(NULL);
 }
 
 /* Sampler: without a serial console the only way to tell "the CPU is still
@@ -872,7 +899,7 @@ machine_mindset_init(const machine_t *model)
                   mind_io_write, mind_io_writew, NULL, NULL);
 
     timer_add(&mindset.mcu_timer, mind_mcu_ready, NULL, 0);
-    timer_add(&mind_key2_timer, mind_key_test2, NULL, 0);
+    timer_add(&mind_key_timer, mind_key_next, NULL, 0);
 
     if (mindset.keytest) {
         static pc_timer_t key_timer;
