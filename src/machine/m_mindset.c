@@ -79,8 +79,14 @@ typedef struct {
     int            kicks;
     mind_mailbox_t sys;  /* system controller register file */
     mind_mailbox_t snd;  /* sound controller register file */
+    uint8_t        sys_sts; /* status byte the controller reports */
+    pc_timer_t     mcu_timer;
     pc_timer_t     sample_timer;
 } mindset_t;
+
+/* The controller takes a moment to answer, and the BIOS polls for it. */
+#define MIND_MCU_BUSY     0x0a
+#define MIND_MCU_DELAY    20
 
 static mindset_t mindset;
 
@@ -317,6 +323,26 @@ mind_blit(uint32_t packet)
 }
 
 /* Writing the kick port runs whatever the command block describes. */
+/* The board's ROM signature check compares eight words the blitter left at
+   1040h against a table in the BIOS, so both sides have to agree there. */
+static void
+mind_dump_sig(const char *tag)
+{
+    char line[128];
+    int  n = 0;
+
+    n += snprintf(line + n, sizeof(line) - n, "[MIND] sig %s ram:", tag);
+    for (int i = 0; i < 16; i++)
+        n += snprintf(line + n, sizeof(line) - n, " %02X", mem_readb_phys(0x1040 + i));
+    n += snprintf(line + n, sizeof(line) - n, " flags1E=%04X f15=%04X",
+                  (uint16_t) (mem_readb_phys(0x1e) | (mem_readb_phys(0x1f) << 8)),
+                  (uint16_t) (mem_readb_phys(0x15) | (mem_readb_phys(0x16) << 8)));
+    n += snprintf(line + n, sizeof(line) - n, " rom:");
+    for (int i = 0; i < 16; i++)
+        n += snprintf(line + n, sizeof(line) - n, " %02X", mem_readb_phys(0xfe106 + i));
+    pclog("%s\n", line);
+}
+
 static void
 mind_dump_vram(const char *tag)
 {
@@ -348,6 +374,11 @@ mind_gcp_kick(uint16_t port, uint16_t val, void *priv)
         switch (mindset.kicks) {
             case 1:
                 mind_dump_vram("kick1");
+                mind_dump_sig("kick1");
+                break;
+
+            case 2:
+                mind_dump_sig("kick2");
                 break;
 
             case 20:
@@ -464,12 +495,27 @@ mind_mcu_reset(mindset_t *m)
     m->sys.regs[0x9e] = 0x01;  /* display type */
 }
 
+static void
+mind_mcu_ready(void *priv)
+{
+    mindset.sys_sts = 0x00;
+}
+
+/* Both status bits go up while the controller works on the byte it was just
+   handed, and drop when it is done. */
+static void
+mind_mcu_busy(void)
+{
+    mindset.sys_sts = MIND_MCU_BUSY;
+    timer_set_delay_u64(&mindset.mcu_timer, MIND_MCU_DELAY * TIMER_USEC);
+}
+
 static uint8_t
 mind_sys_status_read(UNUSED(uint16_t port), UNUSED(void *priv))
 {
-    mind_trace("r", 0x8282, 0x00, 1);
+    mind_trace("r", 0x8282, mindset.sys_sts, 1);
 
-    return 0x00;
+    return mindset.sys_sts;
 }
 
 static void
@@ -478,6 +524,7 @@ mind_sys_index_write(UNUSED(uint16_t port), uint8_t val, UNUSED(void *priv))
     mind_trace("w", 0x8282, val, 1);
 
     mindset.sys.idx = val;
+    mind_mcu_busy();
 }
 
 static uint8_t
@@ -494,6 +541,7 @@ static void
 mind_sys_data_write(UNUSED(uint16_t port), uint8_t val, UNUSED(void *priv))
 {
     mind_trace("w", 0x8280, val, 1);
+    mind_mcu_busy();
 
     /* The BIOS writes a value twice; keeping the last one is what the
        firmware does too.  Bit 6 of the configuration byte is an input the
@@ -712,6 +760,7 @@ machine_mindset_init(const machine_t *model)
                   mind_io_read, mind_io_readw, NULL,
                   mind_io_write, mind_io_writew, NULL, NULL);
 
+    timer_add(&mindset.mcu_timer, mind_mcu_ready, NULL, 0);
     timer_add(&mindset.sample_timer, mind_sample, NULL, 0);
     timer_set_delay_u64(&mindset.sample_timer, mind_interval * TIMER_USEC);
 

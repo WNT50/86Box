@@ -147,6 +147,9 @@ mind_dispreg_read(mindset_vid_t *vid)
 {
     uint16_t ret = 0;
 
+    if (mindset_log)
+        pclog("[MIND] dispreg read idx=%d ctrl=%04X\n", (vid->dispctrl >> 4) & 7, vid->dispctrl);
+
     switch ((vid->dispctrl >> 4) & 7) {
         case 1: /* the display word at the interrupt position, shifted */
             {
