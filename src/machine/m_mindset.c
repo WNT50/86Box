@@ -142,8 +142,16 @@ static struct i8018x_pcb_t *mind_pcb;
 static void
 mind_display_irq(void *priv, int level)
 {
-    if (mind_pcb != NULL)
-        i8018x_pcb_icu_int(mind_pcb, 2, level);
+    if (mind_pcb == NULL)
+        return;
+
+    /* The display raises two interrupts: INT1 at the start of vertical blank
+       and INT2 where the scan line compare register says so (mindset.cpp
+       wires screen_vblank to int1 and the scanline callback to int2).  The
+       BIOS's display bookkeeping - the pending mode-change flags - runs on
+       the vblank one. */
+    i8018x_pcb_icu_int(mind_pcb, 1, level);
+    i8018x_pcb_icu_int(mind_pcb, 2, level);
 }
 
 /* The keyboard scanner sits behind the system controller: it leaves a byte for
@@ -623,7 +631,11 @@ mind_mcu_reset(mindset_t *m)
     for (i = 0x83; i <= 0x8b; i++)
         m->sys.regs[i] = 0x01;
 
-    m->sys.regs[0x9d] = 0x01;  /* keyboard status */
+    /* Register 9Dh is the stored configuration: bit 5 says one exists, bit 6
+       marks it as saved by the setup screen.  The BIOS reads it while it sets
+       the display up, and without bit 5 it takes the "no configuration" path,
+       which never programs the text-mode control word. */
+    m->sys.regs[0x9d] = 0x34;
     m->sys.regs[0x9e] = 0x01;  /* monitor type; MIND_MON overrides it */
 }
 
@@ -1163,6 +1175,11 @@ mind_fdc_ack_read(uint16_t port, void *priv)
 static void
 mind_sample(void *priv)
 {
+    if (mindset.log)
+        pclog("[MIND] flags [0x12]=%02X [0x15]=%04X [0x1e]=%04X int0D=%04X:%04X\n",
+              mem_readb_phys(0x412), mem_readw_phys(0x415), mem_readw_phys(0x41e),
+              mem_readw_phys(0x36), mem_readw_phys(0x34));
+
     pclog("[MIND] pc=%04X:%04X frames=%d\n", cpu_state.seg_cs.seg,
           (uint16_t) cpu_state.pc, frames);
 
