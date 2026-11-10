@@ -707,6 +707,11 @@ wd_seek_finish(wd279x_t *dev)
     else if (dev->command & 0x10) /* T: update the track register */
         dev->track_reg = (uint8_t) dev->target;
 
+    if (getenv("PCX_FDCLOG") != NULL)
+        pclog("[SEEK] cmd=%02X target=%d TR=%d drv_trk=%d\n", dev->command,
+              dev->target, dev->track_reg,
+              (wd_drive(dev) != NULL) ? fdd_current_track(wd_drive(dev)) : -1);
+
     dev->busy  = 0;
     wd_irq_raise(dev, "type1");
 }
