@@ -89,6 +89,10 @@ typedef struct {
    side keeps a ring buffer and a terminal count the BIOS programs at 8058h. */
 #define MIND_FIFO_SIZE 0x8000
 
+/* The board ships with two 5.25" double density drives; fdd.c knows this type
+   as "525_2dd". */
+#define MIND_FDD_525_2DD 43
+
 typedef struct {
     uint8_t  buf[MIND_FIFO_SIZE];
     int      head;
@@ -109,7 +113,9 @@ typedef struct {
     void          *fdc_dev;      /* hosted floppy controller */
     fdc_t         *fdc;
     mind_fdc_fifo_t fifo;
-    int            fdc_irq;
+    int            fdc_irq;      /* asserted, waiting for the BIOS to ack */
+    int            fdc_sched;    /* the controller is still finishing up */
+    pc_timer_t     fdc_timer;
     pc_timer_t     mcu_timer;
     pc_timer_t     sample_timer;
 } mindset_t;
@@ -869,10 +875,15 @@ mind_fdc_irq(void *priv, int set)
     if (mindset.log)
         pclog("[MIND] fdc irq %d\n", set);
 
-    mindset.fdc_irq = set;
-
-    if (mind_pcb != NULL)
-        i8018x_pcb_icu_int(mind_pcb, 0, set);
+    /* The board latches the request: the line stays up until the BIOS
+       acknowledges it by reading 805Ch, even if the controller has already
+       dropped its own INTRQ.  The request also arrives a little later than the
+       command that caused it - the reset takes a moment - which is what lets
+       the BIOS clear the controller and still see the interrupt afterwards. */
+    if (set) {
+        mindset.fdc_sched = 1;
+        timer_set_delay_u64(&mindset.fdc_timer, 200 * TIMER_USEC);
+    }
 }
 
 static const fdc_host_t mind_fdc_host = {
@@ -882,18 +893,41 @@ static const fdc_host_t mind_fdc_host = {
     .irq       = mind_fdc_irq
 };
 
+static void
+mind_fdc_raise(void *priv)
+{
+    if (!mindset.fdc_sched)
+        return;
+
+    mindset.fdc_sched = 0;
+    mindset.fdc_irq   = 1;
+
+    if (mindset.log)
+        pclog("[MIND] fdc irq raised\n");
+
+    if (mind_pcb != NULL)
+        i8018x_pcb_icu_int(mind_pcb, 0, 1);
+}
+
 /* 8050h: drive select, motor and the reset pulse, in the board's own layout. */
 static void
 mind_fdc_ctrl_write(uint16_t port, uint8_t val, void *priv)
 {
-    uint8_t dor = (uint8_t) (val & 0x05);
+    uint8_t dor = 0x0c; /* enabled, out of reset */
 
     mind_trace("w", port, val, 1);
 
-    dor |= 0x08; /* enable DRQ/TC/FINTR */
+    if (val & 0x01)
+        dor |= 0x01; /* selected drive */
 
     if (val & 0x02)
-        dor |= (uint8_t) (0x10 << (val & 1));
+        dor |= (uint8_t) (0x10 << (val & 1)); /* motor for that drive */
+
+    /* The board's bit 2 is a reset pulse, the opposite sense of the PC's DOR
+       bit, so the controller is pulsed here and stays enabled for the PC side
+       of the model. */
+    if (val & 0x04)
+        fdc_reset(mindset.fdc);
 
     fdc_write(0x03f2, dor, mindset.fdc);
 }
@@ -960,8 +994,12 @@ mind_fdc_ack_read(uint16_t port, void *priv)
 {
     mind_trace("r", port, 0x00, 1);
 
-    if (mind_pcb != NULL)
-        i8018x_pcb_icu_int(mind_pcb, 0, 0);
+    if (mindset.fdc_irq) {
+        mindset.fdc_irq = 0;
+
+        if (mind_pcb != NULL)
+            i8018x_pcb_icu_int(mind_pcb, 0, 0);
+    }
 
     return 0x00;
 }
@@ -1052,7 +1090,9 @@ machine_mindset_init(const machine_t *model)
     /* The 8272A hangs off the board's own ports, not the PC ones, so it runs as
        a hosted controller: the CPU moves every byte through 8054h. */
     mind_fifo_reset();
-    mindset.fdc_irq = 0;
+    mindset.fdc_irq   = 0;
+    mindset.fdc_sched = 0;
+    timer_add(&mindset.fdc_timer, mind_fdc_raise, NULL, 0);
     mindset.fdc_dev = device_add(&fdc_hosted_device);
     mindset.fdc     = (fdc_t *) mindset.fdc_dev;
 
