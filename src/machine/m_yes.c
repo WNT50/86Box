@@ -445,7 +445,7 @@ machine_yes_init(const machine_t *model)
 
     if (getenv("YES_DUMP") != NULL) {
         timer_add(&yes_vram_timer, yes_dump_vram, NULL, 0);
-        timer_set_delay_u64(&yes_vram_timer, 2000000 * TIMER_USEC);
+        timer_set_delay_u64(&yes_vram_timer, 6000000 * TIMER_USEC);
     }
 
     /* The frame buffer sits inside RAM at 0x10000 (128 KB machine) up to

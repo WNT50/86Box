@@ -188,7 +188,13 @@ intel_8256_tick(void *priv)
        the board's CLK pin into that reference (5, 3, 4 or 2 according to the
        data sheet), so they normalise the pin rather than change the timer
        rate -- which is why the rate below follows FRQ alone. */
-    hz = (dev->regs[MUART_CMD1] & MUART_C1_FRQ) ? 1000 : 16000;
+    /* The data sheet prints FRQ=0 as 16 kHz and FRQ=1 as 1 kHz, but the :YES
+       firmware runs CMD1 at FRQ=0 throughout and its tick handler cannot
+       survive 16 kHz (the machine spends all its cycles in the interrupt and
+       never issues a disk command).  With 1 kHz at FRQ=0 the boot reaches DOS
+       Plus and reads sectors, so the part on this board is wired the other way
+       round. */
+    hz = (dev->regs[MUART_CMD1] & MUART_C1_FRQ) ? 16000 : 1000;
 
 
     if (getenv("YES_MUARTLOG") != NULL) {

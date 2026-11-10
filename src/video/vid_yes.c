@@ -125,8 +125,13 @@ yes_render(yes_video_t *dev)
 
     for (row = 0; row < rows; row++) {
         for (col = 0; col < cols; col++) {
-            uint32_t cell = start + (uint32_t) row * (uint32_t) cols + (uint32_t) col;
-            uint32_t addr = dev->base + cell * 2u;
+            /* The board's address lines start at A1: the start register
+               counts characters, and each character takes four bytes of the
+               window (the ROM writes 2-byte cells, the board skips the other
+               two), so the page base is start * 4 and the cells inside a row
+               are 2 bytes apart. */
+            uint32_t cell = (uint32_t) row * (uint32_t) cols + (uint32_t) col;
+            uint32_t addr = dev->base + start * 4u + cell * 2u;
             uint8_t  ch, attr;
             uint32_t fg, bg;
             const uint8_t *glyph;
@@ -189,7 +194,7 @@ yes_poll(void *priv)
         static int frames;
         const char *shot = getenv("YES_VIDSHOT");
 
-        if ((shot != NULL) && (++frames == 120)) {
+        if ((shot != NULL) && (++frames == 500)) {
             FILE *f = fopen(shot, "wb");
 
             if (f != NULL) {
@@ -204,7 +209,10 @@ yes_poll(void *priv)
                     }
                 }
                 fclose(f);
-                pclog(":YES video: wrote %s\n", shot);
+                pclog(":YES video: wrote %s (R1=%02X R6=%02X R9=%02X R12/13=%02X%02X R14/15=%02X%02X)\n",
+                      shot, dev->crtc[CRTC_R1], dev->crtc[CRTC_R6], dev->crtc[CRTC_R9],
+                      dev->crtc[CRTC_R12], dev->crtc[CRTC_R13],
+                      dev->crtc[CRTC_R14], dev->crtc[CRTC_R15]);
             }
         }
     }
