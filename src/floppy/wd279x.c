@@ -1410,10 +1410,16 @@ wd279x_reg_write(uint16_t port, uint8_t val, void *priv)
 
         case 0x01:
             dev->track_reg = val;
+            if (getenv("PCX_FDCLOG") != NULL)
+                pclog("[REG] track <= %02X @%04X:%04X\n", val,
+                      (uint16_t) cpu_state.temp_CS, (uint16_t) cpu_state.temp_pc);
             break;
 
         case 0x02:
             dev->sector_reg = val;
+            if (getenv("PCX_FDCLOG") != NULL)
+                pclog("[REG] sector <= %02X @%04X:%04X\n", val,
+                      (uint16_t) cpu_state.temp_CS, (uint16_t) cpu_state.temp_pc);
             break;
 
         default:

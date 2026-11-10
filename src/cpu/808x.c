@@ -3585,6 +3585,53 @@ execx86(int cycs)
                         }
                     }
 
+                    /* Follow the boot sector: the ROM jumps to 7C00 after
+                       INT 19h if the floppy's OEM tag starts with ":YES". */
+                    {
+                        static int boot_n = -1;
+
+                        if (lin == 0x00007c00u)
+                            boot_n = 0;
+                        if ((boot_n >= 0) && (boot_n < 24)) {
+                            pclog("[BOOT] %05X %04X:%04X ax=%04X bx=%04X cx=%04X dx=%04X ds=%04X es=%04X\n",
+                                  lin, cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc,
+                                  cpu_state.regs[0].w, cpu_state.regs[3].w,
+                                  cpu_state.regs[1].w, cpu_state.regs[2].w,
+                                  cpu_state.seg_ds.seg, cpu_state.seg_es.seg);
+                            boot_n++;
+                        }
+                    }
+
+                    /* The BIOS read routine itself: what it is about to move. */
+                    if (lin == 0x000fcc07u) {
+                        static int rn;
+
+                        if (rn < 20) {
+                            pclog("[RD] es:bx=%04X:%04X cx=%04X dx=%04X ah=%02X al=%02X\n",
+                                  cpu_state.seg_es.seg, cpu_state.regs[3].w,
+                                  cpu_state.regs[1].w, cpu_state.regs[2].w,
+                                  (uint8_t) (cpu_state.regs[0].w >> 8),
+                                  (uint8_t) cpu_state.regs[0].w);
+                            rn++;
+                        }
+                    }
+
+                    /* Disk service: what the boot asks for. */
+                    if (lin == 0x000fcb7bu) {
+                        static int dn;
+
+                        if (dn < 16) {
+                            pclog("[INT13] ah=%02X al=%02X ch=%02X cl=%02X dh=%02X dl=%02X\n",
+                                  (uint8_t) (cpu_state.regs[0].w >> 8),
+                                  (uint8_t) cpu_state.regs[0].w,
+                                  (uint8_t) (cpu_state.regs[1].w >> 8),
+                                  (uint8_t) cpu_state.regs[1].w,
+                                  (uint8_t) (cpu_state.regs[2].w >> 8),
+                                  (uint8_t) cpu_state.regs[2].w);
+                            dn++;
+                        }
+                    }
+
                     switch (lin) {
                         case 0x0fcc4eu:
                             /* Overlap test: the helper uses globals, so a call

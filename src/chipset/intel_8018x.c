@@ -717,6 +717,9 @@ i8018x_pcb_write_word(struct i8018x_pcb_t *dev, uint16_t off, uint16_t val)
        it clear keeps the channel running as it was, and the bit itself is
        write only, always reading back as zero (270788-001 section 8.2). */
     if ((off == I8018X_DMA_CTRL(0)) || (off == I8018X_DMA_CTRL(1))) {
+        if (getenv("PCX_DMALOG") != NULL)
+            pclog("[CTRLW] in=%04X old=%04X chg=%d st=%d\n", val, dev->regs[off / 2],
+                  !!(val & I8018X_DMA_CHG), !!(val & I8018X_DMA_ST));
         if (!(val & I8018X_DMA_CHG))
             val = (uint16_t) ((val & ~I8018X_DMA_ST) | (dev->regs[off / 2] & I8018X_DMA_ST));
 
