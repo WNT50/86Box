@@ -362,6 +362,15 @@ intel_8256_write(uint16_t port, uint8_t val, void *priv)
             break;
         }
 
+        case MUART_INTEN:
+            /* A/B: the ROM masks the keyboard level once its tick handler has
+               run four times; force it back on to see whether the keyboard ISR
+               is what the console waits for. */
+            if (getenv("YES_KBDENV") != NULL)
+                val |= 0x02;
+            dev->regs[idx] = val;
+            break;
+
         case MUART_INTAD:
             dev->regs[idx] = val;
             /* Reading the address register acknowledges the interrupt. */

@@ -61,6 +61,7 @@ extern int fdcinited;
 #define YES_PALETTE    0x05c0
 #define YES_SYSCtl     0x05e0
 #define YES_RTC        0x066a
+#define YES_BOARD      0x0422
 #define YES_SASI_DATA  0x067a
 #define YES_SASI_STAT  0x067c
 #define YES_MMCS       0xffa6
@@ -226,6 +227,21 @@ yes_fdc_irq(void *priv, int level)
 }
 
 static uint8_t
+yes_board_read(uint16_t port, void *priv)
+{
+    /* Read once during the keyboard setup; zero makes the ROM raise MODE bit 5. */
+    const char *v = getenv("YES_BOARD");
+    uint8_t r = 0x00;
+
+    if (v != NULL)
+        r = (uint8_t) strtoul(v, NULL, 16);
+
+    if (yes_log > 0)
+        pclog("[YES] rd board -> %02X\n", r);
+    return r;
+}
+
+static uint8_t
 yes_kbd_read(uint16_t port, void *priv)
 {
     return yes_log_read("kbd", port, yes.kbd_code);
@@ -344,6 +360,8 @@ yes_io_init(void)
 {
     io_sethandler(YES_DSKSEL, 0x0001, NULL, NULL, NULL, yes_dsksel_write, NULL,
                   NULL, NULL);
+    io_sethandler(YES_BOARD, 0x0001, yes_board_read, NULL, NULL, NULL, NULL, NULL,
+                  NULL);
     io_sethandler(YES_KBD, 0x0001, yes_kbd_read, NULL, NULL, NULL, NULL, NULL,
                   NULL);
     io_sethandler(YES_SYSCtl, 0x0001, yes_sysctl_read, NULL, NULL,
