@@ -244,6 +244,12 @@ yes_board_read(uint16_t port, void *priv)
 static uint8_t
 yes_kbd_read(uint16_t port, void *priv)
 {
+    {
+        static int n;
+        if (n < 12)
+            pclog("[KBD] read 5a0 -> %02X @%04X:%04X\n", yes.kbd_code,
+                  cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc), n++;
+    }
     return yes_log_read("kbd", port, yes.kbd_code);
 }
 
@@ -263,9 +269,23 @@ yes_key_tick(void *priv)
     /* The keyboard is one of the MUART's interrupt sources: level 1, which the
        part answers with vector 0x41 -- the handler the ROM installs for the
        keyboard.  The scancode itself is read back from 0x5a0. */
+    /* The ISR latches the make code and only queues it when the matching
+       break code arrives as a second interrupt, so send both. */
     if (yes_key_phase == 0) {
         yes_key_phase = 1;
         pclog("[YES] key %02X -> MUART level 1\n", yes.kbd_code);
+        intel_8256_set_level(yes.muart, 1);
+        timer_set_delay_u64(&yes_key_timer, 20000 * TIMER_USEC);
+    } else if (yes_key_phase == 1) {
+        yes_key_phase = 2;
+        yes.kbd_code |= 0x80;
+        pclog("[YES] break %02X -> MUART level 1\n", yes.kbd_code);
+        intel_8256_set_level(yes.muart, 1);
+        timer_set_delay_u64(&yes_key_timer, 20000 * TIMER_USEC);
+    } else if (yes_key_phase == 2) {
+        yes_key_phase = 3;
+        yes.kbd_code &= 0x7f;
+        pclog("[YES] key again %02X -> MUART level 1\n", yes.kbd_code);
         intel_8256_set_level(yes.muart, 1);
     }
 }
