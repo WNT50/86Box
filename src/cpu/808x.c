@@ -3637,6 +3637,18 @@ execx86(int cycs)
                         }
                     }
 
+                    if (lin == 0x000fce5du) {
+                        uint32_t a = ((uint32_t) cpu_state.seg_ds.seg << 4);
+                        static int cn;
+                        if (cn < 10) {
+                            pclog("[TRK] al=%02X e5=%02X c(before)=%02X ds=%04X\n",
+                                  (uint8_t) cpu_state.regs[0].w,
+                                  ram[(a + 0xe5) & 0xfffff],
+                                  ram[(a + 0x0c) & 0xfffff], cpu_state.seg_ds.seg);
+                            cn++;
+                        }
+                    }
+
                     /* Where the disk error code comes from. */
                     if ((lin == 0x000fcfd7u) || (lin == 0x000fd428u) ||
                         (lin == 0x000fcbc1u)) {
