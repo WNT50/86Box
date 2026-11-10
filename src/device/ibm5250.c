@@ -1347,7 +1347,8 @@ ibm5250_in_real(uint16_t port, void *priv)
                             /* 0xAB0 的 255 帧数据扫描（必须优先于 cmdlat 规则） */
                             if (dev->rx_bit == 0)
                                 dev->ab0_cnt = (dev->ab0_cnt % 255) + 1;
-                            data = dev->ab0_cnt;
+                            /* 0xAE7 的 cmp al,ch 要求 BH.bit0==1 → data.bit1=1 */
+                            data = dev->ab0_cnt | 0x02;
                         }
                         else if (ra == 0x0BD0) {
                             if (dev->rx_bit == 0)
