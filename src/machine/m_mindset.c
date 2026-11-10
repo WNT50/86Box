@@ -42,6 +42,9 @@
 #include <86box/video.h>
 #include <86box/i8018x.h>
 #include <86box/keyboard.h>
+#include <86box/dma.h>
+#include <86box/fdd.h>
+#include <86box/fdc.h>
 
 #include "../cpu/cpu.h"
 
@@ -82,6 +85,18 @@ typedef struct {
     int     ready;      /* the BIOS sees this as status bit 5 */
 } mind_keyboard_t;
 
+/* The controller is fed byte by byte by the CPU through 8054h, so the host
+   side keeps a ring buffer and a terminal count the BIOS programs at 8058h. */
+#define MIND_FIFO_SIZE 0x8000
+
+typedef struct {
+    uint8_t  buf[MIND_FIFO_SIZE];
+    int      head;
+    int      tail;
+    int      count;
+    uint32_t left;
+} mind_fdc_fifo_t;
+
 typedef struct {
     int            keytest;
     int            log;
@@ -91,6 +106,10 @@ typedef struct {
     mind_mailbox_t snd;  /* sound controller register file */
     uint8_t         sys_sts; /* status byte the controller reports */
     mind_keyboard_t kbd;
+    void          *fdc_dev;      /* hosted floppy controller */
+    fdc_t         *fdc;
+    mind_fdc_fifo_t fifo;
+    int            fdc_irq;
     pc_timer_t     mcu_timer;
     pc_timer_t     sample_timer;
 } mindset_t;
@@ -693,17 +712,10 @@ mind_io_read(uint16_t port, void *priv)
     uint8_t ret = 0xff;
 
     /* An empty module slot leaves the bus pulled high, which is what makes the
-       BIOS skip it; the floppy controller's status ports read low instead. */
-    switch (port) {
-        case 0x8048:
-        case 0x804c:
-        case 0x805c:
-            ret = 0x00;
-            break;
-
-        default:
-            break;
-    }
+       BIOS skip it; the floppy controller's neighbours in the board block read
+       low instead, the way the unpopulated trap hardware does. */
+    if ((port >= 0x8040) && (port <= 0x804f))
+        ret = 0x00;
 
     mind_trace("r", port, ret, 1);
     return ret;
@@ -773,6 +785,185 @@ mind_key_test(void *priv)
 {
     timer_set_delay_u64(&mind_key_timer, 0);
     mind_key_next(NULL);
+}
+
+/* ---- floppy controller -------------------------------------------------
+   The 8272A sits at 8060h/8062h and is fed through 8054h; the BIOS programs a
+   byte count at 8058h and acknowledges the interrupt by reading 805Ch. */
+
+static void
+mind_fifo_reset(void)
+{
+    mindset.fifo.head  = 0;
+    mindset.fifo.tail  = 0;
+    mindset.fifo.count = 0;
+}
+
+static void
+mind_fifo_push(uint8_t val)
+{
+    if (mindset.fifo.count >= MIND_FIFO_SIZE)
+        return;
+
+    mindset.fifo.buf[mindset.fifo.tail] = val;
+    mindset.fifo.tail = (mindset.fifo.tail + 1) % MIND_FIFO_SIZE;
+    mindset.fifo.count++;
+}
+
+static int
+mind_fifo_pop(void)
+{
+    int val;
+
+    if (mindset.fifo.count == 0)
+        return -1;
+
+    val = mindset.fifo.buf[mindset.fifo.head];
+    mindset.fifo.head = (mindset.fifo.head + 1) % MIND_FIFO_SIZE;
+    mindset.fifo.count--;
+
+    return val;
+}
+
+/* The controller wants a byte to write to the disk. */
+static int
+mind_fdc_dma_read(void *priv)
+{
+    int val;
+
+    if (mindset.fifo.left == 0)
+        return DMA_OVER;
+
+    val = mind_fifo_pop();
+    if (val < 0)
+        return DMA_NODATA;
+
+    mindset.fifo.left--;
+
+    return val;
+}
+
+/* The controller hands over a byte it just read from the disk. */
+static int
+mind_fdc_dma_write(void *priv, uint8_t val)
+{
+    if (mindset.fifo.left == 0)
+        return DMA_OVER;
+
+    mind_fifo_push(val);
+    mindset.fifo.left--;
+
+    return 0;
+}
+
+static void
+mind_fdc_drq(void *priv, int set)
+{
+    if (mindset.log)
+        pclog("[MIND] fdc drq %d\n", set);
+}
+
+static void
+mind_fdc_irq(void *priv, int set)
+{
+    if (mindset.log)
+        pclog("[MIND] fdc irq %d\n", set);
+
+    mindset.fdc_irq = set;
+
+    if (mind_pcb != NULL)
+        i8018x_pcb_icu_int(mind_pcb, 0, set);
+}
+
+static const fdc_host_t mind_fdc_host = {
+    .dma_read  = mind_fdc_dma_read,
+    .dma_write = mind_fdc_dma_write,
+    .drq       = mind_fdc_drq,
+    .irq       = mind_fdc_irq
+};
+
+/* 8050h: drive select, motor and the reset pulse, in the board's own layout. */
+static void
+mind_fdc_ctrl_write(uint16_t port, uint8_t val, void *priv)
+{
+    uint8_t dor = (uint8_t) (val & 0x05);
+
+    mind_trace("w", port, val, 1);
+
+    dor |= 0x08; /* enable DRQ/TC/FINTR */
+
+    if (val & 0x02)
+        dor |= (uint8_t) (0x10 << (val & 1));
+
+    fdc_write(0x03f2, dor, mindset.fdc);
+}
+
+static uint8_t
+mind_fdc_msr_read(uint16_t port, void *priv)
+{
+    uint8_t ret = fdc_read(0x03f4, mindset.fdc);
+
+    mind_trace("r", port, ret, 1);
+
+    return ret;
+}
+
+static uint8_t
+mind_fdc_data_read(uint16_t port, void *priv)
+{
+    uint8_t ret = fdc_read(0x03f5, mindset.fdc);
+
+    mind_trace("r", port, ret, 1);
+
+    return ret;
+}
+
+static void
+mind_fdc_data_write(uint16_t port, uint8_t val, void *priv)
+{
+    mind_trace("w", port, val, 1);
+
+    fdc_write(0x03f5, val, mindset.fdc);
+}
+
+static uint8_t
+mind_fdc_dma_read_port(uint16_t port, void *priv)
+{
+    int val = mind_fifo_pop();
+
+    if ((val < 0) && (mindset.fifo.left != 0))
+        val = 0xff;
+
+    mind_trace("r", port, (val < 0) ? 0xff : val, 1);
+
+    return (uint8_t) ((val < 0) ? 0xff : val);
+}
+
+static void
+mind_fdc_dma_write_port(uint16_t port, uint8_t val, void *priv)
+{
+    mind_trace("w", port, val, 1);
+
+    mind_fifo_push(val);
+}
+
+static void
+mind_fdc_count_write(uint16_t port, uint16_t val, void *priv)
+{
+    mind_trace("w", port, val, 2);
+
+    mindset.fifo.left = val;
+}
+
+static uint8_t
+mind_fdc_ack_read(uint16_t port, void *priv)
+{
+    mind_trace("r", port, 0x00, 1);
+
+    if (mind_pcb != NULL)
+        i8018x_pcb_icu_int(mind_pcb, 0, 0);
+
+    return 0x00;
 }
 
 /* Sampler: without a serial console the only way to tell "the CPU is still
@@ -858,12 +1049,45 @@ machine_mindset_init(const machine_t *model)
     keyboard_set_table(scancode_xt);
     keyboard_send = mind_keyboard_send;
 
+    /* The 8272A hangs off the board's own ports, not the PC ones, so it runs as
+       a hosted controller: the CPU moves every byte through 8054h. */
+    mind_fifo_reset();
+    mindset.fdc_irq = 0;
+    mindset.fdc_dev = device_add(&fdc_hosted_device);
+    mindset.fdc     = (fdc_t *) mindset.fdc_dev;
+
+    if (mindset.fdc != NULL)
+        fdc_set_host(mindset.fdc, &mind_fdc_host, &mindset);
+
+    io_sethandler(0x8050, 0x0001,
+                  NULL, NULL, NULL,
+                  mind_fdc_ctrl_write, NULL, NULL, NULL);
+    io_sethandler(0x8054, 0x0001,
+                  mind_fdc_dma_read_port, NULL, NULL,
+                  mind_fdc_dma_write_port, NULL, NULL, NULL);
+    io_sethandler(0x8058, 0x0001,
+                  NULL, NULL, NULL,
+                  NULL, mind_fdc_count_write, NULL, NULL);
+    io_sethandler(0x805c, 0x0001,
+                  mind_fdc_ack_read, NULL, NULL,
+                  NULL, NULL, NULL, NULL);
+    io_sethandler(0x8060, 0x0001,
+                  mind_fdc_msr_read, NULL, NULL,
+                  NULL, NULL, NULL, NULL);
+    io_sethandler(0x8062, 0x0001,
+                  mind_fdc_data_read, NULL, NULL,
+                  mind_fdc_data_write, NULL, NULL, NULL);
+
     io_sethandler(MIND_TRAP_BASE, MIND_TRAP_SIZE,
                   mind_trap_read, mind_trap_readw, NULL,
                   mind_trap_write, mind_trap_writew, NULL, NULL);
 
-    /* 8040-827F, 8284-829F and 82A4-82FF: the FDC and the module slots. */
-    io_sethandler(0x8040, 0x0240,
+    /* 8040-804F, 8064-827F, 8284-829F and 82A4-82FF: the module slots and the
+       leftovers of the board's I/O block (the controller owns 8050-8063). */
+    io_sethandler(0x8040, 0x0010,
+                  mind_io_read, mind_io_readw, NULL,
+                  mind_io_write, mind_io_writew, NULL, NULL);
+    io_sethandler(0x8064, 0x021c,
                   mind_io_read, mind_io_readw, NULL,
                   mind_io_write, mind_io_writew, NULL, NULL);
     io_sethandler(0x8284, 0x001c,
