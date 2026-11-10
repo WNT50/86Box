@@ -331,6 +331,13 @@ yes_sasi_read(uint16_t port, void *priv)
         const char *v = getenv("YES_SASI");
         uint8_t     idle = (v != NULL) ? (uint8_t) strtoul(v, NULL, 16) : 0x00;
 
+        {
+            static int n;
+
+            if (n < 16)
+                pclog("[SASIR] port=%04X -> %02X @%04X:%04X\n", port, idle,
+                      cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc), n++;
+        }
         return yes_log_read("sasi", port, idle);
     }
 }
