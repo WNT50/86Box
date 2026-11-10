@@ -3616,6 +3616,25 @@ execx86(int cycs)
                         }
                     }
 
+                    if ((lin == 0x000fd3f0u) || (lin == 0x000fd411u)) {
+                        static int sn;
+                        if (sn < 10) {
+                            pclog("[SASI] @%05X dx=%04X cs:ip=%04X:%04X\n", lin,
+                                  cpu_state.regs[2].w, cpu_state.seg_cs.seg,
+                                  (uint16_t) cpu_state.pc);
+                            sn++;
+                        }
+                    }
+
+                    /* Where the disk error code comes from. */
+                    if ((lin == 0x000fcfd7u) || (lin == 0x000fd428u) ||
+                        (lin == 0x000fcbc1u)) {
+                        pclog("[E6W] @%05X al=%02X ah=%02X cs:ip=%04X:%04X\n", lin,
+                              (uint8_t) cpu_state.regs[0].w,
+                              (uint8_t) (cpu_state.regs[0].w >> 8),
+                              cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
+                    }
+
                     /* Disk service: what the boot asks for. */
                     if (lin == 0x000fcb7bu) {
                         static int dn;
