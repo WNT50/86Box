@@ -109,9 +109,8 @@ mind_trace(const char *dir, uint16_t port, uint32_t val, int width)
     if (!mindset.log)
         return;
 
-    pclog("[MIND] %s%-5s %04X = %0*X  @%04X:%04X\n", dir,
-          (width == 1) ? "8-bit" : ((width == 2) ? "16-bit" : "32-bit"),
-          port, width * 2, val, cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
+    pclog("[MIND] io %s%d %04X %0*X @%04X:%04X\n", dir, width, port,
+          width * 2, val, cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
 }
 
 /* The GCP is a bus master, so it sees physical memory, not the CPU's view. */
@@ -341,6 +340,8 @@ mind_dump_vram(const char *tag)
 static void
 mind_gcp_kick(uint16_t port, uint16_t val, void *priv)
 {
+    mind_trace("w", 0x8300, val, 2);
+
     mindset.kicks++;
 
     if (mindset.vramdump) {
@@ -462,15 +463,15 @@ mind_mcu_reset(mindset_t *m)
 static uint8_t
 mind_sys_status_read(UNUSED(uint16_t port), UNUSED(void *priv))
 {
+    mind_trace("r", 0x8282, 0x00, 1);
+
     return 0x00;
 }
 
 static void
 mind_sys_index_write(UNUSED(uint16_t port), uint8_t val, UNUSED(void *priv))
 {
-    if (mindset.log)
-        pclog("[MIND] mcu idx %02X @%04X:%04X\n", val,
-              cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
+    mind_trace("w", 0x8282, val, 1);
 
     mindset.sys.idx = val;
 }
@@ -480,9 +481,7 @@ mind_sys_data_read(UNUSED(uint16_t port), UNUSED(void *priv))
 {
     uint8_t ret = mindset.sys.regs[mindset.sys.idx];
 
-    if (mindset.log)
-        pclog("[MIND] mcu r %02X -> %02X @%04X:%04X\n", mindset.sys.idx, ret,
-              cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
+    mind_trace("r", 0x8280, ret, 1);
 
     return ret;
 }
@@ -490,15 +489,7 @@ mind_sys_data_read(UNUSED(uint16_t port), UNUSED(void *priv))
 static void
 mind_sys_data_write(UNUSED(uint16_t port), uint8_t val, UNUSED(void *priv))
 {
-    if (mindset.log) {
-        /* The mailbox primitives push four registers, so the caller's address
-           sits eight bytes above the stack pointer. */
-        uint32_t base = ((uint32_t) cpu_state.seg_ss.seg << 4) + cpu_state.regs[4].w + 8;
-        uint16_t ret  = (uint16_t) (mem_readb_phys(base) | (mem_readb_phys(base + 1) << 8));
-
-        pclog("[MIND] mcu w %02X = %02X @%04X:%04X caller %04X\n", mindset.sys.idx, val,
-              cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc, ret);
-    }
+    mind_trace("w", 0x8280, val, 1);
 
     /* The BIOS writes a value twice; keeping the last one is what the
        firmware does too.  Bit 6 of the configuration byte is an input the
@@ -528,24 +519,32 @@ mind_sys_index_writew(uint16_t port, uint16_t val, void *priv)
 static uint8_t
 mind_snd_status_read(UNUSED(uint16_t port), UNUSED(void *priv))
 {
+    mind_trace("r", 0x82a2, 0x00, 1);
+
     return 0x00;
 }
 
 static uint8_t
 mind_snd_data_read(UNUSED(uint16_t port), UNUSED(void *priv))
 {
+    mind_trace("r", 0x82a0, 0xff, 1);
+
     return 0xff;
 }
 
 static void
 mind_snd_index_write(UNUSED(uint16_t port), uint8_t val, UNUSED(void *priv))
 {
+    mind_trace("w", 0x82a2, val, 1);
+
     mindset.snd.idx = val;
 }
 
 static void
 mind_snd_data_write(UNUSED(uint16_t port), uint8_t val, UNUSED(void *priv))
 {
+    mind_trace("w", 0x82a0, val, 1);
+
     mindset.snd.regs[mindset.snd.idx] = val;
 }
 

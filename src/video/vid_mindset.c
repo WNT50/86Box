@@ -145,6 +145,8 @@ mindset_video_vram(void)
 static uint16_t
 mind_dispreg_read(mindset_vid_t *vid)
 {
+    uint16_t ret = 0;
+
     switch ((vid->dispctrl >> 4) & 7) {
         case 1: /* the display word at the interrupt position, shifted */
             {
@@ -154,24 +156,33 @@ mind_dispreg_read(mindset_vid_t *vid)
                 if (vid->intaddr & 1)
                     v >>= 8;
 
-                return (uint16_t) (sw16((uint16_t) (v << 4)));
+                ret = (uint16_t) (sw16((uint16_t) (v << 4)));
+
+                if (mindset_log)
+                    pclog("[MIND] io r16 8320 %04X\n", ret);
+
+                return ret;
             }
 
         case 5: /* the palette upload path wants this set */
-            return 0x0080;
+            ret = 0x0080;
+            break;
 
         default:
             break;
     }
 
-    return 0;
+    if (mindset_log)
+        pclog("[MIND] io r16 8320 %04X\n", ret);
+
+    return ret;
 }
 
 static void
 mind_dispreg_write(mindset_vid_t *vid, uint16_t val)
 {
     if (mindset_log)
-        pclog("[MIND] dispreg[%d] = %04X\n", vid->dispctrl & 7, val);
+        pclog("[MIND] io w16 8320 %04X\n", val);
 
     switch (vid->dispctrl & 7) {
         case 0:
@@ -262,21 +273,33 @@ mind_dispreg_write16(uint16_t port, uint16_t val, void *priv)
 static uint16_t
 mind_dispctrl_read16(uint16_t port, void *priv)
 {
-    return ((mindset_vid_t *) priv)->dispctrl;
+    uint16_t v = ((mindset_vid_t *) priv)->dispctrl;
+
+    if (mindset_log)
+        pclog("[MIND] io r16 8322 %04X\n", v);
+
+    return v;
 }
 
 static uint8_t
 mind_dispctrl_read8(uint16_t port, void *priv)
 {
     uint16_t v = ((mindset_vid_t *) priv)->dispctrl;
+    uint8_t  ret = (port & 1) ? (uint8_t) (v >> 8) : (uint8_t) (v & 0xff);
 
-    return (port & 1) ? (uint8_t) (v >> 8) : (uint8_t) (v & 0xff);
+    if (mindset_log)
+        pclog("[MIND] io r8 8322 %02X\n", ret);
+
+    return ret;
 }
 
 static void
 mind_dispctrl_write16(uint16_t port, uint16_t val, void *priv)
 {
     mindset_vid_t *vid = (mindset_vid_t *) priv;
+
+    if (mindset_log)
+        pclog("[MIND] io w16 8322 %04X\n", val);
 
     if (mindset_log)
         pclog("[MIND] dispctrl = %04X (ibm=%d bank=%d big=%d ppb=%d 400=%d)\n",
