@@ -83,6 +83,10 @@ typedef struct {
     uint8_t key;
     int     valid;      /* a byte is waiting to be read out of register 8Ch */
     int     ready;      /* the BIOS sees this as status bit 5 */
+    uint8_t queue[16];  /* bytes typed while the previous one was still there */
+    int     qhead;
+    int     qtail;
+    int     qcount;
 } mind_keyboard_t;
 
 /* The controller is fed byte by byte by the CPU through 8054h, so the host
@@ -138,6 +142,19 @@ mind_display_irq(void *priv, int level)
 /* The keyboard scanner sits behind the system controller: it leaves a byte for
    the controller, which raises line 3 until the BIOS reads it out of register
    8Ch inside its interrupt handler. */
+/* One byte at a time leaves the controller: the next one only goes out once
+   the BIOS has acknowledged the previous one, the way the real part behaves. */
+static void
+mind_keyboard_deliver(uint8_t code)
+{
+    mindset.kbd.key   = code;
+    mindset.kbd.valid = 1;
+    mindset.kbd.ready = 1;
+
+    if (mind_pcb != NULL)
+        i8018x_pcb_icu_int(mind_pcb, 3, 1);
+}
+
 static void
 mind_keyboard_send(uint16_t val)
 {
@@ -147,15 +164,16 @@ mind_keyboard_send(uint16_t val)
     if (mindset.log)
         pclog("[MIND] kbd send %04X ready=%d\n", val, mindset.kbd.ready);
 
-    if (mindset.kbd.valid)
+    if (mindset.kbd.valid) {
+        if (mindset.kbd.qcount < (int) sizeof(mindset.kbd.queue)) {
+            mindset.kbd.queue[mindset.kbd.qtail] = (uint8_t) (val & 0xff);
+            mindset.kbd.qtail = (mindset.kbd.qtail + 1) % (int) sizeof(mindset.kbd.queue);
+            mindset.kbd.qcount++;
+        }
         return;
+    }
 
-    mindset.kbd.key   = (uint8_t) (val & 0xff);
-    mindset.kbd.valid = 1;
-    mindset.kbd.ready = 1;
-
-    if (mind_pcb != NULL)
-        i8018x_pcb_icu_int(mind_pcb, 3, 1);
+    mind_keyboard_deliver((uint8_t) (val & 0xff));
 }
 
 /* MIND_SAMPLE=<us>: how often the sampler prints CS:IP (default 20 ms). */
@@ -592,8 +610,11 @@ mind_sys_index_write(UNUSED(uint16_t port), uint8_t val, UNUSED(void *priv))
        first one releases the keyboard interrupt line. */
     switch (val) {
         case 0x40:
+            /* The acknowledge only releases the interrupt; the byte itself
+               stays in register 8Ch until the keyboard handler reads it. */
             if (mindset.kbd.ready) {
                 mindset.kbd.ready = 0;
+
                 if (mind_pcb != NULL)
                     i8018x_pcb_icu_int(mind_pcb, 3, 0);
             }
@@ -620,8 +641,18 @@ mind_sys_data_read(UNUSED(uint16_t port), UNUSED(void *priv))
 
         mindset.kbd.valid = 0;
         mindset.kbd.ready = 0;
+
         if (mind_pcb != NULL)
             i8018x_pcb_icu_int(mind_pcb, 3, 0);
+
+        /* Anything typed while this byte was waiting goes out now. */
+        if (mindset.kbd.qcount > 0) {
+            uint8_t next = mindset.kbd.queue[mindset.kbd.qhead];
+
+            mindset.kbd.qhead = (mindset.kbd.qhead + 1) % (int) sizeof(mindset.kbd.queue);
+            mindset.kbd.qcount--;
+            mind_keyboard_deliver(next);
+        }
     } else {
         ret = mindset.sys.regs[mindset.sys.idx];
     }
@@ -759,7 +790,27 @@ static const struct {
     {  200000, 0x57 },  /* Reset                                 */
     {  300000, 0xd7 },  /* Reset up                              */
     {  200000, 0xb8 },  /* Alt up                                */
-    { 7000000, 0x39 },  /* space again: the POST after the reset  */
+    { 6000000, 0x38 },  /* the machine is on the configuration screen now:
+                           Alt down ...                            */
+    {   80000, 0x57 },  /* ... Reset, which is how the screen is left */
+    {  300000, 0xd7 },
+    {  200000, 0xb8 },
+    { 3000000, 0x39 },  /* the POST that follows asks for a key again, so
+                           keep answering it while the boot gets going */
+    {  300000, 0xb9 },
+    { 2500000, 0x39 },
+    {  300000, 0xb9 },
+    { 2500000, 0x39 },
+    {  300000, 0xb9 },
+    { 2500000, 0x39 },
+    {  300000, 0xb9 },
+    { 2500000, 0x39 },
+    {  300000, 0xb9 },
+    { 2500000, 0x39 },
+    {  300000, 0xb9 },
+    { 2500000, 0x39 },
+    {  300000, 0xb9 },
+    { 2500000, 0x39 },
     {  300000, 0xb9 },
 };
 
