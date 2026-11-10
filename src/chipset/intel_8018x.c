@@ -693,6 +693,10 @@ i8018x_pcb_read_word(struct i8018x_pcb_t *dev, uint16_t off)
 static void
 i8018x_pcb_write_word(struct i8018x_pcb_t *dev, uint16_t off, uint16_t val)
 {
+    if ((getenv("I8018X_DMA_LOG") != NULL) && (off >= 0xC0u) && (off <= 0xDEu))
+        pclog("[8018X] wr off=%02X val=%04X (slot=%d)\n", off, val,
+              (off >= 0xD0u) ? 1 : 0);
+
     if (off == I8018X_RELOC_OFF) {
         /* Manual 270788-001 section 5.1 / Figure 53: bits 11:0 are address
            bits A19:A8 of the new base, bit 12 selects memory (1) or I/O (0)
@@ -1053,6 +1057,10 @@ i8018x_pcb_dma_write(int channel, uint16_t val, void *priv)
     if ((slot < 0) || !i8018x_pcb_dma_armed(dev, slot))
         return DMA_NODATA;
 
+    if (getenv("I8018X_DMA_LOG") != NULL)
+        pclog("[8018X] dma ch=%d slot=%d ptr=%05X val=%02X\n", channel, slot,
+              i8018x_pcb_dma_ptr(dev, slot, 1), val);
+
     if (dev->regs[I8018X_DMA_CTRL(slot)] & I8018X_DMA_BW)
         mem_writew_phys(i8018x_pcb_dma_ptr(dev, slot, 1), val);
     else
@@ -1102,14 +1110,60 @@ i8018x_pcb_dma_freerun(struct i8018x_pcb_t *dev, int slot)
     }
 }
 
+/* One transfer, asked for by the peripheral's DRQ.  The two M/IO bits say which
+   side of the transfer is memory and which is an I/O port, so the same channel
+   serves a board that moves bytes between memory and its own controller
+   (270788-001 section 8.2). */
+static void
+i8018x_pcb_dma_run(struct i8018x_pcb_t *dev, int slot)
+{
+    uint16_t ctrl = dev->regs[I8018X_DMA_CTRL(slot)];
+    uint32_t src  = i8018x_pcb_dma_ptr(dev, slot, 0);
+    uint32_t dst  = i8018x_pcb_dma_ptr(dev, slot, 1);
+    uint8_t  val;
+
+    if (getenv("I8018X_DMA_LOG") != NULL)
+        pclog("[8018X] run slot=%d ctrl=%04X src=%05X dst=%05X count=%04X\n",
+              slot, ctrl, src, dst, dev->regs[I8018X_DMA_COUNT(slot)]);
+
+    if (ctrl & I8018X_DMA_SRC_MIO)
+        val = mem_readb_phys(src);
+    else
+        val = inb((uint16_t) (src & 0xFFFFu));
+
+    if (ctrl & I8018X_DMA_DST_MIO)
+        mem_writeb_phys(dst, val);
+    else
+        outb((uint16_t) (dst & 0xFFFFu), val);
+
+    i8018x_pcb_dma_step_ptr(dev, slot, 0);
+    i8018x_pcb_dma_step_ptr(dev, slot, 1);
+
+    i8018x_pcb_dma_count_down(dev, slot);
+}
+
 static void
 i8018x_pcb_dma_set_drq(int channel, int set, void *priv)
 {
     struct i8018x_pcb_t *dev  = (struct i8018x_pcb_t *) priv;
     int           slot = i8018x_pcb_dma_slot(dev, channel);
 
-    if (slot >= 0)
-        dev->dma_drq[slot] = !!set;
+    if (slot < 0)
+        return;
+
+    dev->dma_drq[slot] = !!set;
+
+    /* The request is one transfer's worth: the channel moves it at once, the
+       way the real part does between instructions.  An unsynchronized channel
+       with memory on both sides has already moved its whole block when ST went
+       up, so it must not move a second byte here. */
+    if (set && i8018x_pcb_dma_armed(dev, slot)) {
+        uint16_t ctrl = dev->regs[I8018X_DMA_CTRL(slot)];
+
+        if (!(ctrl & I8018X_DMA_SRC_MIO) || !(ctrl & I8018X_DMA_DST_MIO) ||
+            ((ctrl & I8018X_DMA_SYN) != 0x0000u))
+            i8018x_pcb_dma_run(dev, slot);
+    }
 }
 
 static int

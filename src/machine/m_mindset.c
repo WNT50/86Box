@@ -108,6 +108,9 @@ typedef struct {
     int            keytest;
     int            dump_at;
     int            badwrites;
+    int            boot_at;
+    int            fdc_irqs;
+    int            dma_logged;
     int            log;
     int            vramdump;
     int            kicks;
@@ -904,25 +907,46 @@ mind_fifo_pop(void)
     return val;
 }
 
-/* The BIOS programs one of the 80186's own DMA channels with 8054h as the I/O
-   port, so the controller is the slave end of that channel: bytes it reads from
-   the disk are deposited in memory, bytes it writes are fetched from memory. */
+/* One byte of the channel's traffic: the controller asks for a transfer and the
+   80186 moves the byte between memory and the board's data port, where the
+   handlers below hand it over. */
+static int
+mind_fdc_transfer(void)
+{
+    dma_set_drq(MIND_FDC_DMA_CH, 1);
+    dma_set_drq(MIND_FDC_DMA_CH, 0);
+
+    if (mindset.fifo.left != 0)
+        mindset.fifo.left--;
+
+    return (mindset.fifo.left == 0) ? DMA_OVER : 0;
+}
 
 static int
 mind_fdc_dma_read(void *priv)
 {
-    return dma_channel_read(MIND_FDC_DMA_CH);
+    int val;
+
+    mind_fdc_transfer();
+
+    val = mind_fifo_pop();
+
+    return (val < 0) ? DMA_NODATA : val;
 }
 
 static int
 mind_fdc_dma_write(void *priv, uint8_t val)
 {
-    return dma_channel_write(MIND_FDC_DMA_CH, val);
+    mind_fifo_push(val);
+
+    return mind_fdc_transfer();
 }
 
 static void
 mind_fdc_drq(void *priv, int set)
 {
+    /* The transfer itself is driven from the data callbacks above, which run
+       after the request goes up; the line is only interesting in the log. */
     if (mindset.log)
         pclog("[MIND] fdc drq %d\n", set);
 }
@@ -951,6 +975,27 @@ static const fdc_host_t mind_fdc_host = {
     .irq       = mind_fdc_irq
 };
 
+/* MIND_DUMP_BOOT=<n>: write the 512 bytes at 7C00h after the nth controller
+   interrupt, which is where a boot sector ends up. */
+static void
+mind_dump_boot(const char *tag)
+{
+    char  path[64];
+    FILE *f;
+
+    snprintf(path, sizeof(path), "/tmp/mind-%s.bin", tag);
+
+    f = fopen(path, "wb");
+    if (f == NULL)
+        return;
+
+    for (int i = 0; i < 0x100000; i++)
+        fputc(mem_readb_phys(i), f);
+
+    fclose(f);
+    pclog("[MIND] boot sector dumped to %s\n", path);
+}
+
 static void
 mind_fdc_raise(void *priv)
 {
@@ -959,6 +1004,17 @@ mind_fdc_raise(void *priv)
 
     mindset.fdc_sched = 0;
     mindset.fdc_irq   = 1;
+
+    if (mindset.boot_at != 0) {
+        char tag[16];
+
+        mindset.fdc_irqs++;
+
+        if (mindset.fdc_irqs <= mindset.boot_at) {
+            snprintf(tag, sizeof(tag), "boot%d", mindset.fdc_irqs);
+            mind_dump_boot(tag);
+        }
+    }
 
     if (mindset.log)
         pclog("[MIND] fdc irq raised\n");
@@ -1115,6 +1171,11 @@ machine_mindset_init(const machine_t *model)
 
     if (getenv("MIND_DUMP_AT") != NULL)
         mindset.dump_at = atoi(getenv("MIND_DUMP_AT"));
+
+    mindset.boot_at = 0;
+
+    if (getenv("MIND_DUMP_BOOT") != NULL)
+        mindset.boot_at = atoi(getenv("MIND_DUMP_BOOT"));
     mindset.keytest  = (getenv("MIND_KEYTEST") != NULL);
 
     if (getenv("MIND_MON") != NULL)
