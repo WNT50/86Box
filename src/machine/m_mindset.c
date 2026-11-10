@@ -125,6 +125,7 @@ typedef struct {
     int            fdc_sched;    /* the controller is still finishing up */
     pc_timer_t     fdc_timer;
     pc_timer_t     mcu_timer;
+    pc_timer_t     dump_timer;
     pc_timer_t     sample_timer;
 } mindset_t;
 
@@ -461,9 +462,13 @@ mind_dump_vram(const char *tag)
     if (f == NULL)
         return;
 
-    fwrite(vram, 1, MIND_VRAM_SIZE, f);
+    /* Read it back through the window the guest writes, so what the dump
+       holds is what the display device actually answers. */
+    for (int i = 0; i < MIND_VRAM_SIZE; i++)
+        fputc(mem_readb_phys(0xB8000 + i), f);
+
     fclose(f);
-    pclog("[MIND] vram dumped to %s\n", path);
+    pclog("[MIND] vram dumped to %s (%p)\n", path, vram);
 }
 
 static void
@@ -996,6 +1001,13 @@ mind_dump_boot(const char *tag)
     pclog("[MIND] boot sector dumped to %s\n", path);
 }
 
+/* MIND_DUMP_SEC=<n>: write display RAM once, n seconds in. */
+static void
+mind_dump_timed(void *priv)
+{
+    mind_dump_vram("sec");
+}
+
 static void
 mind_fdc_raise(void *priv)
 {
@@ -1227,6 +1239,13 @@ machine_mindset_init(const machine_t *model)
     mindset.fdc_irq   = 0;
     mindset.fdc_sched = 0;
     timer_add(&mindset.fdc_timer, mind_fdc_raise, NULL, 0);
+
+    if (getenv("MIND_DUMP_SEC") != NULL) {
+        uint64_t when = (uint64_t) atoi(getenv("MIND_DUMP_SEC")) * 1000000u;
+
+        timer_add(&mindset.dump_timer, mind_dump_timed, NULL, 0);
+        timer_set_delay_u64(&mindset.dump_timer, when);
+    }
     mindset.fdc_dev = device_add(&fdc_hosted_device);
     mindset.fdc     = (fdc_t *) mindset.fdc_dev;
 
