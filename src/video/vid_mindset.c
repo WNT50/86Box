@@ -364,32 +364,82 @@ mind_render(mindset_vid_t *vid)
     }
 
     if (!(vid->dispctrl & 0x2000)) {
-        /* Native formats: the pixels are packed most-significant-first, one
-           to four bits per pixel, straight out of display RAM. */
-        const uint8_t *base   = vid->vram + ((vid->dispctrl & 0x4000) ? 16000 : 0);
-        int            order  = (vid->dispctrl & 0x0600) >> 9;
-        int            bpp    = (order == 2) ? 1 : ((order == 1) ? 2 : 4);
-        int            width  = (vid->dispctrl & 0x0100) ? 320 : 640;
-        int            lines  = (vid->dispctrl & 0x0800) ? 400 : 200;
-        uint32_t       stride = (uint32_t) (width * bpp) / 8;
-        int            mask   = (1 << bpp) - 1;
-        int            repeat = (lines == 200) ? 2 : 1;
+        /* Native formats: display RAM is read as a stream of 16-bit words with
+           their halves swapped, most significant pixel first.  The control
+           word picks the pixel depth, whether a source pixel covers two on
+           screen, and whether one word covers two scan lines or the frame is
+           stored line by line. */
+        const uint8_t *src      = vid->vram + ((vid->dispctrl & 0x4000) ? 16000 : 0);
+        bool           large    = (vid->dispctrl & 0x0100) != 0;
+        bool           inter    = (vid->dispctrl & 0x0800) != 0;
+        int            order    = (vid->dispctrl & 0x0600) >> 9;
+        int            bpp;
+        int            width;
+        int            lines;
+        int            per_word;
+        int            doubled;
+
+        if (large) {
+            bpp    = (order == 2) ? 1 : ((order == 1) ? 2 : 4);
+            width  = 320;
+            doubled = 1;
+        } else {
+            bpp    = (order == 0) ? 2 : 1;
+            width  = 640;
+            doubled = 0;
+        }
+
+        per_word = 16 / bpp;
+        lines    = inter ? 400 : 200;
 
         for (int row = 0; row < lines; row++) {
-            const uint8_t *src = base + ((uint32_t) row * stride);
+            const uint8_t *word = src;
+            uint32_t      *p0   = buffer32->line[inter ? (row + dy) : ((2 * row) + dy)];
+            uint32_t      *p1   = buffer32->line[inter ? (row + dy) : ((2 * row) + 1 + dy)];
 
-            for (int line = 0; line < repeat; line++) {
-                int       y = (row * repeat) + line + dy;
-                uint32_t *p = buffer32->line[y];
+            for (int x = 0; x < width; x += per_word) {
+                uint16_t sv = sw16((uint16_t) (word[0] | (word[1] << 8)));
 
-                for (int x = 0; x < width; x++) {
-                    int bit  = x * bpp;
-                    int byte = src[bit >> 3];
-                    int val  = (byte >> (8 - bpp - (bit & 7))) & mask;
+                word += 2;
 
-                    p[x + dx] = vid->palette[val];
+                for (int i = 0; i < per_word; i++) {
+                    int      index;
+                    uint32_t colour;
+                    int      at;
+
+                    if (bpp == 4)
+                        index = (sv >> (12 - (4 * i))) & 15;
+                    else if (bpp == 2) {
+                        static const int pal_half[4] = { 0, 1, 4, 5 };
+                        static const int pal_line[4] = { 0, 4, 8, 12 };
+
+                        index = large ? pal_half[(sv >> (14 - (2 * i))) & 3]
+                                      : pal_line[(sv >> (14 - (2 * i))) & 3];
+                    } else {
+                        static const int pal_one[2] = { 0, 4 };
+
+                        index = ((order == 2) && large) ? ((sv >> (15 - i)) & 1)
+                                                        : pal_one[(sv >> (15 - i)) & 1];
+                    }
+
+                    colour = vid->palette[index];
+                    at     = x + (doubled ? (2 * i) : i) + dx;
+
+                    p0[at] = colour;
+
+                    if (doubled)
+                        p0[at + 1] = colour;
+
+                    if (!inter) {
+                        p1[at] = colour;
+
+                        if (doubled)
+                            p1[at + 1] = colour;
+                    }
                 }
             }
+
+            src = word;
         }
 
         return;
