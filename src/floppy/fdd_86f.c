@@ -198,6 +198,7 @@ typedef struct d86f_t {
     uint32_t         datac;
     uint32_t         dma_over;
     uint32_t         index_hole_pos[2];
+    uint32_t         raw_override[2];   /* cells the image says a track holds, 0 = none */
     uint32_t         track_offset[512];
     fdd_sector_id_t  last_sector;
     fdd_sector_id_t  req_sector;
@@ -208,6 +209,11 @@ typedef struct d86f_t {
     sector_t *       last_side_sector[2];
     uint16_t         crc_table[256];
 } d86f_t;
+
+/* Set while d86f_export() writes a track.  Bit 7 says a per-track cell count
+   follows, bit 12 says that count is the whole track rather than a correction;
+   together they make the exported length independent of the rate bits. */
+static uint16_t d86f_export_disk_flags = 0;
 
 static const uint8_t encoded_fm[64] = {
     0xaa, 0xab, 0xae, 0xaf, 0xba, 0xbb, 0xbe, 0xbf,
@@ -461,6 +467,7 @@ uint32_t
 common_get_raw_size(void *priv, int const side)
 {
     fdd_drive_t *  drv      = (fdd_drive_t *) priv;
+    const d86f_t * dev      = (d86f_t *) drv->d86f_priv;
     double         rate     = 0.0;
     double         size     = 100000.0;
     uint32_t       extra_bc = 0;
@@ -470,6 +477,12 @@ common_get_raw_size(void *priv, int const side)
     double         rpm_diff = 1.0;
     const int      rm       = d86f_get_rpm_mode(drv);
     const int      ssd      = d86f_get_speed_shift_dir(drv);
+
+    /* An image file that stores its own cells wins over the rate table: the
+       tables describe the drive, and a sector image converted to flux can
+       carry a rate code that halves or doubles the real length. */
+    if ((dev != NULL) && (dev->raw_override[side] != 0))
+        return dev->raw_override[side];
 
     /* 0% speed shift and shift direction 1: special case where extra bit cells are the entire track size. */
     if (!rm && ssd)
@@ -1568,7 +1581,17 @@ d86f_read_sector_id(void *priv, const int side, const int match)
                     dev->id_find.sync_marks = dev->id_find.bits_obtained =
                     dev->id_find.bytes_obtained = 0;
                     dev->id_found |= 1;
-                    if ((dev->last_sector.dword == dev->req_sector.dword) || !match) {
+                    /* The datasheet lists what has to match: track number,
+                       sector number, side number and a good CRC -- the sector
+                       length byte is not among them, and the length that is
+                       transferred comes from the ID field.  Comparing the whole
+                       dword made every sector of a track formatted with a
+                       different sector size report "record not found" (SINIX
+                       track 1 holds 256-byte sectors, the driver asked for
+                       512). */
+                    if (((dev->last_sector.id.c == dev->req_sector.id.c) &&
+                         (dev->last_sector.id.h == dev->req_sector.id.h) &&
+                         (dev->last_sector.id.r == dev->req_sector.id.r)) || !match) {
                         drv->d86f_handler.set_sector(drv, side,
                                                      dev->last_sector.id.c,
                                                      dev->last_sector.id.h,
@@ -3196,6 +3219,9 @@ d86f_read_track(void *priv, const int track, const int thin_track, const int sid
             fseek(dev->fp, (off_t) dev->track_offset[logical_track] +
                                          d86f_track_header_size(drv), SEEK_SET);
         const int array_size = d86f_get_array_size(drv, side, 0);
+        /* 4x oversampled cells: the stored byte count is the authority on how
+           long the track really is, whatever the rate field claims. */
+        dev->raw_override[side] = (uint32_t) array_size * 2;
         (void) !fread(da, 1, array_size, dev->fp);
         if (d86f_has_surface_desc(drv))
             (void) !fread(sa, 1, array_size, dev->fp);
@@ -3284,9 +3310,26 @@ d86f_write_track(void *priv, FILE **fp, const int side, uint16_t *da0, uint16_t 
 {
     fdd_drive_t *  drv             = (fdd_drive_t *) priv;
     const uint32_t array_size      = d86f_get_array_size(drv, side, 0);
-    const uint16_t side_flags      = drv->d86f_handler.side_flags(drv);
-    const uint32_t extra_bit_cells = drv->d86f_handler.extra_bit_cells(drv, side);
-    const uint32_t index_hole_pos  = drv->d86f_handler.index_hole_pos(drv, side);
+    uint16_t       side_flags      = drv->d86f_handler.side_flags(drv);
+    uint32_t       extra_bit_cells = drv->d86f_handler.extra_bit_cells(drv, side);
+
+    /* A sector image carries neither a track length nor honest side flags:
+       its handler reports zeros and defaults.  The reader compares the image's
+       bit cell clock against the controller's before it searches, so both
+       have to agree, and the length has to be the track the controller is
+       turning: 250 kbit at 300 rpm is 50000 cells. */
+    if (d86f_export_disk_flags != 0) {
+        static const uint16_t kbps[8] = { 500, 300, 250, 1000, 250, 2000, 250, 250 };
+        const fdc_t *fdc  = (const fdc_t *) drv->fdc;
+        uint16_t     code = (fdc != NULL) ? (uint16_t) (fdc->rate & 7) : 2;
+
+        side_flags      = (uint16_t) ((side_flags & 0x18) | code);
+        extra_bit_cells = (uint32_t) kbps[code] * 200;    /* 60/300 of a second */
+    }
+    /* The index hole marks where a revolution starts.  A synthesized track
+       begins with the pre-track gap, so the hole sits at its end, not at
+       byte zero. */
+    uint32_t index_hole_pos = drv->d86f_handler.index_hole_pos(drv, side);
 
     fwrite(&side_flags, 1, 2, *fp);
 
@@ -3753,7 +3796,8 @@ d86f_export(void *priv, char *fn)
     const int      tracks     = 86;
     const uint32_t magic      = 0x46423638;
     const uint16_t version    = 0x020C;
-    const uint16_t disk_flags = drv->d86f_handler.disk_flags(drv);
+    d86f_export_disk_flags = drv->d86f_handler.disk_flags(drv) | 0x1080;
+    const uint16_t disk_flags = d86f_export_disk_flags;
     int            inc        = 1;
     uint32_t       tt[512];
     FILE *         fp;
@@ -3780,11 +3824,14 @@ d86f_export(void *priv, char *fn)
         inc = 2;
 
     for (int i = 0; i < tracks; i += inc) {
-        if (inc == 2)
-            fdd_do_seek(drv, i >> 1);
-        else
-            fdd_do_seek(drv, i);
-        dev->cur_track = i;
+        const int cyl = (inc == 2) ? (i >> 1) : i;
+
+        fdd_do_seek(drv, cyl);
+        /* The head sits on the cylinder, so that is the track the handler
+           must report its flags and its sector table for.  Setting this to
+           the logical track number instead made every pass after the first
+           one describe a track that the drive was not sitting on. */
+        dev->cur_track = cyl;
         d86f_write_tracks(drv, &fp, tt);
     }
 
@@ -3802,6 +3849,8 @@ d86f_export(void *priv, char *fn)
     /* Restore the drive from temp. */
     memcpy(dev, temp86, sizeof(d86f_t));
     free(temp86);
+
+    d86f_export_disk_flags = 0;
 
     return 1;
 }
