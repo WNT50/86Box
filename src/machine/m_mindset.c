@@ -89,9 +89,8 @@ typedef struct {
    side keeps a ring buffer and a terminal count the BIOS programs at 8058h. */
 #define MIND_FIFO_SIZE 0x8000
 
-/* The board ships with two 5.25" double density drives; fdd.c knows this type
-   as "525_2dd". */
-#define MIND_FDD_525_2DD 43
+/* The controller is the slave end of the 80186's second DMA channel. */
+#define MIND_FDC_DMA_CH 1
 
 typedef struct {
     uint8_t  buf[MIND_FIFO_SIZE];
@@ -831,35 +830,20 @@ mind_fifo_pop(void)
     return val;
 }
 
-/* The controller wants a byte to write to the disk. */
+/* The BIOS programs one of the 80186's own DMA channels with 8054h as the I/O
+   port, so the controller is the slave end of that channel: bytes it reads from
+   the disk are deposited in memory, bytes it writes are fetched from memory. */
+
 static int
 mind_fdc_dma_read(void *priv)
 {
-    int val;
-
-    if (mindset.fifo.left == 0)
-        return DMA_OVER;
-
-    val = mind_fifo_pop();
-    if (val < 0)
-        return DMA_NODATA;
-
-    mindset.fifo.left--;
-
-    return val;
+    return dma_channel_read(MIND_FDC_DMA_CH);
 }
 
-/* The controller hands over a byte it just read from the disk. */
 static int
 mind_fdc_dma_write(void *priv, uint8_t val)
 {
-    if (mindset.fifo.left == 0)
-        return DMA_OVER;
-
-    mind_fifo_push(val);
-    mindset.fifo.left--;
-
-    return 0;
+    return dma_channel_write(MIND_FDC_DMA_CH, val);
 }
 
 static void
@@ -1079,7 +1063,7 @@ machine_mindset_init(const machine_t *model)
        the chip selects are stored but not decoded (intel_8018x.c:13). */
     mind_pcb = device_add(&i8018x_pcb_device);
     if (mind_pcb != NULL) {
-        i8018x_pcb_set_dma_channels(mind_pcb, -1, -1);
+        i8018x_pcb_set_dma_channels(mind_pcb, -1, MIND_FDC_DMA_CH);
         mindset_video_set_irq(mind_display_irq, NULL);
     }
 
@@ -1096,8 +1080,18 @@ machine_mindset_init(const machine_t *model)
     mindset.fdc_dev = device_add(&fdc_hosted_device);
     mindset.fdc     = (fdc_t *) mindset.fdc_dev;
 
-    if (mindset.fdc != NULL)
+    if (mindset.fdc != NULL) {
+        /* The board runs its drives at 250 kbit/s, double density; the hosted
+           controller defaults to high density and then cannot find a sector. */
+        mindset.fdc->rate = 2;
         fdc_set_host(mindset.fdc, &mind_fdc_host, &mindset);
+
+        if (mindset.log)
+            pclog("[MIND] fdc: drives %d/%d, types %d/%d, image '%s'\n",
+                  (mindset.fdc->fdd[0] != NULL), (mindset.fdc->fdd[1] != NULL),
+                  fdd_get_type(&drives[0]), fdd_get_type(&drives[1]),
+                  drives[0].image_path);
+    }
 
     io_sethandler(0x8050, 0x0001,
                   NULL, NULL, NULL,
