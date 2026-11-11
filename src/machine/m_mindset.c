@@ -900,6 +900,11 @@ mind_sys_data_read(UNUSED(uint16_t port), UNUSED(void *priv))
         }
     } else {
         ret = mindset.sys.regs[mindset.sys.idx];
+
+        /* The completion bit is a latch the BIOS expects to find set once per
+           controller interrupt, so reading it clears it. */
+        if (mindset.sys.idx == 0x02)
+            mindset.sys.regs[0x02] &= (uint8_t) ~0x01;
     }
 
     mind_trace("r", 0x8280, ret, 1);
@@ -1200,6 +1205,15 @@ mind_fdc_drq(void *priv, int set)
         pclog("[MIND] fdc drq %d\n", set);
 }
 
+/* The BIOS's floppy interrupt handler asks the system MCU about register 2 and
+   reads bit 0 as "the controller finished"; without it every interrupt is
+   taken for a failure and the boot gives up. */
+static void
+mind_fdc_completion(void)
+{
+    mindset.sys.regs[0x02] |= 0x01;
+}
+
 static void
 mind_fdc_irq(void *priv, int set)
 {
@@ -1213,6 +1227,7 @@ mind_fdc_irq(void *priv, int set)
        the BIOS clear the controller and still see the interrupt afterwards. */
     if (set) {
         mindset.fdc_sched = 1;
+        mind_fdc_completion();
         timer_set_delay_u64(&mindset.fdc_timer, 200 * TIMER_USEC);
     }
 }
