@@ -1066,41 +1066,36 @@ static const struct {
     uint64_t delay_us;
     uint8_t  code;
 } mind_key_script[] = {
-    { 3000000, 0x39 },  /* space: leave the diagnostics screen   */
+    /* Diagnostics screen: any key. */
+    { 3000000, 0x39 },
     {  300000, 0xb9 },
-    { 6000000, 0x38 },  /* the configuration screen is up by now:
-                           Alt down ...                            */
-    {   80000, 0x57 },  /* ... Reset, which saves and leaves it   */
+    /* Configuration screen: Alt + Reset saves and leaves it. */
+    { 6000000, 0x38 },
+    {   80000, 0x57 },
     {  300000, 0xd7 },
     {  200000, 0xb8 },
-    { 5000000, 0x39 },  /* answer the POST that follows           */
+    /* The POST that follows asks for a key once. */
+    { 5000000, 0x39 },
     {  300000, 0xb9 },
-    {14000000, 0x02 },  /* DOS asks for the date: type 11-11-85   */
-    {  60000, 0x82 },
-    {  60000, 0x02 },
-    {  60000, 0x82 },
-    {  60000, 0x0c },
-    {  60000, 0x8c },
-    {  60000, 0x02 },
-    {  60000, 0x82 },
-    {  60000, 0x02 },
-    {  60000, 0x82 },
-    {  60000, 0x0c },
-    {  60000, 0x8c },
-    {  60000, 0x09 },
-    {  60000, 0x89 },
-    {  60000, 0x06 },
-    {  60000, 0x86 },
-    {  300000, 0x1c },  /* Return                                 */
-    {  300000, 0x9c },
-    { 4000000, 0x1c },  /* the time prompt: accept it             */
-    {  300000, 0x9c },
-    { 8000000, 0x1c },  /* ... and the time                       */
-    {  300000, 0x9c },
-    { 8000000, 0x0d },  /* the command prompt itself waits too    */
-    {  300000, 0x8d },
-    { 8000000, 0x1c },
-    {  300000, 0x9c },
+    /* DOS asks for the date and then the time.  The date is typed slowly, one
+       key at a time, because the BIOS hands the characters to DOS through a
+       small buffer; anything faster and a character lands after the Return. */
+    {16000000, 0x02 },  /* 1 */
+    { 250000, 0x82 },
+    { 250000, 0x35 },  /* / */
+    { 250000, 0xb5 },
+    { 250000, 0x02 },  /* 1 */
+    { 250000, 0x82 },
+    { 250000, 0x35 },  /* / */
+    { 250000, 0xb5 },
+    { 250000, 0x09 },  /* 8 */
+    { 250000, 0x89 },
+    { 250000, 0x06 },  /* 5 */
+    { 250000, 0x86 },
+    { 800000, 0x1c },  /* Return */
+    { 300000, 0x9c },
+    { 8000000, 0x1c },  /* the time prompt takes the default */
+    { 300000, 0x9c },
 };
 
 static int        mind_key_pos;
