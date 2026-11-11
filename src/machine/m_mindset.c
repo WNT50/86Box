@@ -121,7 +121,8 @@ typedef struct {
     mind_keyboard_t kbd;
     void          *fdc_dev;      /* hosted floppy controller */
     fdc_t         *fdc;
-    mind_fdc_fifo_t fifo;
+    mind_fdc_fifo_t cmdfifo;   /* command and result bytes, 8062h */
+    mind_fdc_fifo_t datafifo;  /* sector bytes for the DMA, 8054h */
     int            fdc_irq;      /* asserted, waiting for the BIOS to ack */
     int            fdc_sched;    /* the controller is still finishing up */
     pc_timer_t     fdc_timer;
@@ -1115,35 +1116,35 @@ mind_key_test(void *priv)
    byte count at 8058h and acknowledges the interrupt by reading 805Ch. */
 
 static void
-mind_fifo_reset(void)
+mind_fifo_reset(mind_fdc_fifo_t *q)
 {
-    mindset.fifo.head  = 0;
-    mindset.fifo.tail  = 0;
-    mindset.fifo.count = 0;
+    q->head  = 0;
+    q->tail  = 0;
+    q->count = 0;
 }
 
 static void
-mind_fifo_push(uint8_t val)
+mind_fifo_push(mind_fdc_fifo_t *q, uint8_t val)
 {
-    if (mindset.fifo.count >= MIND_FIFO_SIZE)
+    if (q->count >= MIND_FIFO_SIZE)
         return;
 
-    mindset.fifo.buf[mindset.fifo.tail] = val;
-    mindset.fifo.tail = (mindset.fifo.tail + 1) % MIND_FIFO_SIZE;
-    mindset.fifo.count++;
+    q->buf[q->tail] = val;
+    q->tail = (q->tail + 1) % MIND_FIFO_SIZE;
+    q->count++;
 }
 
 static int
-mind_fifo_pop(void)
+mind_fifo_pop(mind_fdc_fifo_t *q)
 {
     int val;
 
-    if (mindset.fifo.count == 0)
+    if (q->count == 0)
         return -1;
 
-    val = mindset.fifo.buf[mindset.fifo.head];
-    mindset.fifo.head = (mindset.fifo.head + 1) % MIND_FIFO_SIZE;
-    mindset.fifo.count--;
+    val = q->buf[q->head];
+    q->head = (q->head + 1) % MIND_FIFO_SIZE;
+    q->count--;
 
     return val;
 }
@@ -1157,10 +1158,10 @@ mind_fdc_transfer(void)
     dma_set_drq(MIND_FDC_DMA_CH, 1);
     dma_set_drq(MIND_FDC_DMA_CH, 0);
 
-    if (mindset.fifo.left != 0)
-        mindset.fifo.left--;
+    if (mindset.datafifo.left != 0)
+        mindset.datafifo.left--;
 
-    return (mindset.fifo.left == 0) ? DMA_OVER : 0;
+    return (mindset.datafifo.left == 0) ? DMA_OVER : 0;
 }
 
 static int
@@ -1170,7 +1171,9 @@ mind_fdc_dma_read(void *priv)
 
     mind_fdc_transfer();
 
-    val = mind_fifo_pop();
+    /* Only sector bytes travel through the queue: the BIOS hands the command
+       bytes over the command register, which reaches the controller directly. */
+    val = mind_fifo_pop(&mindset.datafifo);
 
     return (val < 0) ? DMA_NODATA : val;
 }
@@ -1178,7 +1181,7 @@ mind_fdc_dma_read(void *priv)
 static int
 mind_fdc_dma_write(void *priv, uint8_t val)
 {
-    mind_fifo_push(val);
+    mind_fifo_push(&mindset.datafifo, val);
 
     return mind_fdc_transfer();
 }
@@ -1336,6 +1339,9 @@ mind_fdc_data_read(uint16_t port, void *priv)
 {
     uint8_t ret = fdc_read(0x03f5, mindset.fdc);
 
+    if (mindset.log)
+        pclog("[MIND] F R %02X\n", ret);
+
     mind_trace("r", port, ret, 1);
 
     return ret;
@@ -1346,15 +1352,18 @@ mind_fdc_data_write(uint16_t port, uint8_t val, void *priv)
 {
     mind_trace("w", port, val, 1);
 
+    if (mindset.log)
+        pclog("[MIND] F W %02X\n", val);
+
     fdc_write(0x03f5, val, mindset.fdc);
 }
 
 static uint8_t
 mind_fdc_dma_read_port(uint16_t port, void *priv)
 {
-    int val = mind_fifo_pop();
+    int val = mind_fifo_pop(&mindset.datafifo);
 
-    if ((val < 0) && (mindset.fifo.left != 0))
+    if ((val < 0) && (mindset.datafifo.left != 0))
         val = 0xff;
 
     mind_trace("r", port, (val < 0) ? 0xff : val, 1);
@@ -1367,7 +1376,7 @@ mind_fdc_dma_write_port(uint16_t port, uint8_t val, void *priv)
 {
     mind_trace("w", port, val, 1);
 
-    mind_fifo_push(val);
+    mind_fifo_push(&mindset.datafifo, val);
 }
 
 static void
@@ -1375,7 +1384,7 @@ mind_fdc_count_write(uint16_t port, uint16_t val, void *priv)
 {
     mind_trace("w", port, val, 2);
 
-    mindset.fifo.left = val;
+    mindset.datafifo.left = val;
 }
 
 static uint8_t
@@ -1437,6 +1446,26 @@ mind_fast_sample(void *priv)
         }
     }
 
+    /* The boot sector hands over to the second stage at 0060:0000, which the
+       board's DMA read into 0600h; keep that image for comparison. */
+    if (mind_ring_on && (cpu_state.seg_cs.seg == 0x0060)) {
+        static int stage2_dumped = 0;
+
+        if (!stage2_dumped) {
+            FILE *f = fopen("/tmp/mind-stage2.bin", "wb");
+
+            stage2_dumped = 1;
+
+            if (f != NULL) {
+                for (uint32_t a = 0x600; a < 0x1200; a++)
+                    fputc(mem_readb_phys(a), f);
+
+                fclose(f);
+                pclog("[MIND] second stage dumped at 0060:%04X\n", (uint16_t) cpu_state.pc);
+            }
+        }
+    }
+
     /* Once the boot sector is running, the interesting moment is control
        leaving it again: that is where the boot comes apart. */
     if (mind_ring_on && mindset.jump_reported && !mind_boot_reported &&
@@ -1456,6 +1485,18 @@ mind_fast_sample(void *priv)
             int k = (mind_ring_pos + i) % MIND_RING;
 
             pclog("[MIND]   bring[%02d] = %04X:%04X\n", i, mind_ring[k].rseg, mind_ring[k].roff);
+        }
+
+        /* The first FAT sector is read into 8000h; keep it for comparison. */
+        {
+            FILE *f = fopen("/tmp/mind-fat.bin", "wb");
+
+            if (f != NULL) {
+                for (uint32_t a = 0x8000; a < 0x8200; a++)
+                    fputc(mem_readb_phys(a), f);
+
+                fclose(f);
+            }
         }
     }
 
@@ -1655,7 +1696,8 @@ machine_mindset_init(const machine_t *model)
 
     /* The 8272A hangs off the board's own ports, not the PC ones, so it runs as
        a hosted controller: the CPU moves every byte through 8054h. */
-    mind_fifo_reset();
+    mind_fifo_reset(&mindset.cmdfifo);
+    mind_fifo_reset(&mindset.datafifo);
     mindset.fdc_irq   = 0;
     mindset.fdc_sched = 0;
     timer_add(&mindset.fdc_timer, mind_fdc_raise, NULL, 0);
