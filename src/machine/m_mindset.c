@@ -797,24 +797,42 @@ mind_ivt_writew(uint32_t addr, uint16_t val, void *priv)
         mind_dump_ram();
 }
 
-/* The system controller keeps the machine's clock in its own RAM: seconds,
-   minutes, hours, day and month at 22h-26h, and the BIOS reads them back
-   through its registers.  Nothing else drives them, so they tick here. */
+/* The BIOS reads the time of day as three BCD registers - 82h hours, 83h
+   minutes, 84h seconds - and the date as 86h month, 87h day, 88h year. */
+static uint8_t
+mind_bcd(int v)
+{
+    return (uint8_t) (((v / 10) << 4) | (v % 10));
+}
+
+static int
+mind_unbcd(uint8_t v)
+{
+    return ((v >> 4) * 10) + (v & 0x0f);
+}
+
 static void
 mind_rtc_tick(void *priv)
 {
     uint8_t *r = mindset.sys.regs;
+    int sec = mind_unbcd(r[0x84]);
+    int min = mind_unbcd(r[0x83]);
+    int hr  = mind_unbcd(r[0x82]);
 
-    if (++r[0x02] >= 60) {
-        r[0x02] = 0;
+    if (++sec >= 60) {
+        sec = 0;
 
-        if (++r[0x03] >= 60) {
-            r[0x03] = 0;
+        if (++min >= 60) {
+            min = 0;
 
-            if (++r[0x04] >= 24)
-                r[0x04] = 1;
+            if (++hr >= 24)
+                hr = 0;
         }
     }
+
+    r[0x82] = mind_bcd(hr);
+    r[0x83] = mind_bcd(min);
+    r[0x84] = mind_bcd(sec);
 
     timer_set_delay_u64(&mindset.rtc_timer, (uint64_t) TIMER_USEC * 1000000u);
 }
@@ -1066,36 +1084,29 @@ static const struct {
     uint64_t delay_us;
     uint8_t  code;
 } mind_key_script[] = {
-    /* Diagnostics screen: any key. */
-    { 3000000, 0x39 },
+    /* Control keys keep their release codes: the BIOS tracks Alt and Reset by
+       them. */
+    { 3000000, 0x39 },  /* space: leave the diagnostics screen */
     {  300000, 0xb9 },
-    /* Configuration screen: Alt + Reset saves and leaves it. */
-    { 6000000, 0x38 },
-    {   80000, 0x57 },
+    { 6000000, 0x38 },  /* Alt down ... */
+    {   80000, 0x57 },  /* ... Reset, which saves and leaves the config screen */
     {  300000, 0xd7 },
     {  200000, 0xb8 },
-    /* The POST that follows asks for a key once. */
-    { 5000000, 0x39 },
+    { 5000000, 0x39 },  /* answer the POST that follows */
     {  300000, 0xb9 },
-    /* DOS asks for the date and then the time.  The date is typed slowly, one
-       key at a time, because the BIOS hands the characters to DOS through a
-       small buffer; anything faster and a character lands after the Return. */
-    {16000000, 0x02 },  /* 1 */
-    { 250000, 0x82 },
-    { 250000, 0x35 },  /* / */
-    { 250000, 0xb5 },
-    { 250000, 0x02 },  /* 1 */
-    { 250000, 0x82 },
-    { 250000, 0x35 },  /* / */
-    { 250000, 0xb5 },
-    { 250000, 0x09 },  /* 8 */
-    { 250000, 0x89 },
-    { 250000, 0x06 },  /* 5 */
-    { 250000, 0x86 },
-    { 800000, 0x1c },  /* Return */
-    { 300000, 0x9c },
+    /* Typed characters carry NO release code: the keyboard MCU is what strips
+       those, and here the register goes straight to the BIOS, so a release
+       code would be handed to DOS as a character of its own. */
+    {16000000, 0x0b },  /* 0 */
+    { 250000, 0x02 },   /* 1 */
+    { 250000, 0x0c },   /* - */
+    { 250000, 0x0b },   /* 0 */
+    { 250000, 0x02 },   /* 1 */
+    { 250000, 0x0c },   /* - */
+    { 250000, 0x09 },   /* 8 */
+    { 250000, 0x06 },   /* 5 */
+    { 800000, 0x1c },   /* Return */
     { 8000000, 0x1c },  /* the time prompt takes the default */
-    { 300000, 0x9c },
 };
 
 static int        mind_key_pos;
