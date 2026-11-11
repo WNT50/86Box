@@ -60,6 +60,7 @@ extern int fdcinited;
 #define YES_KBD        0x05a0
 #define YES_PALETTE    0x05c0
 #define YES_SYSCtl     0x05e0
+#define YES_STRAP_SMALL 0x01  /* bit 0 of the system control port: 128 KB base memory */
 #define YES_RTC        0x066a
 #define YES_RTCD       0x066e
 #define YES_BOARD      0x0422
@@ -301,7 +302,19 @@ yes_sysctl_write(uint16_t port, uint8_t val, void *priv)
 static uint8_t
 yes_sysctl_read(uint16_t port, void *priv)
 {
-    return yes_log_read("sysctl", port, yes.sysctl);
+    /* Bit 0 reads back as a board strap, not as the latched value.  The POST
+       writes 0x43 here, reads the port back and branches on that bit: set, it
+       takes the 128 KB base-memory path and stores 0x78 (120 KB) at 0x413,
+       which is what makes DOS Plus stop with "Configuration too large for
+       memory"; clear, it goes on to probe the 512 KB expansion.  A 640 KB
+       machine has the strap clear. */
+    uint8_t     r = (uint8_t) (yes.sysctl & ~YES_STRAP_SMALL);
+    const char *e = getenv("YES_STRAP");
+
+    if (e != NULL)
+        r = (uint8_t) ((r & ~YES_STRAP_SMALL) | (strtoul(e, NULL, 16) & YES_STRAP_SMALL));
+
+    return yes_log_read("sysctl", port, r);
 }
 
 static void
