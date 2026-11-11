@@ -72,6 +72,7 @@ const uint8_t command_has_drivesel[32] = {
 };
 
 static void fdc_callback(void *priv);
+static void fdc_dma_drq(fdc_t *fdc, int set);
 static void fdc_rate(fdc_t *fdc, int drive);
 
 /* Interrupt and DMA, through the host of a hosted FDC. */
@@ -89,9 +90,44 @@ fdc_irq(fdc_t *fdc, int set)
     }
 }
 
+/* With FDC_FLAG_PORTDMA the controller leaves each sector byte in its data
+   register and the board's own DMA controller reads it from the port; nothing
+   is pushed anywhere. */
+void
+fdc_port_data_write(fdc_t *fdc, uint8_t val)
+{
+    fdc->dat = val;
+    fdc->port_pending = 1;
+    fdc_dma_drq(fdc, 1);
+}
+
+uint8_t
+fdc_port_data_read(fdc_t *fdc)
+{
+    uint8_t val = fdc->dat;
+
+    fdc->port_pending = 0;
+    fdc_dma_drq(fdc, 0);
+
+    return val;
+}
+
+int
+fdc_port_data_pending(fdc_t *fdc)
+{
+    return fdc->port_pending;
+}
+
 static int
 fdc_dma_read(fdc_t *fdc)
 {
+    if (fdc->flags & FDC_FLAG_PORTDMA) {
+        if (!fdc->port_pending)
+            return DMA_NODATA;
+
+        return fdc_port_data_read(fdc);
+    }
+
     if (fdc->host != NULL)
         return fdc->host->dma_read(fdc->host_priv);
 
@@ -101,6 +137,12 @@ fdc_dma_read(fdc_t *fdc)
 static int
 fdc_dma_write(fdc_t *fdc, uint8_t val)
 {
+    if (fdc->flags & FDC_FLAG_PORTDMA) {
+        fdc_port_data_write(fdc, val);
+
+        return 0;
+    }
+
     if (fdc->host != NULL)
         return fdc->host->dma_write(fdc->host_priv, val);
 

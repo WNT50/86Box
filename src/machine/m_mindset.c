@@ -134,6 +134,7 @@ typedef struct {
     pc_timer_t     rtc_timer;
     pc_timer_t     tick_timer;
     int            tick_pending;
+    int            fdc_portdma;
     mcs48         *mcu;
     int            mcu_fw;
     pc_timer_t     mcu_fw_timer;
@@ -1351,8 +1352,12 @@ mind_fdc_dma_write(void *priv, uint8_t val)
 static void
 mind_fdc_drq(void *priv, int set)
 {
-    /* The transfer itself is driven from the data callbacks above, which run
-       after the request goes up; the line is only interesting in the log. */
+    /* In port mode the controller parks a byte and asks for a transfer; the
+       board's channel 1 then reads it from 8054h, which is what makes the
+       transfer happen without any pushing from us. */
+    if (mindset.fdc_portdma && set && (mind_pcb != NULL))
+        i8018x_pcb_dma_request(mind_pcb, 1);
+
     if (mindset.log)
         pclog("[MIND] fdc drq %d\n", set);
 }
@@ -1533,7 +1538,12 @@ mind_fdc_data_write(uint16_t port, uint8_t val, void *priv)
 static uint8_t
 mind_fdc_dma_read_port(uint16_t port, void *priv)
 {
-    int val = mind_fifo_pop(&mindset.datafifo);
+    int val;
+
+    if (mindset.fdc_portdma)
+        val = fdc_port_data_read(mindset.fdc);
+    else
+        val = mind_fifo_pop(&mindset.datafifo);
 
     if ((val < 0) && (mindset.datafifo.left != 0))
         val = 0xff;
@@ -1548,7 +1558,10 @@ mind_fdc_dma_write_port(uint16_t port, uint8_t val, void *priv)
 {
     mind_trace("w", port, val, 1);
 
-    mind_fifo_push(&mindset.datafifo, val);
+    if (mindset.fdc_portdma)
+        fdc_port_data_write(mindset.fdc, val);
+    else
+        mind_fifo_push(&mindset.datafifo, val);
 }
 
 static void
@@ -2004,6 +2017,14 @@ machine_mindset_init(const machine_t *model)
         /* The board runs its drives at 250 kbit/s, double density; the hosted
            controller defaults to high density and then cannot find a sector. */
         mindset.fdc->rate = 2;
+
+    /* MIND_FDC=port: let the controller own the data register and the board's
+       DMA read the byte from 8054h, the way the hardware does it. */
+    if ((getenv("MIND_FDC") != NULL) && (strcmp(getenv("MIND_FDC"), "port") == 0)) {
+        mindset.fdc->flags |= FDC_FLAG_PORTDMA;
+        mindset.fdc_portdma = 1;
+        pclog("[MIND] floppy: data register in port mode\n");
+    }
         fdc_set_host(mindset.fdc, &mind_fdc_host, &mindset);
 
         if (mindset.log)

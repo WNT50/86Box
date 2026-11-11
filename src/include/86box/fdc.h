@@ -67,6 +67,10 @@
 #define FDC_FLAG_TANDY2K             0x4000000  /* Tandy 2000, no DOR latch on board */
 #define FDC_FLAG_COMPAQ              0x8000000  /* Compaq 386, drive type sense at 3F1 */
 #define FDC_FLAG_IGNORE_DENSEL_FORCE 0x10000000 /* FDC ignores DENSEL on HD media */
+#define FDC_FLAG_PORTDMA             0x10000000 /* Sector bytes wait in the data
+                                                   register for the host to read
+                                                   them instead of being pushed
+                                                   into a DMA channel. */
 #define FDC_FLAG_HOSTED              0x40000000 /* Behind another device: no I/O ports,
                                                    DMA and interrupt through its host */
 #define FDC_FLAG_PNP                 0x80000000 /* FDC is PnP */
@@ -103,6 +107,7 @@ typedef struct fdc_t {
     uint8_t command;
     uint8_t processed_cmd;
     uint8_t dat;
+    int      port_pending;
     uint8_t st0;
     uint8_t swap;
     uint8_t dtl;
@@ -317,6 +322,11 @@ extern const device_t fdc_ibm5140_device;
 extern const device_t fdc_tandy2k_device;
 extern const device_t fdc_at_device;
 extern const device_t fdc_hosted_device;
+
+/* Host side of the data register when FDC_FLAG_PORTDMA is set. */
+extern void    fdc_port_data_write(fdc_t *fdc, uint8_t val);
+extern uint8_t fdc_port_data_read(fdc_t *fdc);
+extern int     fdc_port_data_pending(fdc_t *fdc);
 extern const device_t fdc_at_sec_device;
 extern const device_t fdc_at_ter_device;
 extern const device_t fdc_at_qua_device;
