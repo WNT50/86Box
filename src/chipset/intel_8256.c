@@ -224,17 +224,6 @@ intel_8256_tick(void *priv)
        round. */
     hz = (dev->regs[MUART_CMD1] & MUART_C1_FRQ) ? 16000 : 1000;
 
-
-    if (getenv("YES_MUARTLOG") != NULL) {
-        static long n;
-
-        n++;
-        if ((n % 1000) == 0)
-            pclog("[MUART] ticks=%ld hz=%d tmr3=%d/%d run=%d inten=%02X pend=%02X\n",
-                  n, hz, dev->timer_val[2], dev->timer_load[2],
-                  dev->timer_run[2], dev->regs[MUART_INTEN], dev->pending);
-    }
-
     /* MODE bits 3/4 turn timer 2 or 3 into an event counter on Port 1 bit 2/3
        (data sheet, CT2/CT3): such a timer never counts the internal clock, it
        only decrements on an external edge, which this board does not drive. */
@@ -323,11 +312,6 @@ intel_8256_read(uint16_t port, void *priv)
         case MUART_PORT1:
         case MUART_PORT2:
             ret = dev->regs[idx];
-            if (getenv("YES_MUARTLOG") != NULL) {
-                static int n;
-                if (n++ < 40)
-                    pclog("[MUARTR] port=%04X -> %02X\n", 0x400 + idx, ret);
-            }
             break;
 
         case MUART_BUF:
@@ -367,8 +351,6 @@ intel_8256_write(uint16_t port, uint8_t val, void *priv)
 
     switch (idx) {
         case MUART_CMD1:
-            if (getenv("YES_MUARTLOG") != NULL)
-                pclog("[MUART] CMD1=%02X (FRQ=%d)\n", val, val & 1);
             dev->regs[idx] = val;
             if (val & MUART_C1_FRQ) {
                 timer_set_delay_u64(&dev->timer, TIMER_USEC * 1000);

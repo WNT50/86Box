@@ -20,7 +20,6 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
 #define HAVE_STDARG_H
@@ -725,16 +724,6 @@ static void i8080_port_out(UNUSED(void* priv), uint8_t port, uint8_t val)
 void
 reset_808x(int hard)
 {
-    /* YES_TRACE=1: a machine that resets in a loop re-enters POST and dies in
-       the same place every time; the previous CS:IP says where from. */
-    if (getenv("YES_TRACE") != NULL) {
-        static long n;
-
-        n++;
-        pclog("[YRESET] #%ld hard=%d prev=%04X:%04X\n", n, hard,
-              cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
-    }
-
     i808x_hook_prefetch_queue(pfq_set_pos, pfq_set_ip, pfq_set_prefetching,
                               pfq_get_pos, pfq_get_ip, pfq_get_prefetching,
                               pfq_get_size, i808x_wait);
@@ -1372,10 +1361,6 @@ check_interrupts(int nec_hlt)
                 temp = pic_irq_ack_instance(pic.int_pending ? &pic : &pic2);
             else /* ACK to PIC */
                 temp = pic_irq_ack();
-
-            if (getenv("YES_ACKLOG") != NULL)
-                pclog("[CPU] icu=%d cascade=%d ext=%d vec=%02X\n", icu, cascade,
-                      x86_external_interrupt_pending(), temp);
             wait_cycs(4, 1);
             wait_cycs(1, 0);
             /* ACK to PIC */
@@ -3550,209 +3535,6 @@ execx86(int cycs)
             cpu_state.temp_CS = CS;
             cpu_state.temp_cs = cs;
             cpu_state.temp_pc = cpu_state.pc;
-
-            /* YES_TRACE=1: keep the last 64 instruction addresses.  The :YES
-               ROM dispatches its BIOS routines through tables built in RAM,
-               and at some point the CPU ends up executing the data bytes that
-               follow the iret stub at FC80:029E.  The ring says how it got
-               there. */
-            {
-                static int      yt = -1;
-                static uint32_t ring[64];
-                static unsigned rn;
-
-                if (yt < 0)
-                    yt = (getenv("YES_TRACE") != NULL);
-
-                if (yt) {
-                    uint32_t lin = ((uint32_t) cpu_state.seg_cs.seg << 4) +
-                                   (uint16_t) cpu_state.pc;
-
-                    /* Who sets the handler's saved stack slot, and who finds it
-                       wrong: entry points of the two handlers and the shared
-                       epilogue. */
-                    /* How deep the interrupt stack goes: the BIOS data area
-                       variables start at 0x2e, so anything below that is the
-                       handler treading on its own saved state. */
-                    if (cpu_state.seg_ss.seg == 0x1f88) {
-                        static uint16_t min_sp = 0xffff;
-
-                        if (cpu_state.regs[4].w < min_sp) {
-                            min_sp = cpu_state.regs[4].w;
-                            if (min_sp <= 0x40)
-                                pclog("[YSP] min SP=%04X @%04X:%04X\n", min_sp,
-                                      cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
-                        }
-                    }
-
-                    /* Follow the boot sector: the ROM jumps to 7C00 after
-                       INT 19h if the floppy's OEM tag starts with ":YES". */
-                    {
-                        static int boot_n = -1;
-
-                        if (lin == 0x00007c00u)
-                            boot_n = 0;
-                        if ((boot_n >= 0) && (boot_n < 24)) {
-                            pclog("[BOOT] %05X %04X:%04X ax=%04X bx=%04X cx=%04X dx=%04X ds=%04X es=%04X\n",
-                                  lin, cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc,
-                                  cpu_state.regs[0].w, cpu_state.regs[3].w,
-                                  cpu_state.regs[1].w, cpu_state.regs[2].w,
-                                  cpu_state.seg_ds.seg, cpu_state.seg_es.seg);
-                            boot_n++;
-                        }
-                    }
-
-                    /* The BIOS read routine itself: what it is about to move. */
-                    if (lin == 0x000fcc07u) {
-                        static int rn;
-
-                        if (rn < 20) {
-                            pclog("[RD] es:bx=%04X:%04X cx=%04X dx=%04X ah=%02X al=%02X\n",
-                                  cpu_state.seg_es.seg, cpu_state.regs[3].w,
-                                  cpu_state.regs[1].w, cpu_state.regs[2].w,
-                                  (uint8_t) (cpu_state.regs[0].w >> 8),
-                                  (uint8_t) cpu_state.regs[0].w);
-                            rn++;
-                        }
-                    }
-
-                    if (lin == 0x000fd3b5u) {
-                        uint32_t a = ((uint32_t) cpu_state.seg_ds.seg << 4);
-                        static int bn;
-                        if (bn < 6) {
-                            pclog("[SASICHK] ds=%04X [ds:0]=%02X [ds:1]=%02X [ds:2]=%02X\n",
-                                  cpu_state.seg_ds.seg, ram[a & 0xfffff],
-                                  ram[(a + 1) & 0xfffff], ram[(a + 2) & 0xfffff]);
-                            bn++;
-                        }
-                    }
-
-                    if ((lin == 0x000fd3f0u) || (lin == 0x000fd411u)) {
-                        static int sn;
-                        if (sn < 10) {
-                            pclog("[SASI] @%05X dx=%04X cs:ip=%04X:%04X\n", lin,
-                                  cpu_state.regs[2].w, cpu_state.seg_cs.seg,
-                                  (uint16_t) cpu_state.pc);
-                            sn++;
-                        }
-                    }
-
-                    if (lin == 0x000fce5du) {
-                        uint32_t a = ((uint32_t) cpu_state.seg_ds.seg << 4);
-                        static int cn;
-                        if (cn < 10) {
-                            pclog("[TRK] al=%02X e5=%02X c(before)=%02X ds=%04X\n",
-                                  (uint8_t) cpu_state.regs[0].w,
-                                  ram[(a + 0xe5) & 0xfffff],
-                                  ram[(a + 0x0c) & 0xfffff], cpu_state.seg_ds.seg);
-                            cn++;
-                        }
-                    }
-
-                    /* Where the disk error code comes from. */
-                    if ((lin == 0x000fcfd7u) || (lin == 0x000fd428u) ||
-                        (lin == 0x000fcbc1u)) {
-                        pclog("[E6W] @%05X al=%02X ah=%02X cs:ip=%04X:%04X\n", lin,
-                              (uint8_t) cpu_state.regs[0].w,
-                              (uint8_t) (cpu_state.regs[0].w >> 8),
-                              cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
-                    }
-
-                    /* Disk service: what the boot asks for. */
-                    if (lin == 0x000fcb7bu) {
-                        static int dn;
-
-                        if (dn < 16) {
-                            pclog("[INT13] ah=%02X al=%02X ch=%02X cl=%02X dh=%02X dl=%02X\n",
-                                  (uint8_t) (cpu_state.regs[0].w >> 8),
-                                  (uint8_t) cpu_state.regs[0].w,
-                                  (uint8_t) (cpu_state.regs[1].w >> 8),
-                                  (uint8_t) cpu_state.regs[1].w,
-                                  (uint8_t) (cpu_state.regs[2].w >> 8),
-                                  (uint8_t) cpu_state.regs[2].w);
-                            dn++;
-                        }
-                    }
-
-                    switch (lin) {
-                        case 0x0fcc4eu:
-                            /* Overlap test: the helper uses globals, so a call
-                               from the interrupt context while the main one is
-                               still inside it clobbers them. */
-                            {
-                                static int in_main;
-
-                                if (cpu_state.seg_ss.seg == 0x0f00)
-                                    in_main = 1;
-                                else if (in_main) {
-                                    static int ov;
-
-                                    if (++ov <= 20)
-                                        pclog("[YOVERLAP] isr call while main inside helper (#%d)\n", ov);
-                                }
-                            }
-                            /* fall through */
-                        case 0x0fcc27u: case 0x0fcc33u: case 0x0fcc38u:
-                        case 0x0fcc3cu: case 0x0fcc43u: case 0x0fcc4du:
-                        case 0x0fccfbu: case 0x0fcd03u:
-                            {
-                                static int wh;
-
-                                if (++wh <= 240)
-                                    pclog("[YWAIT] %05X ss:sp=%04X:%04X ax=%04X bx=%04X if=%d\n",
-                                          lin, cpu_state.seg_ss.seg,
-                                          cpu_state.regs[4].w,
-                                          (uint16_t) cpu_state.regs[0].w,
-                                          (uint16_t) cpu_state.regs[3].w,
-                                          (cpu_state.flags & 0x200) ? 1 : 0);
-                            }
-                            break;
-
-                        case 0x0fcc3du:
-                            /* Return of the helper: the main context is out. */
-                            break;
-
-                        default:
-                            if ((lin == 0x0fcc4du + 1u) && (cpu_state.seg_ss.seg == 0x0f00))
-                                pclog("");
-                            break;
-                    }
-
-                    if ((lin == 0x0fd038u) || (lin == 0x0ff35fu) ||
-                        (lin == 0x0fd497u)) {
-                        static int hits;
-                        uint16_t s23, s25;
-                        uint32_t bd = (0x1f88u << 4);
-
-                        memcpy(&s23, ram + bd + 0x23, 2);
-                        memcpy(&s25, ram + bd + 0x25, 2);
-                        if (++hits <= 40)
-                            pclog("[YHIT] %05X ss:sp=%04X:%04X save=%04X:%04X\n",
-                                  lin, cpu_state.seg_ss.seg,
-                                  cpu_state.regs[4].w, s23, s25);
-                    }
-
-                    ring[rn++ & 63] = ((uint32_t) cpu_state.seg_cs.seg << 16) |
-                                      (uint16_t) cpu_state.pc;
-
-                    if ((cpu_state.seg_cs.seg == 0xfc80) &&
-                        (cpu_state.pc >= 0x0295) && (cpu_state.pc <= 0x02a8)) {
-                        static int dumped;
-
-                        if (!dumped) {
-                            dumped = 1;
-                            pclog("[YTRACE] entered the data at FC80:029F, last 24:\n");
-                            for (int k = 24; k > 0; k--) {
-                                uint32_t a = ring[(rn - (unsigned) k) & 63];
-                                pclog("[YTRACE]   %04X:%04X\n",
-                                      (unsigned) (a >> 16) & 0xffff,
-                                      (unsigned) a & 0xffff);
-                            }
-                        }
-                    }
-                }
-            }
-
             opcode            = pfq_fetchb();
             oldc              = cpu_state.flags & C_FLAG;
             if (clear_lock) {

@@ -504,10 +504,6 @@ i8018x_pcb_icu_acknowledge(struct i8018x_pcb_t *pcb)
        pair.  A machine that installs an acknowledge handler for the pin has
        done so because its part vectors that way, so the control register's
        cascade bit is not required here. */
-    if (getenv("YES_ACKLOG") != NULL)
-        pclog("[ACK] src=%d type=%02X ext=%04X latch=%04X isr=%04X\n", i,
-              i8018x_icu_type[i], pcb->icu_ext, pcb->icu_latch, pcb->icu_isr);
-
     if (((i == 5) || (i == 6)) && (pcb->ext_ack[i - 5] != NULL))
         return pcb->ext_ack[i - 5](pcb->ext_ack_priv[i - 5]);
 
@@ -717,9 +713,6 @@ i8018x_pcb_write_word(struct i8018x_pcb_t *dev, uint16_t off, uint16_t val)
        it clear keeps the channel running as it was, and the bit itself is
        write only, always reading back as zero (270788-001 section 8.2). */
     if ((off == I8018X_DMA_CTRL(0)) || (off == I8018X_DMA_CTRL(1))) {
-        if (getenv("PCX_DMALOG") != NULL)
-            pclog("[CTRLW] in=%04X old=%04X chg=%d st=%d\n", val, dev->regs[off / 2],
-                  !!(val & I8018X_DMA_CHG), !!(val & I8018X_DMA_ST));
         if (!(val & I8018X_DMA_CHG))
             val = (uint16_t) ((val & ~I8018X_DMA_ST) | (dev->regs[off / 2] & I8018X_DMA_ST));
 
@@ -787,21 +780,6 @@ i8018x_pcb_write_word(struct i8018x_pcb_t *dev, uint16_t off, uint16_t val)
        type (270788-001 Figure 87, Table 19). The register itself is write only
        (section 9.5.2.9), so a read hands back whatever the last write left
        here, which the manual does not define. */
-    /* PCX_ICULOG=1: trace the guest's ICU programming after the first tick. */
-    {
-        static int  w_on = -1;
-        static long w_n;
-
-        if (w_on < 0)
-            w_on = (getenv("PCX_ICULOG") != NULL);
-        if (w_on && (off <= 0x2e) && (off != I8018X_ICU_EOI)) {
-            w_n++;
-            if (w_n <= 60)
-                pclog("[ICUW] off=%02X val=%04X @%04X:%04X\n",
-                      off, val, CS, cpu_state.pc);
-        }
-    }
-
     if (off == I8018X_ICU_EOI) {
         uint16_t clear = 0x0000u;
 
