@@ -890,6 +890,29 @@ mind_sys_index_write(UNUSED(uint16_t port), uint8_t val, UNUSED(void *priv))
             break;
     }
 
+    /* The BIOS asks for the clock in registers 82h-88h; the return address on
+       the guest stack is the caller, which is what says whether DOS reached
+       this through its own service or through the BIOS's. */
+    if (mindset.log && (val >= 0x82) && (val <= 0x88)) {
+        uint32_t stk = ((uint32_t) cpu_state.seg_ss.seg << 4) + (uint16_t) cpu_state.regs[4].w;
+        uint16_t ret_cs = 0, ret_ip = 0;
+        int k;
+
+        /* The service routine pushes its own working registers first, so the
+           real return address is a few frames down: take the first pair on the
+           stack whose segment is the ROM's. */
+        for (k = 0; k < 12; k++) {
+            if (mem_readw_phys(stk + (k * 2) + 2) == 0xf800) {
+                ret_ip = mem_readw_phys(stk + (k * 2));
+                ret_cs = 0xf800;
+                break;
+            }
+        }
+
+        pclog("[MIND] mcu reg %02X asked by %04X:%04X (caller %04X:%04X)\n",
+              val, cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc, ret_cs, ret_ip);
+    }
+
     mindset.sys.idx = val;
     mind_mcu_busy();
 }
@@ -1485,6 +1508,27 @@ mind_fast_sample(void *priv)
 
             pclog("[MIND]   stk[%02d] = %04X:%04X sp=%04X\n", i,
                   mind_ring[k].rseg, mind_ring[k].roff, mind_ring[k].rsp);
+        }
+    }
+
+    /* The ROM keeps the time and date services around F800:92C0; the ring
+       holds the instructions that led there, which is the only way to see the
+       caller without a debugger. */
+    if (mind_ring_on && (cpu_state.seg_cs.seg == 0xf800) &&
+        (cpu_state.pc >= 0x92bc) && (cpu_state.pc <= 0x92e8)) {
+        static int clock_dumped = 0;
+
+        if (!clock_dumped) {
+            int i;
+
+            clock_dumped = 1;
+            pclog("[MIND] clock service reached, ring before it:\n");
+
+            for (i = 0; i < MIND_RING; i++) {
+                int k = (mind_ring_pos + i) % MIND_RING;
+
+                pclog("[MIND]   bring[%02d] = %04X:%04X\n", i, mind_ring[k].rseg, mind_ring[k].roff);
+            }
         }
     }
 
