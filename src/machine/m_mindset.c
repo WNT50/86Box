@@ -141,6 +141,27 @@ static mindset_t mindset;
 static struct i8018x_pcb_t *mind_pcb;
 
 /* The display's frame interrupt lands on line 2 of the 80186's own ICU. */
+/* Every interrupt the board raises goes through here so its delivery can be
+   watched: a line that fires inside a critical section corrupts the return
+   frame on the BIOS's stack and the machine comes back to a wild address. */
+static int mind_int_log_left = 20000;
+
+static void
+mind_icu_int(int line, int level)
+{
+    if (mind_pcb == NULL)
+        return;
+
+    if (level && (mind_int_log_left > 0)) {
+        mind_int_log_left--;
+        pclog("[MIND] int line=%d type=%02X at %04X:%04X sp=%04X\n",
+              line, 0x0c + line, cpu_state.seg_cs.seg,
+              (uint16_t) cpu_state.pc, (uint16_t) cpu_state.regs[4].w);
+    }
+
+    i8018x_pcb_icu_int(mind_pcb, line, level);
+}
+
 static void
 mind_display_irq(void *priv, int line, int level)
 {
@@ -152,9 +173,9 @@ mind_display_irq(void *priv, int line, int level)
        mode-change flags - runs on the vblank one. */
     if (line == 1) {
         if (getenv("MIND_NOINT1") == NULL)
-            i8018x_pcb_icu_int(mind_pcb, 1, level);
+            mind_icu_int(1, level);
     } else {
-        i8018x_pcb_icu_int(mind_pcb, 2, level);
+        mind_icu_int(2, level);
     }
 }
 
@@ -171,7 +192,7 @@ mind_keyboard_deliver(uint8_t code)
     mindset.kbd.ready = 1;
 
     if (mind_pcb != NULL)
-        i8018x_pcb_icu_int(mind_pcb, 3, 1);
+        mind_icu_int(3, 1);
 }
 
 static void
@@ -195,8 +216,8 @@ mind_keyboard_send(uint16_t val)
            fresh edge the interrupt controller has nothing left to deliver. */
         if ((mind_pcb != NULL) && !mindset.kbd.ready) {
             mindset.kbd.ready = 1;
-            i8018x_pcb_icu_int(mind_pcb, 3, 0);
-            i8018x_pcb_icu_int(mind_pcb, 3, 1);
+            mind_icu_int(3, 0);
+            mind_icu_int(3, 1);
         }
 
         return;
@@ -726,7 +747,7 @@ mind_ivt_readw(uint32_t addr, void *priv)
 static void
 mind_ivt_write(uint32_t addr, uint8_t val, void *priv)
 {
-    if (mind_ivt_left > 0) {
+    if ((mind_ivt_left > 0) && ((addr & 0xfffff) < 0x0400)) {
         mind_ivt_left--;
         pclog("[MIND] ivt w1 %04X = %02X @%04X:%04X\n", addr & 0xfffff, val,
               cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
@@ -738,7 +759,7 @@ mind_ivt_write(uint32_t addr, uint8_t val, void *priv)
 static void
 mind_ivt_writew(uint32_t addr, uint16_t val, void *priv)
 {
-    if (mind_ivt_left > 0) {
+    if ((mind_ivt_left > 0) && ((addr & 0xfffff) < 0x0400)) {
         mind_ivt_left--;
         uint32_t cs_base = (uint32_t) cpu_state.seg_cs.seg << 4;
         uint16_t at      = (uint16_t) cpu_state.pc;
@@ -818,7 +839,7 @@ mind_sys_index_write(UNUSED(uint16_t port), uint8_t val, UNUSED(void *priv))
                 mindset.kbd.ready = 0;
 
                 if (mind_pcb != NULL)
-                    i8018x_pcb_icu_int(mind_pcb, 3, 0);
+                    mind_icu_int(3, 0);
             }
             return;
 
@@ -845,7 +866,7 @@ mind_sys_data_read(UNUSED(uint16_t port), UNUSED(void *priv))
         mindset.kbd.ready = 0;
 
         if (mind_pcb != NULL)
-            i8018x_pcb_icu_int(mind_pcb, 3, 0);
+            mind_icu_int(3, 0);
 
         /* Anything typed while this byte was waiting goes out now. */
         if (mindset.kbd.qcount > 0) {
@@ -955,7 +976,7 @@ mind_trap_dma_read(UNUSED(uint16_t port), void *priv)
         mind_trap_int = 1;
 
         if (mind_pcb != NULL)
-            i8018x_pcb_icu_int(mind_pcb, 0, 1);
+            mind_icu_int(0, 1);
 
         mindset.sys.regs[0x02] |= 0x01;
     }
@@ -970,7 +991,7 @@ mind_trap_clear_int(UNUSED(uint16_t port), void *priv)
     mindset.sys.regs[0x02] &= (uint8_t) ~0x01;
 
     if (mind_pcb != NULL)
-        i8018x_pcb_icu_int(mind_pcb, 0, 0);
+        mind_icu_int(0, 0);
 
     return 0x0000;
 }
@@ -1226,7 +1247,7 @@ mind_fdc_raise(void *priv)
         pclog("[MIND] fdc irq raised\n");
 
     if (mind_pcb != NULL)
-        i8018x_pcb_icu_int(mind_pcb, 0, 1);
+        mind_icu_int(0, 1);
 }
 
 /* 8050h: drive select, motor and the reset pulse, in the board's own layout. */
@@ -1255,7 +1276,7 @@ mind_fdc_ctrl_write(uint16_t port, uint8_t val, void *priv)
         mindset.fdc_irq   = 0;
 
         if (mind_pcb != NULL)
-            i8018x_pcb_icu_int(mind_pcb, 0, 0);
+            mind_icu_int(0, 0);
 
         fdc_write(0x03f2, (uint8_t) (dor & ~0x04), mindset.fdc);
     }
@@ -1329,7 +1350,7 @@ mind_fdc_ack_read(uint16_t port, void *priv)
         mindset.fdc_irq = 0;
 
         if (mind_pcb != NULL)
-            i8018x_pcb_icu_int(mind_pcb, 0, 0);
+            mind_icu_int(0, 0);
     }
 
     return 0x00;
@@ -1442,11 +1463,12 @@ machine_mindset_init(const machine_t *model)
 
     if (getenv("MIND_IVT") != NULL) {
         mind_ivt_left = atoi(getenv("MIND_IVT"));
-        /* Hand the first kilobyte to the probe; the handlers put the bytes
-           back into RAM themselves. */
-        mem_set_mem_state_both(0x00000, 0x00400,
+        /* Hand the first page to the probe; the handlers put the bytes back
+           into RAM themselves.  Mappings work on 4 KB pages, so the probe sees
+           the whole first page even though only the vectors matter here. */
+        mem_set_mem_state_both(0x00000, 0x01000,
                                MEM_READ_EXTANY | MEM_WRITE_EXTANY);
-        mem_mapping_add(&mind_ivt_map, 0x00000, 0x00400,
+        mem_mapping_add(&mind_ivt_map, 0x00000, 0x01000,
                         mind_ivt_read, mind_ivt_readw, NULL,
                         mind_ivt_write, mind_ivt_writew, NULL,
                         NULL, MEM_MAPPING_EXTERNAL, NULL);
