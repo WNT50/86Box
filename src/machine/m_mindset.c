@@ -236,6 +236,7 @@ mind_keyboard_send(uint16_t val)
 
 /* MIND_SAMPLE=<us>: how often the sampler prints CS:IP (default 20 ms). */
 static int mind_interval = 20000;
+static uint16_t mind_prev_cs, mind_prev_ip;
 
 static uint16_t
 sw16(uint16_t v)
@@ -1634,6 +1635,64 @@ mind_fast_sample(void *priv)
                 int k = (mind_ring_pos + i) % MIND_RING;
 
                 pclog("[MIND]   bring[%02d] = %04X:%04X\n", i, mind_ring[k].rseg, mind_ring[k].roff);
+            }
+        }
+    }
+
+    /* A divide error vectors to F800:03DE; the ring then shows the division
+       that faulted, which is the only way to see it without a debugger. */
+    if ((cpu_state.seg_cs.seg != 0xf800) || (cpu_state.pc < 0x03d0) || (cpu_state.pc > 0x0410))
+        ;
+    else if (mindset.log && (mind_prev_cs != 0)) {
+        pclog("[MIND] #DE entered from %04X:%04X\n", mind_prev_cs, mind_prev_ip);
+        mind_prev_cs = 0;
+    }
+
+    mind_prev_cs = cpu_state.seg_cs.seg;
+    mind_prev_ip = (uint16_t) cpu_state.pc;
+
+    if (mind_ring_on && (cpu_state.seg_cs.seg == 0xf800) &&
+        (cpu_state.pc >= 0x03de) && (cpu_state.pc <= 0x0400)) {
+        static int de_dumped = 0;
+        int outside = 0, i;
+
+        /* Only the fault that comes from DOS code is interesting; the POST
+           takes this vector too, early on, with nothing but BIOS frames on the
+           ring. */
+        for (i = 0; i < MIND_RING; i++) {
+            int k = (mind_ring_pos + i) % MIND_RING;
+            uint16_t seg = mind_ring[k].rseg;
+
+            if ((seg != 0xf800) && (seg != 0x0000))
+                outside = 1;
+        }
+
+        if (!de_dumped && outside) {
+            de_dumped = 1;
+            pclog("[MIND] divide error handler entered, ring before it:\n");
+
+            for (i = MIND_RING - 10; i < MIND_RING; i++) {
+                int k = (mind_ring_pos + i) % MIND_RING;
+
+                pclog("[MIND]   dring[%02d] = %04X:%04X\n", i, mind_ring[k].rseg, mind_ring[k].roff);
+            }
+
+            /* The newest frame is the code that divided; keep its bytes. */
+            {
+                int      k = (mind_ring_pos + MIND_RING - 1) % MIND_RING;
+                uint32_t at = ((uint32_t) mind_ring[k].rseg << 4) + mind_ring[k].roff;
+                FILE    *ff = fopen("/tmp/mind-fault.bin", "wb");
+
+                if (ff != NULL) {
+                    uint32_t a;
+
+                    for (a = at - 16; a < at + 48; a++)
+                        fputc(mem_readb_phys(a), ff);
+
+                    fclose(ff);
+                    pclog("[MIND] fault bytes at %04X:%04X saved\n",
+                          mind_ring[k].rseg, mind_ring[k].roff);
+                }
             }
         }
     }
