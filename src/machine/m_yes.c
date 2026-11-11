@@ -627,6 +627,9 @@ machine_yes_init(const machine_t *model)
     }
 
     yes.fdc = wd279x_init_at(YES_FDC_BASE);
+    /* This latch puts the head on bit 4, selects one of four drives with the
+       low nibble, and has no density bit. */
+    wd279x_set_dskctl_bits(yes.fdc, 4, 1, -1);
     {
         const char *sb = getenv("YES_SBASE");
 
