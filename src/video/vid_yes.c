@@ -41,7 +41,9 @@
 /* HD6845S register numbers used here. */
 #define CRTC_R1  1  /* horizontal displayed, in characters */
 #define CRTC_R6  6  /* vertical displayed, in character rows */
+#define CRTC_R4  4  /* offset between rows, in characters */
 #define CRTC_R9  9  /* scan lines per row, minus one */
+#define YES_PAGE_COLS 80  /* cells in a page row */
 #define CRTC_R12 12 /* start address, high */
 #define CRTC_R13 13 /* start address, low */
 #define CRTC_R14 14 /* cursor address, high */
@@ -115,6 +117,7 @@ yes_render(yes_video_t *dev)
     uint32_t start = ((uint32_t) dev->crtc[CRTC_R12] << 8) | dev->crtc[CRTC_R13];
     uint32_t cursor = ((uint32_t) dev->crtc[CRTC_R14] << 8) | dev->crtc[CRTC_R15];
     int      row, col, y, x;
+    uint32_t page_stride;
     /* R9 says how many scan lines a character row takes, minus one. */
     int      lh = dev->crtc[CRTC_R9] + 1;
     /* 80-column mode puts a character in eight pixels, 40-column mode in
@@ -135,14 +138,24 @@ yes_render(yes_video_t *dev)
 
     memset(dev->fb, 0x00, YES_XSIZE * YES_YSIZE * sizeof(uint32_t));
 
+    /* The page is laid out eighty cells to a row whatever the CRTC displays:
+       the 40-column modes only show half of each line, they do not pack the
+       rows closer together.  Walking the page with the displayed width slid
+       every row two characters and split the prompt. */
+    {
+        int stride = dev->crtc[CRTC_R4];
+
+        if ((stride < cols) || (stride > 160))
+            stride = YES_PAGE_COLS;
+        page_stride = (uint32_t) stride;
+    }
+
     for (row = 0; row < rows; row++) {
         for (col = 0; col < cols; col++) {
             /* The board's address lines start at A1: the start register
-               counts characters, and each character takes four bytes of the
-               window (the ROM writes 2-byte cells, the board skips the other
-               two), so the page base is start * 4 and the cells inside a row
-               are 2 bytes apart. */
-            uint32_t cell = (uint32_t) row * (uint32_t) cols + (uint32_t) col;
+               counts characters, each character takes four bytes of the
+               window, and the cells themselves are 2 bytes apart. */
+            uint32_t cell = (uint32_t) row * page_stride + (uint32_t) col;
             uint32_t addr = dev->base + start * 4u + cell * 2u;
             uint8_t  ch, attr;
             uint32_t fg, bg;
@@ -187,8 +200,9 @@ yes_render(yes_video_t *dev)
                 }
             }
 
-            /* A block cursor, so the ROM's cursor address shows up. */
-            if (cell == cursor) {
+            /* A block cursor.  R14/R15 hold the same kind of address as the
+               start register, so compare against start + cell, not cell. */
+            if ((start + cell) == cursor) {
                 for (y = lh - 3; y < lh; y++) {
                     uint32_t *line = &dev->fb[((uint32_t) row * (uint32_t) lh + (uint32_t) y) * YES_XSIZE];
                     for (x = 0; x < 8; x++)
@@ -250,7 +264,13 @@ yes_poll(void *priv)
 
     for (y = 0; y < YES_YSIZE; y++)
         memcpy(buffer32->line[y], &dev->fb[y * YES_XSIZE], YES_XSIZE * 4);
-    video_blit_memtoscreen(0, 0, YES_XSIZE, YES_YSIZE);
+    {
+        int vh = (dev->crtc[CRTC_R6] + 1) * (dev->crtc[CRTC_R9] + 1);
+
+        if ((vh < 16) || (vh > YES_YSIZE))
+            vh = YES_YSIZE;
+        video_blit_memtoscreen(0, 0, YES_XSIZE, vh);
+    }
 
     timer_advance_u64(&dev->timer, TIMER_USEC * (1000000ULL / YES_FREQ));
 }
