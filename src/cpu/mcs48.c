@@ -15,6 +15,7 @@ struct mcs48 {
     uint8_t  rom[4096];
     uint32_t rom_mask;
     uint8_t  ram[128];
+    uint8_t  ext[256];   /* MOVX space: the board's register file */
 
     uint8_t  a, psw;
     uint8_t  p1, p2;
@@ -51,6 +52,12 @@ void
 mcs48_set_rom_mask(mcs48 *c, uint32_t mask)
 {
     c->rom_mask = mask;
+}
+
+uint8_t *
+mcs48_ext(mcs48 *c)
+{
+    return c->ext;
 }
 
 mcs48_hooks *
@@ -210,8 +217,8 @@ int mcs48_step(mcs48 *c)
         case 0x75: break;                                     /* ENT0 CLK */
         case 0x76: take = c->f1; break;                       /* JF1 */
         case 0x77: c->a = (uint8_t) ((c->a >> 1) | ((c->a & 1) << 7)); break;
-        case 0x80: c->a = c->ram[(uint8_t) (0x80 | 0x3f)]; break;  /* MOVX A,@R0 (no ext mem) */
-        case 0x81: break;
+        case 0x80: c->a = c->ext[*reg(c, 0)]; break;   /* MOVX A,@R0 */
+        case 0x81: c->a = c->ext[*reg(c, 1)]; break;   /* MOVX A,@R1 */
         case 0x83: pop_pc(c); used = 2; break;                /* RET */
         case 0x85: c->f0 = 0; break;
         case 0x86: take = c->int_pending == 0; break;         /* JNI (approx) */
@@ -221,7 +228,8 @@ int mcs48_step(mcs48 *c)
             else { c->bus_out |= arg; if (c->h.bus_out) c->h.bus_out(c, c->bus_out); }
             c->pc++;
             break;
-        case 0x90: case 0x91: break;                          /* MOVX @Rn,A */
+        case 0x90: c->ext[*reg(c, 0)] = c->a; break;         /* MOVX @R0,A */
+        case 0x91: c->ext[*reg(c, 1)] = c->a; break;         /* MOVX @R1,A */
         case 0x92: take = (c->a & 0x10) == 0; break;          /* JB4 */
         case 0x93: pop_pc(c); c->irq_en = 1; used = 2; break; /* RETR */
         case 0x95: c->f0 = !c->f0; break;

@@ -2029,6 +2029,10 @@ machine_mindset_init(const machine_t *model)
 
             mcs48_reset(mindset.mcu);
 
+            /* Seed the shared register file with the values the HLE would
+               return, then let the firmware keep them up to date. */
+            memcpy(mcs48_ext(mindset.mcu), mindset.sys.regs, 256);
+
             timer_add(&mindset.mcu_fw_timer, mind_mcu_fw_tick, NULL, 0);
             timer_set_delay_u64(&mindset.mcu_fw_timer, 1000ULL * TIMER_USEC);
 

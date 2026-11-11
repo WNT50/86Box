@@ -32,6 +32,7 @@ extern mcs48 *mcs48_create(void);
 extern uint8_t      *mcs48_rom(mcs48 *c);
 extern void          mcs48_set_rom_mask(mcs48 *c, uint32_t mask);
 extern mcs48_hooks  *mcs48_hooks_of(mcs48 *c);
+extern uint8_t      *mcs48_ext(mcs48 *c);
 extern void   mcs48_destroy(mcs48 *c);
 extern void mcs48_reset(mcs48 *c);
 extern int  mcs48_step(mcs48 *c);
