@@ -1692,6 +1692,18 @@ mind_fast_sample(void *priv)
             }
         }
 
+        /* The BIOS keeps the time of day counter at 40h:6Ch; dump the block. */
+        {
+            FILE *bd = fopen("/tmp/mind-bda.bin", "wb");
+
+            if (bd != NULL) {
+                for (uint32_t a = 0x400; a < 0x500; a++)
+                    fputc(mem_readb_phys(a), bd);
+
+                fclose(bd);
+            }
+        }
+
         /* The first FAT sector is read into 8000h; keep it for comparison. */
         {
             FILE *f = fopen("/tmp/mind-fat.bin", "wb");
