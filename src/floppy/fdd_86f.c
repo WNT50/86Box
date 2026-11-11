@@ -3320,8 +3320,9 @@ d86f_write_track(void *priv, FILE **fp, const int side, uint16_t *da0, uint16_t 
        turning: 250 kbit at 300 rpm is 50000 cells. */
     if (d86f_export_disk_flags != 0) {
         static const uint16_t kbps[8] = { 500, 300, 250, 1000, 250, 2000, 250, 250 };
-        const fdc_t *fdc  = (const fdc_t *) drv->fdc;
-        uint16_t     code = (fdc != NULL) ? (uint16_t) (fdc->rate & 7) : 2;
+        uint16_t     code = (drv->ctrl != NULL)
+                            ? (uint16_t) (drv->ctrl->get_rate_code(drv->ctrl_priv) & 7)
+                            : 2;
 
         side_flags      = (uint16_t) ((side_flags & 0x18) | code);
         extra_bit_cells = (uint32_t) kbps[code] * 200;    /* 60/300 of a second */

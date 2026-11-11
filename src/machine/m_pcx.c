@@ -50,7 +50,7 @@ extern volatile int fdcinited;
 #include <86box/pic.h>
 #include <86box/rom.h>
 #include <86box/i8018x.h>
-#include <86box/wd2791.h>
+#include <86box/wd279x.h>
 #include <86box/scsi_sm912.h>
 #include <86box/serial.h>
 #include <86box/kbc_siemens.h>
@@ -155,7 +155,7 @@ typedef struct pcx_t {
     uint8_t vid_data, vid_ctrl, vid_exec;
     uint8_t err_seg; /* A19..A12 of the last bus timeout / parity error */
 
-    wd2791_t *fdc;   /* WD2791 formatter, 0xf900-0xf903 */
+    wd279x_t *fdc;   /* WD2791 formatter, 0xf900-0xf903 */
     void          *usart[3]; /* SCN2661B EPCI at 0xf9c0 / 0xf9d0 / 0xf9e0 */
     scsi_sm912_t  *scsi;     /* SM912 SCSI adapter at 0xf940, IRQ 5 */
     kbc_siemens_t *kbc;      /* keyboard/terminal channel behind 0xf980 */
@@ -493,7 +493,7 @@ pcx_dskctl_write(UNUSED(uint16_t port), uint8_t val, UNUSED(void *priv))
        in pcd.cpp:190-214.  The controller latches what it needs for drive,
        side and density; the byte is also kept for a read back. */
     pcx.dskctl = val;
-    wd2791_set_dskctl(pcx.fdc, val);
+    wd279x_set_dskctl(pcx.fdc, val);
 }
 
 static uint8_t
@@ -1063,13 +1063,13 @@ machine_pcx_init_ex(const machine_t *model)
 
     /* WD2791 formatter: registers at 0xf900-0xf903, INTRQ on IR6, DRQ on the
        80186 DMA channel 1.  The 0xf904 latch above feeds it drive/side/DDEN. */
-    pcx.fdc = wd2791_init();
+    pcx.fdc = wd279x_init();
     /* SINIX's floppy driver reads the interrupt state as "still transferring"
        and gives up on the transfer when INTRQ lands in the same instant as the
        last DMA byte; the real controller finishes the CRC and the gap first.
        Three milliseconds is a few byte periods at 250 kbit/s and keeps the
        driver's state machine in step. */
-    wd2791_set_post_us(pcx.fdc, PCX_FDC_POST_US);
+    wd279x_set_post_us(pcx.fdc, PCX_FDC_POST_US);
     /* The Qt front end only builds the floppy indicators (and their media
        menus) when the standard controller has announced itself.  This machine
        brings its own WD2791 instead, so say so here. */
