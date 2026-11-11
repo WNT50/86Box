@@ -184,6 +184,18 @@ intel_8256_set_level(intel_8256_t *dev, int level)
     intel_8256_update_irq(dev);
 }
 
+/* ... and drop it again when the board's own acknowledge happened (the guest
+   reading the data latch behind the request, for instance). */
+void
+intel_8256_clear_level(intel_8256_t *dev, int level)
+{
+    if (dev == NULL || level < 0 || level >= MUART_LVL_COUNT)
+        return;
+
+    dev->pending &= (uint8_t) ~(1u << level);
+    intel_8256_update_irq(dev);
+}
+
 /*
  * A timer counts down at the rate CMD1 FRQ picks.  The five timers share one
  * prescaler (CMD2 C1-C0); the serial clock divider is not modelled because
