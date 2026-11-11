@@ -1089,6 +1089,19 @@ mind_trap_clear_int(UNUSED(uint16_t port), void *priv)
     return 0x0000;
 }
 
+/* 8340 is written from the MCU event handler with whatever register 0 holds;
+   nothing reads it back, so latching the value is all the board does. */
+static uint8_t mind_latch;
+
+static void
+mind_latch_write(UNUSED(uint16_t port), uint8_t val, UNUSED(void *priv))
+{
+    mind_latch = val;
+
+    if (mindset.log)
+        pclog("[MIND] 8340 <- %02X\n", val);
+}
+
 static uint8_t
 mind_io_read(uint16_t port, void *priv)
 {
@@ -1916,6 +1929,10 @@ machine_mindset_init(const machine_t *model)
     io_sethandler(0x8324, 0x001c,
                   mind_io_read, mind_io_readw, NULL,
                   mind_io_write, mind_io_writew, NULL, NULL);
+    /* 8340: one write-only latch, fed with the value of MCU register 0. */
+    io_sethandler(0x8340, 0x0001,
+                  NULL, NULL, NULL,
+                  mind_latch_write, NULL, NULL, NULL);
 
     timer_add(&mindset.mcu_timer, mind_mcu_ready, NULL, 0);
     timer_add(&mindset.rtc_timer, mind_rtc_tick, NULL, 0);
