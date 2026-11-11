@@ -129,6 +129,7 @@ typedef struct {
     pc_timer_t     dump_timer;
     pc_timer_t     sample_timer;
     pc_timer_t     rtc_timer;
+    int            jump_reported;
 } mindset_t;
 
 /* The controller takes a moment to answer, and the BIOS polls for it. */
@@ -1297,6 +1298,22 @@ mind_sample(void *priv)
 
     pclog("[MIND] pc=%04X:%04X frames=%d\n", cpu_state.seg_cs.seg,
           (uint16_t) cpu_state.pc, frames);
+
+    /* If control ever leaves the ROM, the stack frame that got it there says
+       who jumped: dump it once, then stay quiet. */
+    if ((cpu_state.seg_cs.seg != 0xf800) && !mindset.jump_reported) {
+        uint32_t stack_top_base = ((uint32_t) cpu_state.seg_ss.seg << 4) + cpu_state.regs[4].w;
+
+        mindset.jump_reported = 1;
+
+        pclog("[MIND] left the ROM: CS:IP=%04X:%04X SS:SP=%04X:%04X\n",
+              cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc,
+              cpu_state.seg_ss.seg, cpu_state.regs[4].w);
+
+        for (int i = 0; i < 8; i++)
+            pclog("[MIND]   stack[%04X] = %04X\n", (uint16_t) (cpu_state.regs[4].w + i * 2),
+                  mem_readw_phys(stack_top_base + i * 2));
+    }
 
     /* MIND_VRAMDUMP=1: drop the display RAM to /tmp at fixed frame numbers,
        which separates "the guest drew nothing" from "the renderer maps the
