@@ -22,5 +22,6 @@ extern const device_t yes_video_device;
 /* The ROM places the frame buffer with MMCS, so the machine has to say where
    it is whenever the register is rewritten. */
 extern void yes_video_set_base(void *priv, uint32_t base);
+extern void yes_video_set_columns(void *priv, int cols);
 
 #endif /* EMU_YES_VIDEO_H */

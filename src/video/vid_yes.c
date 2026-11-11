@@ -51,6 +51,7 @@
 #define CRTC_R15 15 /* cursor address, low */
 
 typedef struct yes_video_t {
+    int      cols;    /* 40 or 80, from the mode register (port 0x5e0 bit 0) */
     uint8_t  crtc[32];
     uint8_t  crtc_idx;
     uint8_t  pal[16];
@@ -113,7 +114,7 @@ yes_palette_write(uint16_t port, uint8_t val, void *priv)
 static void
 yes_render(yes_video_t *dev)
 {
-    int      cols  = dev->crtc[CRTC_R1] + 1;
+    int      cols  = dev->cols;
     int      rows  = dev->crtc[CRTC_R6] + 1;
     uint32_t start = ((uint32_t) dev->crtc[CRTC_R12] << 8) | dev->crtc[CRTC_R13];
     uint32_t cursor = ((uint32_t) dev->crtc[CRTC_R14] << 8) | dev->crtc[CRTC_R15];
@@ -121,15 +122,15 @@ yes_render(yes_video_t *dev)
     uint32_t page_stride;
     /* R9 says how many scan lines a character row takes, minus one. */
     int      lh = dev->crtc[CRTC_R9] + 1;
-    /* 80-column mode puts a character in eight pixels, 40-column mode in
-       sixteen: the board halves the character clock, so the glyph keeps its
-       eight dots and the rest of the cell carries the background. */
-    int      cw = (dev->crtc[CRTC_R1] < 0x50) ? (YES_XSIZE / 40) : (YES_XSIZE / 80);
+    /* The column count is not in the CRTC: R1 stays 0x28 in both text modes
+       because the board halves or doubles the character clock instead.  The
+       mode register decides -- 40 columns put a character in sixteen pixels,
+       80 columns in eight, and the glyph keeps its eight dots either way. */
+    int      cw;
 
-    /* The window is 80x25 cells; the CRTC is allowed to name more (40-column
-       modes leave the rest of the line alone), but never more than fits. */
-    if ((cols < 1) || (cols > 80))
+    if ((cols != 40) && (cols != 80))
         cols = 80;
+    cw = YES_XSIZE / cols;
     if (lh < 8)
         lh = 8;
     if (lh > 16)
@@ -139,17 +140,11 @@ yes_render(yes_video_t *dev)
 
     memset(dev->fb, 0x00, YES_XSIZE * YES_YSIZE * sizeof(uint32_t));
 
-    /* The page is laid out eighty cells to a row whatever the CRTC displays:
-       the 40-column modes only show half of each line, they do not pack the
-       rows closer together.  Walking the page with the displayed width slid
-       every row two characters and split the prompt. */
-    {
-        int stride = dev->crtc[CRTC_R4];
-
-        if ((stride < cols) || (stride > 160))
-            stride = YES_PAGE_COLS;
-        page_stride = (uint32_t) stride;
-    }
+    /* The page is laid out eighty cells to a row whatever the mode displays;
+       R4 is the 6845's vertical total, not a row stride (it reads 0x19 = 25 on
+       this machine).  Walking the page with the displayed width slid every row
+       and split the prompt. */
+    page_stride = YES_PAGE_COLS;
 
     for (row = 0; row < rows; row++) {
         for (col = 0; col < cols; col++) {
@@ -296,6 +291,7 @@ yes_video_init(const device_t *info)
 
     yes_video = dev;
     dev->base = 0x00010000;
+    dev->cols = 80;
 
     for (i = 0; i < 16; i++)
         dev->pal[i] = (uint8_t) (0x0f & ~i); /* a visible default until the ROM writes */
@@ -333,6 +329,19 @@ yes_video_close(void *priv)
 }
 
 /* The machine calls this whenever the ROM rewrites MMCS. */
+/* Port 0x5e0 bit 0 picks the text width: set is 40x25, clear is 80x25 (the
+   data sheet of the machine, not the CRTC, decides it). */
+void
+yes_video_set_columns(void *priv, int cols)
+{
+    yes_video_t *dev = (yes_video_t *) priv;
+
+    if (dev == NULL)
+        return;
+
+    dev->cols = (cols == 40) ? 40 : 80;
+}
+
 void
 yes_video_set_base(void *priv, uint32_t base)
 {

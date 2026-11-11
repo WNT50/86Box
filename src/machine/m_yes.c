@@ -434,6 +434,11 @@ yes_sysctl_write(uint16_t port, uint8_t val, void *priv)
 {
     yes.sysctl = val;
     yes_log_write("sysctl", port, val);
+
+    /* Bit 0 of the mode register picks 40 or 80 columns; the CRTC's R1 does not
+       change between the two text modes. */
+    if (yes.video != NULL)
+        yes_video_set_columns(yes.video, (val & 0x01) ? 40 : 80);
 }
 
 static uint8_t
@@ -651,6 +656,7 @@ machine_yes_init(const machine_t *model)
        the latch and one MUART level is the interrupt (see yes_kbd_send). */
     keyboard_set_table(yes_scancode_table);
     keyboard_send = yes_kbd_send;
+
 
     /* The board sends its power-on code once, and the ROM's keyboard ISR spends
        its first interrupt on latching only ([0x92] == 0 at 0xFF6E1): without
