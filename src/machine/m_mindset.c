@@ -1158,10 +1158,15 @@ mind_fdc_transfer(void)
     dma_set_drq(MIND_FDC_DMA_CH, 1);
     dma_set_drq(MIND_FDC_DMA_CH, 0);
 
-    if (mindset.datafifo.left != 0)
-        mindset.datafifo.left--;
+    /* The board counts the bytes it still has to move and only raises terminal
+       count on the access after the counter has run out, so the controller
+       sees TC exactly one byte past the last byte of the transfer. */
+    if (mindset.datafifo.left == 0)
+        return DMA_OVER;
 
-    return (mindset.datafifo.left == 0) ? DMA_OVER : 0;
+    mindset.datafifo.left--;
+
+    return 0;
 }
 
 static int
