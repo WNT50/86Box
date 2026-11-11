@@ -128,6 +128,7 @@ typedef struct {
     pc_timer_t     mcu_timer;
     pc_timer_t     dump_timer;
     pc_timer_t     sample_timer;
+    pc_timer_t     rtc_timer;
 } mindset_t;
 
 /* The controller takes a moment to answer, and the BIOS polls for it. */
@@ -700,6 +701,28 @@ static void
 mind_mcu_ready(void *priv)
 {
     mindset.sys_sts = 0x00;
+}
+
+/* The system controller keeps the machine's clock in its own RAM: seconds,
+   minutes, hours, day and month at 22h-26h, and the BIOS reads them back
+   through its registers.  Nothing else drives them, so they tick here. */
+static void
+mind_rtc_tick(void *priv)
+{
+    uint8_t *r = mindset.sys.regs;
+
+    if (++r[0x02] >= 60) {
+        r[0x02] = 0;
+
+        if (++r[0x03] >= 60) {
+            r[0x03] = 0;
+
+            if (++r[0x04] >= 24)
+                r[0x04] = 1;
+        }
+    }
+
+    timer_set_delay_u64(&mindset.rtc_timer, (uint64_t) TIMER_USEC * 1000000u);
 }
 
 /* Both status bits go up while the controller works on the byte it was just
@@ -1458,6 +1481,8 @@ machine_mindset_init(const machine_t *model)
                   mind_io_write, mind_io_writew, NULL, NULL);
 
     timer_add(&mindset.mcu_timer, mind_mcu_ready, NULL, 0);
+    timer_add(&mindset.rtc_timer, mind_rtc_tick, NULL, 0);
+    timer_set_delay_u64(&mindset.rtc_timer, (uint64_t) TIMER_USEC * 1000000u);
     timer_add(&mind_key_timer, mind_key_next, NULL, 0);
 
     if (mindset.keytest) {
