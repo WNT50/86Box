@@ -131,6 +131,8 @@ typedef struct {
     pc_timer_t     sample_timer;
     pc_timer_t     fast_timer;
     pc_timer_t     rtc_timer;
+    pc_timer_t     tick_timer;
+    int            tick_pending;
     int            jump_reported;
 } mindset_t;
 
@@ -811,6 +813,19 @@ mind_unbcd(uint8_t v)
     return ((v >> 4) * 10) + (v & 0x0f);
 }
 
+/* 18.2 Hz: the board's time base, one pulse per 54945 us like the PC's.  The
+   BIOS's interrupt handler turns it into the tick counter behind INT 1Ah. */
+static void
+mind_tick_pulse(void *priv)
+{
+    mindset.tick_pending = 1;
+
+    if (mind_pcb != NULL)
+        mind_icu_int(3, 1);
+
+    timer_set_delay_u64(&mindset.tick_timer, 54945ULL * TIMER_USEC);
+}
+
 static void
 mind_rtc_tick(void *priv)
 {
@@ -859,6 +874,10 @@ mind_sys_status_read(UNUSED(uint16_t port), UNUSED(void *priv))
     if (mindset.kbd.ready)
         ret |= 0x20;
 
+    /* Bit 6 is the board's other event source: the 18.2 Hz tick. */
+    if (mindset.tick_pending)
+        ret |= 0x40;
+
     mind_trace("r", 0x8282, ret, 1);
 
     return ret;
@@ -884,6 +903,12 @@ mind_sys_index_write(UNUSED(uint16_t port), uint8_t val, UNUSED(void *priv))
             return;
 
         case 0x41:
+            if (mindset.tick_pending) {
+                mindset.tick_pending = 0;
+
+                if (mind_pcb != NULL)
+                    mind_icu_int(3, 0);
+            }
             return;
 
         default:
@@ -1573,6 +1598,19 @@ mind_fast_sample(void *priv)
             pclog("[MIND]   bring[%02d] = %04X:%04X\n", i, mind_ring[k].rseg, mind_ring[k].roff);
         }
 
+        /* Keep the interrupt table too: which vectors the BIOS installs is
+           what tells whether a DOS service exists at all. */
+        {
+            FILE *iv = fopen("/tmp/mind-ivt.bin", "wb");
+
+            if (iv != NULL) {
+                for (uint32_t a = 0; a < 0x400; a++)
+                    fputc(mem_readb_phys(a), iv);
+
+                fclose(iv);
+            }
+        }
+
         /* The first FAT sector is read into 8000h; keep it for comparison. */
         {
             FILE *f = fopen("/tmp/mind-fat.bin", "wb");
@@ -1881,6 +1919,12 @@ machine_mindset_init(const machine_t *model)
 
     timer_add(&mindset.mcu_timer, mind_mcu_ready, NULL, 0);
     timer_add(&mindset.rtc_timer, mind_rtc_tick, NULL, 0);
+    /* The board's 18.2 Hz tick, still being worked out: the BIOS's handler for
+       that event goes somewhere we have not identified, so it stays off. */
+    if (getenv("MIND_TICK") != NULL) {
+        timer_add(&mindset.tick_timer, mind_tick_pulse, NULL, 0);
+        timer_set_delay_u64(&mindset.tick_timer, 54945ULL * TIMER_USEC);
+    }
     timer_set_delay_u64(&mindset.rtc_timer, (uint64_t) TIMER_USEC * 1000000u);
     timer_add(&mind_key_timer, mind_key_next, NULL, 0);
 
