@@ -114,6 +114,14 @@ mind_vram_write(uint32_t addr, uint8_t val, void *priv)
               cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
     }
 
+    /* MIND_SLOTLOG: the event slots the BIOS polls live at 7D50h-7D5Fh, and
+       whatever posts there decides what the machine does next, so every write
+       to them is worth seeing. */
+    if (((addr & 0x7fff) >= 0x7d50) && ((addr & 0x7fff) <= 0x7d5f) &&
+        (getenv("MIND_SLOTLOG") != NULL))
+        pclog("[MIND] slot w1 %05X = %02X @%04X:%04X\n", addr & 0x7fff, val,
+              cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
+
     ((uint8_t *) priv)[addr & (MIND_VRAM_SIZE - 1)] = val;
 }
 
@@ -128,6 +136,10 @@ mind_vram_writew(uint32_t addr, uint16_t val, void *priv)
         pclog("[MIND] vw2 %05X %04X @%04X:%04X\n", off, val,
               cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
     }
+
+    if ((off >= 0x7d50) && (off <= 0x7d5f) && (getenv("MIND_SLOTLOG") != NULL))
+        pclog("[MIND] slot w2 %05X = %04X @%04X:%04X\n", off, val,
+              cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
 
     vram[off]     = (uint8_t) (val & 0xff);
     vram[off + 1] = (uint8_t) (val >> 8);
