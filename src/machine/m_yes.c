@@ -35,7 +35,7 @@
 #include <86box/plat.h>
 #include <86box/timer.h>
 #include <86box/i8018x.h>
-#include <86box/wd2791.h>
+#include <86box/wd279x.h>
 #include <86box/intel_8256.h>
 #include <86box/keyboard.h>
 #include <86box/yes_video.h>
