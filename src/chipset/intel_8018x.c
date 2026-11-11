@@ -517,10 +517,11 @@ i8018x_pcb_icu_acknowledge(struct i8018x_pcb_t *pcb)
     else
         pcb->icu_latch &= (uint16_t) ~i8018x_icu_src[i];
 
-    /* Cascade mode: the 8259 supplies the vector on the INTA pair. */
-    if (((i == 5) || (i == 6)) &&
-        (pcb->regs[I8018X_ICU_INT_CON(i - 5) / 2] & I8018X_ICU_CON_C) &&
-        (pcb->ext_ack[i - 5] != NULL))
+    /* Cascade mode: the external controller supplies the vector on the INTA
+       pair.  A machine that installs an acknowledge handler for the pin has
+       done so because its part vectors that way, so the control register's
+       cascade bit is not required here. */
+    if (((i == 5) || (i == 6)) && (pcb->ext_ack[i - 5] != NULL))
         return pcb->ext_ack[i - 5](pcb->ext_ack_priv[i - 5]);
 
     return i8018x_icu_type[i];
