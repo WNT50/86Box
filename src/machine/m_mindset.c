@@ -731,6 +731,7 @@ mind_mcu_ready(void *priv)
    when control later jumps into unpopulated memory. */
 static int      mind_ivt_left;
 static mem_mapping_t mind_ivt_map;
+static void     mind_dump_ram(void);
 
 static uint8_t
 mind_ivt_read(uint32_t addr, void *priv)
@@ -774,6 +775,12 @@ mind_ivt_writew(uint32_t addr, uint16_t val, void *priv)
 
     ram[addr & 0xfffff] = (uint8_t) val;
     ram[(addr + 1) & 0xfffff] = (uint8_t) (val >> 8);
+
+    /* The BIOS puts the interrupt table back the moment the memory test lets
+       go of it, which is the point worth comparing with another emulator. */
+    if (((addr & 0xfffff) == 0x00034) && (val == 0x5bff) &&
+        (getenv("MIND_RAMDUMP_IVT") != NULL))
+        mind_dump_ram();
 }
 
 /* The system controller keeps the machine's clock in its own RAM: seconds,
