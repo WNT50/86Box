@@ -587,7 +587,10 @@ mind_poll(void *priv)
 
     video_blit_memtoscreen(0, 0, xsize, ysize);
 
-    if (vid->irq != NULL) {
+    /* Nothing is signalled until the BIOS has programmed the display: until
+       then the board has not enabled the raster, and a stray request would
+       arrive before the guest has any handler installed. */
+    if ((vid->irq != NULL) && (vid->dispctrl != 0x0000)) {
         /* vertical blank: a level that lasts the blanking period */
         vid->irq(vid->irq_priv, 1, 1);
         timer_set_delay_u64(&vid->vblank_timer, (uint64_t) (TIMER_USEC * 1400.0));

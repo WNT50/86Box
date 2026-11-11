@@ -747,8 +747,7 @@ mind_ivt_readw(uint32_t addr, void *priv)
 static void
 mind_ivt_write(uint32_t addr, uint8_t val, void *priv)
 {
-    if ((mind_ivt_left > 0) && ((addr & 0xfffff) < 0x0400)) {
-        mind_ivt_left--;
+    if ((val == 0) && ((addr & 0xfffff) < 0x0400)) {
         pclog("[MIND] ivt w1 %04X = %02X @%04X:%04X\n", addr & 0xfffff, val,
               cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
     }
@@ -759,8 +758,7 @@ mind_ivt_write(uint32_t addr, uint8_t val, void *priv)
 static void
 mind_ivt_writew(uint32_t addr, uint16_t val, void *priv)
 {
-    if ((mind_ivt_left > 0) && ((addr & 0xfffff) < 0x0400)) {
-        mind_ivt_left--;
+    if ((val == 0) && ((addr & 0xfffff) < 0x0400)) {
         uint32_t cs_base = (uint32_t) cpu_state.seg_cs.seg << 4;
         uint16_t at      = (uint16_t) cpu_state.pc;
 
@@ -1218,9 +1216,25 @@ mind_dump_boot(const char *tag)
 
 /* MIND_DUMP_SEC=<n>: write display RAM once, n seconds in. */
 static void
+mind_dump_ram(void)
+{
+    FILE *f = fopen("/tmp/mind-ram.bin", "wb");
+
+    if (f == NULL)
+        return;
+
+    for (uint32_t a = 0; a < 0x10000; a++)
+        fputc(mem_readb_phys(a), f);
+
+    fclose(f);
+    pclog("[MIND] low 64 KB of memory dumped\n");
+}
+
+static void
 mind_dump_timed(void *priv)
 {
     mind_dump_vram("sec");
+    mind_dump_ram();
 }
 
 static void
@@ -1372,6 +1386,33 @@ mind_sample(void *priv)
 
     pclog("[MIND] pc=%04X:%04X frames=%d\n", cpu_state.seg_cs.seg,
           (uint16_t) cpu_state.pc, frames);
+
+    /* MIND_RAMDUMP=<frame>: drop the low 64 KB of memory so the same frame can
+       be compared byte for byte with another emulator's view of it. */
+    {
+        static const char *ramdump_at   = NULL;
+        static int         ramdump_done = 0;
+        static int         ram_samples  = 0;
+
+        if (ramdump_at == NULL)
+            ramdump_at = getenv("MIND_RAMDUMP");
+
+        ram_samples++;
+
+        if ((ramdump_at != NULL) && !ramdump_done && (ram_samples == atoi(ramdump_at))) {
+            FILE *f = fopen("/tmp/mind-ram.bin", "wb");
+
+            ramdump_done = 1;
+
+            if (f != NULL) {
+                for (uint32_t a = 0; a < 0x10000; a++)
+                    fputc(mem_readb_phys(a), f);
+
+                fclose(f);
+                pclog("[MIND] low 64 KB of memory dumped at frame %d\n", frames);
+            }
+        }
+    }
 
     /* If control ever leaves the ROM, the stack frame that got it there says
        who jumped: dump it once, then stay quiet. */
