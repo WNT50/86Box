@@ -1355,8 +1355,10 @@ mind_fdc_drq(void *priv, int set)
     /* In port mode the controller parks a byte and asks for a transfer; the
        board's channel 1 then reads it from 8054h, which is what makes the
        transfer happen without any pushing from us. */
-    if (mindset.fdc_portdma && set && (mind_pcb != NULL))
-        i8018x_pcb_dma_request(mind_pcb, 1);
+    if (mindset.fdc_portdma && set && (mind_pcb != NULL)) {
+        if (i8018x_pcb_dma_request(mind_pcb, 1) && (mindset.fdc != NULL))
+            fdc_set_tc(mindset.fdc);
+    }
 
     if (mindset.log)
         pclog("[MIND] fdc drq %d\n", set);

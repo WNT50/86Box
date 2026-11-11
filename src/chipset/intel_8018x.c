@@ -1209,14 +1209,25 @@ static const dma_ctrl_t i8018x_pcb_dma_ops = {
    leaves one unused) and calls this once, after the device exists and after
    the machine's dma_init(), which drops every channel owner first. */
 /* A board raises this when one of its peripherals wants a transfer. */
-void
+int
 i8018x_pcb_dma_request(struct i8018x_pcb_t *dev, int channel)
 {
     if (dev == NULL)
-        return;
+        return 0;
 
     i8018x_pcb_dma_set_drq(channel, 1, dev);
     i8018x_pcb_dma_set_drq(channel, 0, dev);
+
+    /* A peripheral that parks bytes in a port needs to know when the channel
+       has moved its last one. */
+    {
+        int slot = i8018x_pcb_dma_slot(dev, channel);
+
+        if ((slot >= 0) && (dev->regs[I8018X_DMA_COUNT(slot)] == 0x0000))
+            return 1;
+    }
+
+    return 0;
 }
 
 void

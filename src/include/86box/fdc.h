@@ -327,6 +327,7 @@ extern const device_t fdc_hosted_device;
 extern void    fdc_port_data_write(fdc_t *fdc, uint8_t val);
 extern uint8_t fdc_port_data_read(fdc_t *fdc);
 extern int     fdc_port_data_pending(fdc_t *fdc);
+extern void    fdc_set_tc(fdc_t *fdc);
 extern const device_t fdc_at_sec_device;
 extern const device_t fdc_at_ter_device;
 extern const device_t fdc_at_qua_device;

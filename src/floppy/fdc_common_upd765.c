@@ -118,6 +118,13 @@ fdc_port_data_pending(fdc_t *fdc)
     return fdc->port_pending;
 }
 
+/* The board's DMA tells the controller when it has moved the last byte. */
+void
+fdc_set_tc(fdc_t *fdc)
+{
+    fdc->tc = 1;
+}
+
 static int
 fdc_dma_read(fdc_t *fdc)
 {
