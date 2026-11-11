@@ -128,6 +128,7 @@ typedef struct {
     pc_timer_t     mcu_timer;
     pc_timer_t     dump_timer;
     pc_timer_t     sample_timer;
+    pc_timer_t     fast_timer;
     pc_timer_t     rtc_timer;
     int            jump_reported;
 } mindset_t;
@@ -308,6 +309,18 @@ mind_blit(uint32_t packet)
         pclog("[MIND] gcp mode=%04X %04X:%04X.%X -> %04X:%04X.%X %dx%d step %d/%d mask %04X/%04X k=%04X\n",
               mode, src_seg, src_adr, src_sft, dst_seg, dst_adr, dst_sft,
               width, height, sy, dy, rmask, wmask, kmask);
+
+    /* The event slots the BIOS polls are filled by blits, not by the CPU, so
+       a blit that lands there is worth a line of its own. */
+    if (getenv("MIND_SLOTLOG") != NULL) {
+        uint32_t slot_lo = 0xb8000u + 0x7d50u;
+        uint32_t slot_hi = 0xb8000u + 0x7d5fu;
+        uint32_t end     = dst_base + dst_adr + (uint32_t) (width ? width : 1) * 2u;
+
+        if ((dst_base + dst_adr) <= slot_hi && end >= slot_lo)
+            pclog("[MIND] slot blit mode=%04X dst=%05X w=%d h=%d src=%05X\n",
+                  mode, dst_base + dst_adr, width, height, src_base + src_adr);
+    }
 
     if (mode & 0x0200) {
         /* Pattern fill: one source word repeated across the row. */
@@ -810,7 +823,10 @@ mind_rtc_tick(void *priv)
 static void
 mind_mcu_busy(void)
 {
-    mindset.sys_sts = MIND_MCU_BUSY;
+    /* The controller answers at once: holding the busy bits up makes the
+       BIOS's timed waits fall through to their failure path and retry, which
+       walks the stack down through the vector table. */
+    mindset.sys_sts = 0x00;
     timer_set_delay_u64(&mindset.mcu_timer, MIND_MCU_DELAY * TIMER_USEC);
 }
 
@@ -1377,15 +1393,111 @@ mind_fdc_ack_read(uint16_t port, void *priv)
     return 0x00;
 }
 
+/* MIND_FASTTRACE keeps the last few dozen program counters at a hundred
+   microseconds a sample, so the instruction that leaves the ROM can be seen
+   even though the ordinary sampler only looks every twenty milliseconds. */
+#define MIND_RING 96
+
+static struct {
+    uint16_t rseg;
+    uint16_t roff;
+    uint16_t rsp;
+} mind_ring[MIND_RING];
+
+static int mind_stack_low_reported;
+
+static int mind_ring_pos;
+static int mind_ring_on;
+static int mind_boot_reported;
+static uint16_t mind_last_cs;
+
+static void
+mind_fast_sample(void *priv)
+{
+    mind_ring[mind_ring_pos].rseg = cpu_state.seg_cs.seg;
+    mind_ring[mind_ring_pos].roff = (uint16_t) cpu_state.pc;
+    mind_ring[mind_ring_pos].rsp  = (uint16_t) cpu_state.regs[4].w;
+    mind_ring_pos = (mind_ring_pos + 1) % MIND_RING;
+
+    /* The stack is only a few kilobytes; once it drops into the interrupt
+       vector table something is pushing in a loop. */
+    if (mind_ring_on && !mind_stack_low_reported &&
+        ((uint16_t) cpu_state.regs[4].w < 0x0400)) {
+        mind_stack_low_reported = 1;
+
+        pclog("[MIND] stack collapsed: SP=%04X at %04X:%04X\n",
+              (uint16_t) cpu_state.regs[4].w, cpu_state.seg_cs.seg,
+              (uint16_t) cpu_state.pc);
+
+        for (int i = 0; i < MIND_RING; i++) {
+            int k = (mind_ring_pos + i) % MIND_RING;
+
+            pclog("[MIND]   stk[%02d] = %04X:%04X sp=%04X\n", i,
+                  mind_ring[k].rseg, mind_ring[k].roff, mind_ring[k].rsp);
+        }
+    }
+
+    /* Once the boot sector is running, the interesting moment is control
+       leaving it again: that is where the boot comes apart. */
+    if (mind_ring_on && mindset.jump_reported && !mind_boot_reported &&
+        (cpu_state.seg_cs.seg != 0xf800) && (cpu_state.seg_cs.seg != 0x0000)) {
+        mind_boot_reported = 1;
+
+        pclog("[MIND] left the boot sector: CS:IP=%04X:%04X AX=%04X BX=%04X CX=%04X DX=%04X\n",
+              cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc,
+              (uint16_t) cpu_state.regs[0].w, (uint16_t) cpu_state.regs[3].w,
+              (uint16_t) cpu_state.regs[1].w, (uint16_t) cpu_state.regs[2].w);
+        pclog("[MIND]   DS=%04X ES=%04X SS=%04X SP=%04X SI=%04X DI=%04X BP=%04X\n",
+              cpu_state.seg_ds.seg, cpu_state.seg_es.seg, cpu_state.seg_ss.seg,
+              (uint16_t) cpu_state.regs[4].w, (uint16_t) cpu_state.regs[6].w,
+              (uint16_t) cpu_state.regs[7].w, (uint16_t) cpu_state.regs[5].w);
+
+        for (int i = 0; i < MIND_RING; i++) {
+            int k = (mind_ring_pos + i) % MIND_RING;
+
+            pclog("[MIND]   bring[%02d] = %04X:%04X\n", i, mind_ring[k].rseg, mind_ring[k].roff);
+        }
+    }
+
+    mind_last_cs = cpu_state.seg_cs.seg;
+
+    /* Catch the moment control leaves the ROM here, while the ring still
+       holds the samples from just before it. */
+    if (!mindset.jump_reported && (cpu_state.seg_cs.seg != 0xf800)) {
+        mindset.jump_reported = 1;
+
+        for (int i = 0; i < MIND_RING; i++) {
+            int k = (mind_ring_pos + i) % MIND_RING;
+
+            pclog("[MIND]   ring[%02d] = %04X:%04X\n", i, mind_ring[k].rseg, mind_ring[k].roff);
+        }
+
+        /* Control has just left the ROM: whatever sits at 7C00h is the sector
+           the guest is about to run. */
+        {
+            FILE *f = fopen("/tmp/mind-boot.bin", "wb");
+
+            if (f != NULL) {
+                for (uint32_t a = 0x7c00; a < 0x7e00; a++)
+                    fputc(mem_readb_phys(a), f);
+
+                fclose(f);
+            }
+        }
+    }
+
+    timer_set_delay_u64(&mindset.fast_timer, 100 * TIMER_USEC);
+}
+
 /* Sampler: without a serial console the only way to tell "the CPU is still
    running the ROM" from "it wedged in a loop" is where it is over time. */
 static void
 mind_sample(void *priv)
 {
     if (mindset.log)
-        pclog("[MIND] flags [0x12]=%02X [0x15]=%04X [0x1e]=%04X int0D=%04X:%04X\n",
+        pclog("[MIND] flags [0x12]=%02X [0x15]=%04X [0x1e]=%04X eq=%04X int0D=%04X:%04X\n",
               mem_readb_phys(0x412), mem_readw_phys(0x415), mem_readw_phys(0x41e),
-              mem_readw_phys(0x36), mem_readw_phys(0x34));
+              mem_readw_phys(0x410), mem_readw_phys(0x36), mem_readw_phys(0x34));
     if (mindset.log)
         pclog("[MIND] mode=%02X cols=%04X disp=%04X cur=%04X\n",
               mem_readb_phys(0x449), mem_readw_phys(0x44a),
@@ -1427,6 +1539,13 @@ mind_sample(void *priv)
         uint32_t stack_top_base = ((uint32_t) cpu_state.seg_ss.seg << 4) + cpu_state.regs[4].w;
 
         mindset.jump_reported = 1;
+
+        if (mind_ring_on)
+            for (int i = 0; i < MIND_RING; i++) {
+                int k = (mind_ring_pos + i) % MIND_RING;
+
+                pclog("[MIND]   ring[%02d] = %04X:%04X\n", i, mind_ring[k].rseg, mind_ring[k].roff);
+            }
 
         pclog("[MIND] left the ROM: CS:IP=%04X:%04X SS:SP=%04X:%04X\n",
               cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc,
@@ -1644,6 +1763,12 @@ machine_mindset_init(const machine_t *model)
         timer_set_delay_u64(&key_timer, 6ULL * 1000000ULL * TIMER_USEC);
     }
     timer_add(&mindset.sample_timer, mind_sample, NULL, 0);
+    timer_add(&mindset.fast_timer, mind_fast_sample, NULL, 0);
+
+    if (getenv("MIND_FASTTRACE") != NULL) {
+        mind_ring_on = 1;
+        timer_set_delay_u64(&mindset.fast_timer, 100 * TIMER_USEC);
+    }
     timer_set_delay_u64(&mindset.sample_timer, mind_interval * TIMER_USEC);
 
     return 1;

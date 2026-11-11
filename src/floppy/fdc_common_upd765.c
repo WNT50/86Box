@@ -3421,7 +3421,9 @@ const device_t fdc_hosted_device = {
     .name          = "Hosted FDC",
     .internal_name = "fdc_hosted",
     .flags         = 0,
-    .local         = FDC_FLAG_AT | FDC_FLAG_HOSTED,
+    /* The Mindset's 8272A answers as an XT-class part: SENSE DRIVE STATUS
+       reports the drive's own pins instead of the AT's always-ready bits. */
+    .local         = FDC_FLAG_NEC | FDC_FLAG_HOSTED,
     .init          = fdc_init,
     .close         = fdc_close,
     .reset         = fdc_reset,
