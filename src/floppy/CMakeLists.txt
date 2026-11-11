@@ -38,6 +38,7 @@ add_library(fdd OBJECT
     fdd_td0.c
     fdd_tape.c
     fdd_audio.c
+    wd279x.c
 )
 
 add_subdirectory(lzw)

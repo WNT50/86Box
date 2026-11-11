@@ -46,6 +46,7 @@ extern int  fdd_track0(void *priv);
 extern int  fdd_index(void *priv);
 extern int  fdd_get_type_max_track(int type);
 extern int  fdd_getrpm(void *priv);
+extern int  fdd_get_bitcell_period(int rate);
 extern void fdd_set_densel(int bus, int densel);
 extern int  fdd_can_read_medium(void *priv);
 extern int  fdd_doublestep_40(void *priv);

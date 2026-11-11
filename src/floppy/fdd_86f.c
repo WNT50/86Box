@@ -3466,6 +3466,26 @@ d86f_common_command(void *priv, const int sector, const int track, const int sid
     return 1;
 }
 
+int
+d86f_get_sector_size_code(void *priv, int side, int c, int h, int r)
+{
+    fdd_drive_t *drv = (fdd_drive_t *) priv;
+    d86f_t      *dev = (d86f_t *) drv->d86f_priv;
+    sector_t    *s;
+
+    if (dev == NULL)
+        return -1;
+
+    s = dev->last_side_sector[side];
+    while (s != NULL) {
+        if ((s->c == c) && (s->h == h) && (s->r == r))
+            return s->n;
+        s = s->prev;
+    }
+
+    return -1;
+}
+
 void
 d86f_readsector(void *priv, const int sector, const int track, const int side,
                 const int rate, const int sector_size)
