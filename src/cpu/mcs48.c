@@ -5,6 +5,7 @@
    User's Manual; the port wiring is the caller's business.
    Standalone test build: gcc -O2 -o t mcs48_core.c mcs48_test.c */
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <86box/mcs48.h>
@@ -33,6 +34,36 @@ struct mcs48 {
 
     mcs48_hooks h;
 };
+
+mcs48 *
+mcs48_create(void)
+{
+    return (mcs48 *) calloc(1, sizeof(mcs48));
+}
+
+uint8_t *
+mcs48_rom(mcs48 *c)
+{
+    return c->rom;
+}
+
+void
+mcs48_set_rom_mask(mcs48 *c, uint32_t mask)
+{
+    c->rom_mask = mask;
+}
+
+mcs48_hooks *
+mcs48_hooks_of(mcs48 *c)
+{
+    return &c->h;
+}
+
+void
+mcs48_destroy(mcs48 *c)
+{
+    free(c);
+}
 
 void mcs48_reset(mcs48 *c)
 {

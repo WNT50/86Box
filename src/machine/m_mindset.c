@@ -36,6 +36,7 @@
 #include <86box/mem.h>
 #include <86box/io.h>
 #include <86box/rom.h>
+#include <86box/mcs48.h>
 #include <86box/device.h>
 #include <86box/plat.h>
 #include <86box/timer.h>
@@ -133,6 +134,9 @@ typedef struct {
     pc_timer_t     rtc_timer;
     pc_timer_t     tick_timer;
     int            tick_pending;
+    mcs48         *mcu;
+    int            mcu_fw;
+    pc_timer_t     mcu_fw_timer;
     int            jump_reported;
 } mindset_t;
 
@@ -811,6 +815,70 @@ static int
 mind_unbcd(uint8_t v)
 {
     return ((v >> 4) * 10) + (v & 0x0f);
+}
+
+/* --- the system controller running its own firmware --------------------- */
+
+static void
+mind_mcu_p1_out(mcs48 *c, uint8_t v)
+{
+    if (mindset.log && ((v & 0x41) != 0x41))
+        pclog("[MIND] mcu P1 = %02X\n", v);
+}
+
+static void
+mind_mcu_p2_out(mcs48 *c, uint8_t v)
+{
+    static int last_bit7 = 1;
+    int bit7 = (v & 0x80) ? 1 : 0;
+
+    /* P2 bit 7 is the controller's line to the main CPU's INT3. */
+    if (bit7 != last_bit7) {
+        last_bit7 = bit7;
+
+        if (mind_pcb != NULL)
+            mind_icu_int(3, !bit7);
+    }
+}
+
+static uint8_t
+mind_mcu_bus_in(mcs48 *c)
+{
+    return 0xff;
+}
+
+static void
+mind_mcu_bus_out(mcs48 *c, uint8_t v)
+{
+    if (mindset.log)
+        pclog("[MIND] mcu BUS out = %02X\n", v);
+}
+
+static int
+mind_mcu_t0_in(mcs48 *c)
+{
+    return 0;
+}
+
+static int
+mind_mcu_t1_in(mcs48 *c)
+{
+    /* The controller watches the floppy interrupt through T1. */
+    return mindset.fdc_irq ? 0 : 1;
+}
+
+static void
+mind_mcu_fw_tick(void *priv)
+{
+    static int in_tick = 0;
+
+    if (!in_tick) {
+        in_tick = 1;
+        mcs48_run(mindset.mcu, 480);   /* ~7.16 MHz / 15 cycles per instruction */
+        in_tick = 0;
+    }
+
+    timer_set_delay_u64(&mindset.mcu_fw_timer, 1000ULL * TIMER_USEC);
 }
 
 /* 18.2 Hz: the board's time base, one pulse per 54945 us like the PC's.  The
@@ -1936,6 +2004,41 @@ machine_mindset_init(const machine_t *model)
 
     timer_add(&mindset.mcu_timer, mind_mcu_ready, NULL, 0);
     timer_add(&mindset.rtc_timer, mind_rtc_tick, NULL, 0);
+    /* Run the system controller's own firmware, the way the board does. */
+    mindset.mcu_fw = (getenv("MIND_MCU") != NULL) && (strcmp(getenv("MIND_MCU"), "fw") == 0);
+
+    if (mindset.mcu_fw) {
+        FILE *f = rom_fopen("roms/machines/mindset/mindset_u17_253002.bin", "rb");
+
+        if ((f != NULL) && (mindset.mcu = mcs48_create()) != NULL) {
+            mcs48_hooks *hk = mcs48_hooks_of(mindset.mcu);
+            uint8_t     *rom = mcs48_rom(mindset.mcu);
+            size_t       n;
+
+            n = fread(rom, 1, 4096, f);
+            fclose(f);
+
+            mcs48_set_rom_mask(mindset.mcu, (n == 2048) ? 0x7ff : 0xfff);
+
+            hk->p1_out  = mind_mcu_p1_out;
+            hk->p2_out  = mind_mcu_p2_out;
+            hk->bus_in  = mind_mcu_bus_in;
+            hk->bus_out = mind_mcu_bus_out;
+            hk->t0_in   = mind_mcu_t0_in;
+            hk->t1_in   = mind_mcu_t1_in;
+
+            mcs48_reset(mindset.mcu);
+
+            timer_add(&mindset.mcu_fw_timer, mind_mcu_fw_tick, NULL, 0);
+            timer_set_delay_u64(&mindset.mcu_fw_timer, 1000ULL * TIMER_USEC);
+
+            pclog("[MIND] system controller firmware loaded (%zu bytes)\n", n);
+        } else {
+            pclog("[MIND] system controller firmware missing, staying on the HLE\n");
+            mindset.mcu_fw = 0;
+        }
+    }
+
     /* The board's 18.2 Hz tick, still being worked out: the BIOS's handler for
        that event goes somewhere we have not identified, so it stays off. */
     if (getenv("MIND_TICK") != NULL) {
