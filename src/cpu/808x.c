@@ -1796,6 +1796,16 @@ x86_div(uint16_t l, uint16_t h)
     if (h >= cpu_src) {
         if (opcode != 0xd4)
             wait_cycs(1, 0);
+
+        if (getenv("MIND_DIVLOG") != NULL) {
+            static int mdr_n = 0;
+
+            if (mdr_n < 20) {
+                mdr_n++;
+                pclog("[MIND] #DE at %04X:%04X op=%02X src=%04X AX=%04X DX=%04X\n",
+                      CS, (uint16_t) (cpu_state.pc - 1), opcode, cpu_src, AX, DX);
+            }
+        }
         interrupt(0);
         return 0;
     }
@@ -1832,6 +1842,16 @@ x86_div(uint16_t l, uint16_t h)
         if (top_bit(l, bit_count)) {
             if (cpu_mod == 3)
                 wait_cycs(1, 0);
+
+        if (getenv("MIND_DIVLOG") != NULL) {
+            static int mdr_n = 0;
+
+            if (mdr_n < 20) {
+                mdr_n++;
+                pclog("[MIND] #DE at %04X:%04X op=%02X src=%04X AX=%04X DX=%04X\n",
+                      CS, (uint16_t) (cpu_state.pc - 1), opcode, cpu_src, AX, DX);
+            }
+        }
             interrupt(0);
             return 0;
         }

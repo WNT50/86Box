@@ -2569,6 +2569,20 @@ interrupt_routine(m808x_cpu_t *icpu, const uint8_t vector, const bool skip_first
 static void
 software_interrupt(m808x_cpu_t *icpu, uint8_t vector)
 {
+    /* The clock service is what says whether this machine has a real time
+       clock at all: DOS asks for AH=0 (ticks) or AH=2 (RTC) and the BIOS only
+       answers the first. */
+    if ((vector == 0x1a) && (getenv("MIND_INTLOG") != NULL)) {
+        static int n = 0;
+
+        if (n < 60) {
+            n++;
+            pclog("[MIND] int 1Ah AH=%02X from %04X:%04X CX=%04X DX=%04X\n",
+                  (icpu->regs[0].x >> 8) & 0xff, icpu->segs[1], icpu->pc,
+                  icpu->regs[1].x, icpu->regs[2].x);
+        }
+    }
+
     interrupt_routine(icpu, vector, false);
 }
 
@@ -2583,7 +2597,7 @@ divide_interrupt(m808x_cpu_t *icpu)
             n++;
             pclog("[MIND] #DE at %04X:%04X AX=%04X DX=%04X\n",
                   icpu->segs[1], icpu->pc,
-                  icpu->regs[0], icpu->regs[2]);
+                  icpu->regs[0].x, icpu->regs[2].x);
         }
     }
 
