@@ -1838,6 +1838,19 @@ mind_sample(void *priv)
         }
     }
 
+    if (mindset.log) {
+        static int tick_secs = 0;
+
+        if (++tick_secs >= 10) {
+            uint16_t lo = mem_readw_phys(0x46c);
+            uint16_t hi = mem_readw_phys(0x46e);
+
+            tick_secs = 0;
+            pclog("[MIND] tick = %u (hi %04X) @ %04X:%04X\n", lo, hi,
+                  cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
+        }
+    }
+
     timer_set_delay_u64(&mindset.sample_timer, mind_interval * TIMER_USEC);
 }
 
