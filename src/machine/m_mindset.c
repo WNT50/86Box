@@ -704,6 +704,59 @@ mind_mcu_ready(void *priv)
     mindset.sys_sts = 0x00;
 }
 
+/* MIND_IVT=1 watches the interrupt vector table: the guest's own writes are
+   passed through, but the first few hundred are logged with the code that
+   issued them, which is the only way to find what scribbles over the vectors
+   when control later jumps into unpopulated memory. */
+static int      mind_ivt_left;
+static mem_mapping_t mind_ivt_map;
+
+static uint8_t
+mind_ivt_read(uint32_t addr, void *priv)
+{
+    return ram[addr & 0xfffff];
+}
+
+static uint16_t
+mind_ivt_readw(uint32_t addr, void *priv)
+{
+    return (uint16_t) (ram[addr & 0xfffff] | (ram[(addr + 1) & 0xfffff] << 8));
+}
+
+static void
+mind_ivt_write(uint32_t addr, uint8_t val, void *priv)
+{
+    if (mind_ivt_left > 0) {
+        mind_ivt_left--;
+        pclog("[MIND] ivt w1 %04X = %02X @%04X:%04X\n", addr & 0xfffff, val,
+              cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc);
+    }
+
+    ram[addr & 0xfffff] = val;
+}
+
+static void
+mind_ivt_writew(uint32_t addr, uint16_t val, void *priv)
+{
+    if (mind_ivt_left > 0) {
+        mind_ivt_left--;
+        uint32_t cs_base = (uint32_t) cpu_state.seg_cs.seg << 4;
+        uint16_t at      = (uint16_t) cpu_state.pc;
+
+        /* The pc has usually moved past the store by the time the handler
+           runs, so print the bytes just before it: decoding those tells which
+           instruction wrote the vector. */
+        pclog("[MIND] ivt w2 %04X = %04X @%04X:%04X code:",
+              addr & 0xfffff, val, cpu_state.seg_cs.seg, at);
+        for (int i = 8; i >= 1; i--)
+            pclog(" %02X", mem_readb_phys(cs_base + ((at - i) & 0xffff)));
+        pclog("\n");
+    }
+
+    ram[addr & 0xfffff] = (uint8_t) val;
+    ram[(addr + 1) & 0xfffff] = (uint8_t) (val >> 8);
+}
+
 /* The system controller keeps the machine's clock in its own RAM: seconds,
    minutes, hours, day and month at 22h-26h, and the BIOS reads them back
    through its registers.  Nothing else drives them, so they tick here. */
@@ -1386,6 +1439,18 @@ machine_mindset_init(const machine_t *model)
        window at B8000h; the blitter reaches the same memory through the
        physical bus. */
     device_add(&mindset_video_device);
+
+    if (getenv("MIND_IVT") != NULL) {
+        mind_ivt_left = atoi(getenv("MIND_IVT"));
+        /* Hand the first kilobyte to the probe; the handlers put the bytes
+           back into RAM themselves. */
+        mem_set_mem_state_both(0x00000, 0x00400,
+                               MEM_READ_EXTANY | MEM_WRITE_EXTANY);
+        mem_mapping_add(&mind_ivt_map, 0x00000, 0x00400,
+                        mind_ivt_read, mind_ivt_readw, NULL,
+                        mind_ivt_write, mind_ivt_writew, NULL,
+                        NULL, MEM_MAPPING_EXTERNAL, NULL);
+    }
 
     /* 80186 on-chip peripherals.  Neither DMA channel has a device yet, and
        the chip selects are stored but not decoded (intel_8018x.c:13). */
