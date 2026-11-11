@@ -23,6 +23,7 @@ struct mcs48 {
     uint8_t  t;                 /* timer/counter */
     int      tf;                /* timer flag */
     int      t_running, cnt_running;
+    int      t_prescale;      /* machine cycles toward the next timer tick */
     int      irq_en, tcnti_en;
     int      f0, f1;
     int      mb;                /* MB0/MB1: program memory bank */
@@ -300,11 +301,14 @@ int mcs48_step(mcs48 *c)
 
     if (take) { c->pc = (uint16_t) ((c->pc & 0xf00) | arg); used = 2; }
 
-    /* timer: counts machine cycles / 32 */
+    /* The timer counts machine cycles divided by 32, and one machine cycle is
+       fifteen clock periods. */
     if (c->t_running) {
-        static int prescale;
-        if (++prescale >= 32) {
-            prescale = 0;
+        c->t_prescale += used;
+
+        while (c->t_prescale >= 32) {
+            c->t_prescale -= 32;
+
             if (++c->t == 0) {
                 c->tf = 1;
                 if (c->tcnti_en && c->irq_en) c->int_pending = 1;
