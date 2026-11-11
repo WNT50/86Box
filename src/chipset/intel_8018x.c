@@ -73,8 +73,10 @@ pcx_iolog_init(void)
 #define I8018X_DMA_SRC_HI(i)    ((I8018X_DMA0_BASE + ((i) * 0x10u) + 2u) / 2)
 #define I8018X_DMA_DST_LO(i)    ((I8018X_DMA0_BASE + ((i) * 0x10u) + 4u) / 2)
 #define I8018X_DMA_DST_HI(i)    ((I8018X_DMA0_BASE + ((i) * 0x10u) + 6u) / 2)
-#define I8018X_DMA_COUNT(i)     ((I8018X_DMA0_BASE + ((i) * 0x10u) + 8u) / 2)
-#define I8018X_DMA_CTRL(i)      ((I8018X_DMA0_BASE + ((i) * 0x10u) + 10u) / 2)
+#define I8018X_DMA_COUNT_OFF(i) (I8018X_DMA0_BASE + ((i) * 0x10u) + 8u)
+#define I8018X_DMA_CTRL_OFF(i)  (I8018X_DMA0_BASE + ((i) * 0x10u) + 10u)
+#define I8018X_DMA_COUNT(i)     (I8018X_DMA_COUNT_OFF(i) / 2) /* word index */
+#define I8018X_DMA_CTRL(i)      (I8018X_DMA_CTRL_OFF(i) / 2)  /* word index */
 
 /* DMA control word (270788-001 Figure 67). The source and destination fields
    are three separate bits each: M/IO selects memory, INC/DEC move the pointer
@@ -698,21 +700,21 @@ i8018x_pcb_read_word(struct i8018x_pcb_t *dev, uint16_t off)
     }
 
     /* CHG/NOCHG is write only (270788-001 section 8.2). */
-    if ((off == I8018X_DMA_CTRL(0)) || (off == I8018X_DMA_CTRL(1)))
+    if ((off == I8018X_DMA_CTRL_OFF(0)) || (off == I8018X_DMA_CTRL_OFF(1)))
         return (uint16_t) (dev->regs[off / 2] & ~I8018X_DMA_CHG);
 
     /* PCX_DMALOG=1: what the guest reads back out of a channel's count
        register, with where it asked.  The floppy driver decides whether a
        transfer is still in progress from this value. */
-    if (((off == I8018X_DMA_COUNT(0)) || (off == I8018X_DMA_COUNT(1))) &&
+    if (((off == I8018X_DMA_COUNT_OFF(0)) || (off == I8018X_DMA_COUNT_OFF(1))) &&
         (getenv("PCX_DMALOG") != NULL)) {
         static long cn;
 
         if (cn++ < 4000)
             pclog("[DMA-CNTR] slot=%d read=%04X ctrl=%04X @%04X:%04X\n",
-                  (off == I8018X_DMA_COUNT(0)) ? 0 : 1,
+                  (off == I8018X_DMA_COUNT_OFF(0)) ? 0 : 1,
                   dev->regs[off / 2],
-                  dev->regs[I8018X_DMA_CTRL((off == I8018X_DMA_COUNT(0)) ? 0 : 1) / 2],
+                  dev->regs[I8018X_DMA_CTRL((off == I8018X_DMA_COUNT_OFF(0)) ? 0 : 1)],
                   (uint16_t) cpu_state.temp_CS, (uint16_t) cpu_state.temp_pc);
     }
 
@@ -758,7 +760,7 @@ i8018x_pcb_write_word(struct i8018x_pcb_t *dev, uint16_t off, uint16_t val)
     /* CHG/NOCHG gates the ST/STOP bit: a control word write that leaves
        it clear keeps the channel running as it was, and the bit itself is
        write only, always reading back as zero (270788-001 section 8.2). */
-    if ((off == I8018X_DMA_CTRL(0)) || (off == I8018X_DMA_CTRL(1))) {
+    if ((off == I8018X_DMA_CTRL_OFF(0)) || (off == I8018X_DMA_CTRL_OFF(1))) {
         if (!(val & I8018X_DMA_CHG))
             val = (uint16_t) ((val & ~I8018X_DMA_ST) | (dev->regs[off / 2] & I8018X_DMA_ST));
 
@@ -810,11 +812,11 @@ i8018x_pcb_write_word(struct i8018x_pcb_t *dev, uint16_t off, uint16_t val)
 
     /* A control word that arms an unsynchronized channel starts it at once
        (270788-001 sections 8.2 and 8.7). */
-    if (((off == I8018X_DMA_CTRL(0)) || (off == I8018X_DMA_CTRL(1))) &&
+    if (((off == I8018X_DMA_CTRL_OFF(0)) || (off == I8018X_DMA_CTRL_OFF(1))) &&
         (dev->regs[off / 2] & I8018X_DMA_ST))
-        i8018x_pcb_dma_freerun(dev, (off == I8018X_DMA_CTRL(0)) ? 0 : 1);
+        i8018x_pcb_dma_freerun(dev, (off == I8018X_DMA_CTRL_OFF(0)) ? 0 : 1);
 
-    if ((off == I8018X_DMA_CTRL(1)) && (getenv("PCX_DMALOG") != NULL))
+    if ((off == I8018X_DMA_CTRL_OFF(1)) && (getenv("PCX_DMALOG") != NULL))
         pclog("[DMACTRL] =%04X old=%04X @%04X:%04X\n", val,
               dev->regs[off / 2], CS, cpu_state.pc);
 
@@ -1167,9 +1169,9 @@ i8018x_pcb_dma_eop(int channel)
     if (slot < 0)
         return;
 
-    i8018x_pcb_current->regs[I8018X_DMA_COUNT(slot) / 2] = 0;
-    ctrl = i8018x_pcb_current->regs[I8018X_DMA_CTRL(slot) / 2];
-    i8018x_pcb_current->regs[I8018X_DMA_CTRL(slot) / 2] = ctrl & (uint16_t) ~I8018X_DMA_ST;
+    i8018x_pcb_current->regs[I8018X_DMA_COUNT(slot)] = 0;
+    ctrl = i8018x_pcb_current->regs[I8018X_DMA_CTRL(slot)];
+    i8018x_pcb_current->regs[I8018X_DMA_CTRL(slot)] = ctrl & (uint16_t) ~I8018X_DMA_ST;
     if (ctrl & I8018X_DMA_INT)
         i8018x_pcb_current->icu_dma |= I8018X_ICU_SRC_DMA(slot);
 }
@@ -1203,7 +1205,7 @@ i8018x_pcb_dma_remaining(int channel)
     if (slot < 0)
         return -1;
 
-    return (int) i8018x_pcb_current->regs[I8018X_DMA_COUNT(slot) / 2];
+    return (int) i8018x_pcb_current->regs[I8018X_DMA_COUNT(slot)];
 }
 
 static int
@@ -1264,7 +1266,7 @@ i8018x_dma_xlate(uint32_t *addr, int rw)
 static int
 i8018x_pcb_dma_freerun(struct i8018x_pcb_t *dev, int slot)
 {
-    uint16_t ctrl = dev->regs[I8018X_DMA_CTRL(slot) / 2];
+    uint16_t ctrl = dev->regs[I8018X_DMA_CTRL(slot)];
     uint32_t guard;
 
     if ((ctrl & I8018X_DMA_SYN) != 0x0000u)
@@ -1280,14 +1282,14 @@ i8018x_pcb_dma_freerun(struct i8018x_pcb_t *dev, int slot)
             pclog("[DMF] slot=%d src=%05X dst=%05X count=%04X ctrl=%04X\n", slot,
                   i8018x_pcb_dma_ptr(dev, slot, 0),
                   i8018x_pcb_dma_ptr(dev, slot, 1),
-                  dev->regs[I8018X_DMA_COUNT(slot) / 2],
-                  dev->regs[I8018X_DMA_CTRL(slot) / 2]);
+                  dev->regs[I8018X_DMA_COUNT(slot)],
+                  dev->regs[I8018X_DMA_CTRL(slot)]);
     }
     for (guard = 0; guard < 0x40000u; guard++) {
         uint32_t src = i8018x_pcb_dma_ptr(dev, slot, 0);
         uint32_t dst = i8018x_pcb_dma_ptr(dev, slot, 1);
 
-        if (dev->regs[I8018X_DMA_CTRL(slot) / 2] & I8018X_DMA_BW) {
+        if (dev->regs[I8018X_DMA_CTRL(slot)] & I8018X_DMA_BW) {
             if (i8018x_dma_xlate(&src, 0) && i8018x_dma_xlate(&dst, 1))
                 mem_writew_phys(dst, mem_readw_phys(src));
         } else {
@@ -1302,7 +1304,7 @@ i8018x_pcb_dma_freerun(struct i8018x_pcb_t *dev, int slot)
             return 1;
 
         /* The guest may clear ST or reprogram the channel while it runs. */
-        if (!(dev->regs[I8018X_DMA_CTRL(slot) / 2] & I8018X_DMA_ST))
+        if (!(dev->regs[I8018X_DMA_CTRL(slot)] & I8018X_DMA_ST))
             break;
     }
 
@@ -1394,7 +1396,7 @@ i8018x_pcb_dma_write(int channel, uint16_t val, void *priv)
             nk = getenv("PCX_DMALOG") ? 1 : 0;
         if (nk)
             pclog("[DMANAK] ch=%d slot=%d ctrl=%04X status=%04X dst=%05X\n", channel, slot,
-                  (slot >= 0) ? dev->regs[I8018X_DMA_CTRL(slot) / 2] : 0xffff,
+                  (slot >= 0) ? dev->regs[I8018X_DMA_CTRL(slot)] : 0xffff,
                   dev->regs[I8018X_ICU_STATUS / 2],
                   (slot >= 0) ? i8018x_pcb_dma_ptr(dev, slot, 1) : 0);
         return DMA_NODATA;
@@ -1406,7 +1408,7 @@ i8018x_pcb_dma_write(int channel, uint16_t val, void *priv)
            8.1).  A peripheral on the I/O bus holds the byte in its register and
            asks for a transfer, so the fetch is a port read of the source
            pointer, not the value the device happened to pass along. */
-        uint16_t ctrl = dev->regs[I8018X_DMA_CTRL(slot) / 2];
+        uint16_t ctrl = dev->regs[I8018X_DMA_CTRL(slot)];
         uint32_t src  = i8018x_pcb_dma_ptr(dev, slot, 0);
 
         if (ctrl & I8018X_DMA_SRC_MIO) {
@@ -1451,8 +1453,8 @@ i8018x_pcb_dma_set_drq(int channel, int set, void *priv)
             uint32_t sc = i8018x_pcb_dma_ptr(dev, slot, 0);
             if (1)
                 pclog("[DMA] ch=%d dst=%05X src=%05X count=%04X ctrl=%04X\n",
-                      channel, d, sc, dev->regs[I8018X_DMA_COUNT(slot) / 2],
-                      dev->regs[I8018X_DMA_CTRL(slot) / 2]);
+                      channel, d, sc, dev->regs[I8018X_DMA_COUNT(slot)],
+                      dev->regs[I8018X_DMA_CTRL(slot)]);
         }
         dev->dma_drq[slot] = !!set;
     }
