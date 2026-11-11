@@ -2575,6 +2575,18 @@ software_interrupt(m808x_cpu_t *icpu, uint8_t vector)
 static void
 divide_interrupt(m808x_cpu_t *icpu)
 {
+    /* Which division faulted: the guest's CS:IP at the faulting instruction. */
+    if (getenv("MIND_DIVLOG") != NULL) {
+        static int n = 0;
+
+        if (n < 40) {
+            n++;
+            pclog("[MIND] #DE at %04X:%04X AX=%04X DX=%04X\n",
+                  icpu->segs[1], icpu->pc,
+                  icpu->regs[0], icpu->regs[2]);
+        }
+    }
+
     CYCLES_MC(icpu, 0x1a7u, MC_JUMP);
     interrupt_routine(icpu, 0u, true);
 }
