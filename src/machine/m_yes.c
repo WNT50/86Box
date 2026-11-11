@@ -37,6 +37,7 @@
 #include <86box/i8018x.h>
 #include <86box/wd2791.h>
 #include <86box/intel_8256.h>
+#include <86box/keyboard.h>
 #include <86box/yes_video.h>
 
 #include "../cpu/cpu.h"
@@ -81,6 +82,7 @@ typedef struct yes_t {
     intel_8256_t *muart; /* serial / parallel / timers / interrupt levels */
     void         *video;
     uint8_t  kbd_code; /* 0x5a0: last scan code from the keyboard */
+    int      kbd_pending; /* a scan code is latched and not read yet */
 } yes_t;
 
 static yes_t yes;
@@ -243,53 +245,188 @@ yes_board_read(uint16_t port, void *priv)
     return r;
 }
 
+/* The keyboard reports standard PC set-1 scan codes: the guest's own IO.SYS
+   decodes them with the two tables at file offset 0x0AE4 (no shift) and 0x0B1F
+   (shift), both named "UK 8-Bit", and the ROM hands the raw code on to the BIOS
+   buffer without translating it.
+
+   It sends make codes only -- there is no break code on this board.  The ROM
+   merges every break code it sees into the BIOS shift-flag byte at 0x40:0x17
+   (ISR at 0xFFA07), and the conversion path then reads that byte as the
+   modifier state, so a break of 0x13 makes the next 'r' come out as ^R
+   (0x12 = 'r' & 0x1f).  With no breaks the flag stays 0 and the letters decode
+   normally.  Extended (E0) keys are left empty too: this keyboard has none. */
+static const scancode yes_scancode_table[512] = {
+  // clang-format off
+    [0x01] = { .mk = { 0x01 } },
+    [0x02] = { .mk = { 0x02 } },
+    [0x03] = { .mk = { 0x03 } },
+    [0x04] = { .mk = { 0x04 } },
+    [0x05] = { .mk = { 0x05 } },
+    [0x06] = { .mk = { 0x06 } },
+    [0x07] = { .mk = { 0x07 } },
+    [0x08] = { .mk = { 0x08 } },
+    [0x09] = { .mk = { 0x09 } },
+    [0x0A] = { .mk = { 0x0A } },
+    [0x0B] = { .mk = { 0x0B } },
+    [0x0C] = { .mk = { 0x0C } },
+    [0x0D] = { .mk = { 0x0D } },
+    [0x0E] = { .mk = { 0x0E } },
+    [0x0F] = { .mk = { 0x0F } },
+    [0x10] = { .mk = { 0x10 } },
+    [0x11] = { .mk = { 0x11 } },
+    [0x12] = { .mk = { 0x12 } },
+    [0x13] = { .mk = { 0x13 } },
+    [0x14] = { .mk = { 0x14 } },
+    [0x15] = { .mk = { 0x15 } },
+    [0x16] = { .mk = { 0x16 } },
+    [0x17] = { .mk = { 0x17 } },
+    [0x18] = { .mk = { 0x18 } },
+    [0x19] = { .mk = { 0x19 } },
+    [0x1A] = { .mk = { 0x1A } },
+    [0x1B] = { .mk = { 0x1B } },
+    [0x1C] = { .mk = { 0x1C } },
+    [0x1D] = { .mk = { 0x1D } },
+    [0x1E] = { .mk = { 0x1E } },
+    [0x1F] = { .mk = { 0x1F } },
+    [0x20] = { .mk = { 0x20 } },
+    [0x21] = { .mk = { 0x21 } },
+    [0x22] = { .mk = { 0x22 } },
+    [0x23] = { .mk = { 0x23 } },
+    [0x24] = { .mk = { 0x24 } },
+    [0x25] = { .mk = { 0x25 } },
+    [0x26] = { .mk = { 0x26 } },
+    [0x27] = { .mk = { 0x27 } },
+    [0x28] = { .mk = { 0x28 } },
+    [0x29] = { .mk = { 0x29 } },
+    [0x2A] = { .mk = { 0x2A } },
+    [0x2B] = { .mk = { 0x2B } },
+    [0x2C] = { .mk = { 0x2C } },
+    [0x2D] = { .mk = { 0x2D } },
+    [0x2E] = { .mk = { 0x2E } },
+    [0x2F] = { .mk = { 0x2F } },
+    [0x30] = { .mk = { 0x30 } },
+    [0x31] = { .mk = { 0x31 } },
+    [0x32] = { .mk = { 0x32 } },
+    [0x33] = { .mk = { 0x33 } },
+    [0x34] = { .mk = { 0x34 } },
+    [0x35] = { .mk = { 0x35 } },
+    [0x36] = { .mk = { 0x36 } },
+    [0x37] = { .mk = { 0x37 } },
+    [0x38] = { .mk = { 0x38 } },
+    [0x39] = { .mk = { 0x39 } },
+    [0x3A] = { .mk = { 0x3A } },
+    [0x3B] = { .mk = { 0x3B } },
+    [0x3C] = { .mk = { 0x3C } },
+    [0x3D] = { .mk = { 0x3D } },
+    [0x3E] = { .mk = { 0x3E } },
+    [0x3F] = { .mk = { 0x3F } },
+    [0x40] = { .mk = { 0x40 } },
+    [0x41] = { .mk = { 0x41 } },
+    [0x42] = { .mk = { 0x42 } },
+    [0x43] = { .mk = { 0x43 } },
+    [0x44] = { .mk = { 0x44 } },
+    [0x45] = { .mk = { 0x45 } },
+    [0x46] = { .mk = { 0x46 } },
+    [0x47] = { .mk = { 0x47 } },
+    [0x48] = { .mk = { 0x48 } },
+    [0x49] = { .mk = { 0x49 } },
+    [0x4A] = { .mk = { 0x4A } },
+    [0x4B] = { .mk = { 0x4B } },
+    [0x4C] = { .mk = { 0x4C } },
+    [0x4D] = { .mk = { 0x4D } },
+    [0x4E] = { .mk = { 0x4E } },
+    [0x4F] = { .mk = { 0x4F } },
+    [0x50] = { .mk = { 0x50 } },
+    [0x51] = { .mk = { 0x51 } },
+    [0x52] = { .mk = { 0x52 } },
+    [0x53] = { .mk = { 0x53 } },
+    [0x54] = { .mk = { 0x54 } },
+    [0x55] = { .mk = { 0x55 } },
+    [0x56] = { .mk = { 0x56 } },
+    [0x57] = { .mk = { 0x57 } },
+    [0x58] = { .mk = { 0x58 } },
+    [0x59] = { .mk = { 0x59 } },
+    [0x5A] = { .mk = { 0x5A } },
+    [0x5B] = { .mk = { 0x5B } },
+    [0x5C] = { .mk = { 0x5C } },
+    [0x5D] = { .mk = { 0x5D } },
+    [0x5E] = { .mk = { 0x5E } },
+    [0x5F] = { .mk = { 0x5F } },
+    [0x60] = { .mk = { 0x60 } },
+    [0x61] = { .mk = { 0x61 } },
+    [0x62] = { .mk = { 0x62 } },
+    [0x63] = { .mk = { 0x63 } },
+    [0x64] = { .mk = { 0x64 } },
+    [0x65] = { .mk = { 0x65 } },
+    [0x66] = { .mk = { 0x66 } },
+    [0x67] = { .mk = { 0x67 } },
+    [0x68] = { .mk = { 0x68 } },
+    [0x69] = { .mk = { 0x69 } },
+    [0x6A] = { .mk = { 0x6A } },
+    [0x6B] = { .mk = { 0x6B } },
+    [0x6C] = { .mk = { 0x6C } },
+    [0x6D] = { .mk = { 0x6D } },
+    [0x6E] = { .mk = { 0x6E } },
+    [0x6F] = { .mk = { 0x6F } },
+    [0x70] = { .mk = { 0x70 } },
+    [0x71] = { .mk = { 0x71 } },
+    [0x72] = { .mk = { 0x72 } },
+    [0x73] = { .mk = { 0x73 } },
+    [0x74] = { .mk = { 0x74 } },
+    [0x75] = { .mk = { 0x75 } },
+    [0x76] = { .mk = { 0x76 } },
+    [0x77] = { .mk = { 0x77 } },
+    [0x78] = { .mk = { 0x78 } },
+    [0x79] = { .mk = { 0x79 } },
+    [0x7A] = { .mk = { 0x7A } },
+    [0x7B] = { .mk = { 0x7B } },
+    [0x7C] = { .mk = { 0x7C } },
+    [0x7D] = { .mk = { 0x7D } },
+    [0x7E] = { .mk = { 0x7E } },
+    [0x7F] = { .mk = { 0x7F } },
+  // clang-format on
+};
+
+/* Called by the keyboard core for every byte it emits.  The board is just a
+   latch on 0x5a0 plus one MUART interrupt level: the code is held here and the
+   part answers the acknowledge with vector 0x41, which is the ROM's keyboard
+   handler.  The request stays raised until the guest reads the code back --
+   that read is the acknowledge. */
+static void
+yes_kbd_send(uint16_t val)
+{
+    if ((val == 0x100) || (val == 0x101))
+        return;    /* fake-shift markers the core may emit, not scan codes */
+
+    yes.kbd_code    = (uint8_t) (val & 0xff);
+    yes.kbd_pending = 1;
+    yes_log_write("kbd", YES_KBD, yes.kbd_code);
+    intel_8256_set_level(yes.muart, 1);
+}
+
+/* The keyboard holds its request line until the guest reads the code back; the
+   MUART only carries a pending bit, so the line is re-asserted while the latch
+   is unread.  Without this the power-on code raised during init is lost: the
+   ICU is still masked then, and a read of the MUART's INTAD drops the request. */
+static pc_timer_t yes_kbd_hold_timer;
+
+static void
+yes_kbd_hold(void *priv)
+{
+    if (yes.kbd_pending)
+        intel_8256_set_level(yes.muart, 1);
+    timer_set_delay_u64(&yes_kbd_hold_timer, 20000 * TIMER_USEC);
+}
+
 static uint8_t
 yes_kbd_read(uint16_t port, void *priv)
 {
-    {
-        static int n;
-        if (n < 12)
-            pclog("[KBD] read 5a0 -> %02X @%04X:%04X\n", yes.kbd_code,
-                  cpu_state.seg_cs.seg, (uint16_t) cpu_state.pc), n++;
+    if (yes.kbd_pending) {
+        yes.kbd_pending = 0;
+        intel_8256_clear_level(yes.muart, 1);
     }
     return yes_log_read("kbd", port, yes.kbd_code);
-}
-
-/*
- * YES_KEY=1c (hex) & YES_KEYIRQ=0|1: press one key a moment after reset, so
- * the boot menu (if that is what the ROM is waiting in) can be answered
- * before the display exists.  IRQ1 is the keyboard's own line; which of the
- * 80186's INT0-INT3 inputs carries it on this board is what the experiment
- * is for, hence the selectable line.
- */
-static pc_timer_t yes_key_timer;
-static int        yes_key_phase;
-
-static void
-yes_key_tick(void *priv)
-{
-    /* The keyboard is one of the MUART's interrupt sources: level 1, which the
-       part answers with vector 0x41 -- the handler the ROM installs for the
-       keyboard.  The scancode itself is read back from 0x5a0. */
-    /* The ISR latches the make code and only queues it when the matching
-       break code arrives as a second interrupt, so send both. */
-    if (yes_key_phase == 0) {
-        yes_key_phase = 1;
-        pclog("[YES] key %02X -> MUART level 1\n", yes.kbd_code);
-        intel_8256_set_level(yes.muart, 1);
-        timer_set_delay_u64(&yes_key_timer, 20000 * TIMER_USEC);
-    } else if (yes_key_phase == 1) {
-        yes_key_phase = 2;
-        yes.kbd_code |= 0x80;
-        pclog("[YES] break %02X -> MUART level 1\n", yes.kbd_code);
-        intel_8256_set_level(yes.muart, 1);
-        timer_set_delay_u64(&yes_key_timer, 20000 * TIMER_USEC);
-    } else if (yes_key_phase == 2) {
-        yes_key_phase = 3;
-        yes.kbd_code &= 0x7f;
-        pclog("[YES] key again %02X -> MUART level 1\n", yes.kbd_code);
-        intel_8256_set_level(yes.muart, 1);
-    }
 }
 
 static void
@@ -510,18 +647,23 @@ machine_yes_init(const machine_t *model)
     }
     yes_io_init();
 
+    /* The keyboard needs nothing but a code table and a send callback: 0x5a0 is
+       the latch and one MUART level is the interrupt (see yes_kbd_send). */
+    keyboard_set_table(yes_scancode_table);
+    keyboard_send = yes_kbd_send;
+
+    /* The board sends its power-on code once, and the ROM's keyboard ISR spends
+       its first interrupt on latching only ([0x92] == 0 at 0xFF6E1): without
+       that code the first real key would never reach the BIOS buffer.  The
+       request stays pending until the guest enables the MUART level. */
+    yes.kbd_code    = 0xaa;
+    yes.kbd_pending = 1;
+    timer_add(&yes_kbd_hold_timer, yes_kbd_hold, NULL, 0);
+    timer_set_delay_u64(&yes_kbd_hold_timer, 20000 * TIMER_USEC);
+
+
     timer_add(&yes_sample_timer, yes_sample, NULL, 0);
     timer_set_delay_u64(&yes_sample_timer, 20000 * TIMER_USEC);
-
-    {
-        const char *k = getenv("YES_KEY");
-
-        if (k != NULL) {
-            yes.kbd_code = (uint8_t) strtoul(k, NULL, 16);
-            timer_add(&yes_key_timer, yes_key_tick, NULL, 0);
-            timer_set_delay_u64(&yes_key_timer, 3000000 * TIMER_USEC);
-        }
-    }
 
     if (getenv("YES_DUMP") != NULL) {
         timer_add(&yes_vram_timer, yes_dump_vram, NULL, 0);
