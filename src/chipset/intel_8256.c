@@ -162,8 +162,13 @@ intel_8256_acknowledge(intel_8256_t *dev)
             break;
     }
 
-    dev->ack_level = level;
-    timer_set_delay_u64(&dev->ack_timer, 2 * TIMER_USEC);
+    /* Data sheet 3-157: the acknowledge cycle names the level and the request
+       clears with it.  Leaving the clear to the 2 us timer let the part be
+       asked for a vector for a request it had already dropped, and it answered
+       00h -- which vectors the CPU to IVT[0] instead of the handler. */
+    dev->pending &= (uint8_t) ~(1u << level);
+    dev->ack_level = -1;
+    intel_8256_update_irq(dev);
 
     return (uint8_t) (0x40 + level);
 }
@@ -279,13 +284,30 @@ intel_8256_read(uint16_t port, void *priv)
     uint8_t       ret  = 0xff;
 
     switch (idx) {
+        case MUART_INTAD: {
+            /* "Reading the interrupt address register transfers an identifier
+               for the currently requested interrupt level ... and clears the
+               interrupt request pin."  The identifier is the level times 4. */
+            uint8_t act = (uint8_t) (dev->pending & dev->regs[MUART_INTEN]);
+            int     lvl = 0;
+
+            ret = 0x00;
+            if (act != 0) {
+                while ((lvl < MUART_LVL_COUNT) && !(act & (1u << lvl)))
+                    lvl++;
+                dev->pending &= (uint8_t) ~(1u << lvl);
+                intel_8256_update_irq(dev);
+                ret = (uint8_t) (lvl * 4);
+            }
+            break;
+        }
+
         case MUART_CMD1:
         case MUART_CMD2:
         case MUART_CMD3:
         case MUART_MODE:
         case MUART_PORT1C:
         case MUART_INTEN:
-        case MUART_INTAD:
         case MUART_PORT1:
         case MUART_PORT2:
             ret = dev->regs[idx];
@@ -368,19 +390,18 @@ intel_8256_write(uint16_t port, uint8_t val, void *priv)
         }
 
         case MUART_INTEN:
-            /* A/B: the ROM masks the keyboard level once its tick handler has
-               run four times; force it back on to see whether the keyboard ISR
-               is what the console waits for. */
-            if (getenv("YES_KBDENV") != NULL)
-                val |= 0x02;
-            dev->regs[idx] = val;
+            /* Register 5 reads as the Interrupt Enable register and is written
+               as "Set Interrupts": every bit written as one enables that level
+               and nothing is cleared (data sheet 3-157).  Replacing the whole
+               register here let the cursor handler's 08h switch the keyboard
+               (level 1) off at the first tick. */
+            dev->regs[idx] |= val;
             break;
 
         case MUART_INTAD:
-            dev->regs[idx] = val;
-            /* Reading the address register acknowledges the interrupt. */
-            dev->pending = 0;
-            intel_8256_update_irq(dev);
+            /* Register 6 is written as "Reset Interrupts": every bit written
+               as one disables that level. */
+            dev->regs[MUART_INTEN] &= (uint8_t) ~val;
             break;
 
         default:

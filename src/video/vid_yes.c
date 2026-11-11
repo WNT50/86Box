@@ -43,7 +43,8 @@
 #define CRTC_R6  6  /* vertical displayed, in character rows */
 #define CRTC_R4  4  /* offset between rows, in characters */
 #define CRTC_R9  9  /* scan lines per row, minus one */
-#define YES_PAGE_COLS 80  /* cells in a page row */
+#define YES_PAGE_COLS 80    /* cells in a page row */
+#define YES_VISIBLE_ROWS 25 /* rows the panel shows; the CRTC may name one more */
 #define CRTC_R12 12 /* start address, high */
 #define CRTC_R13 13 /* start address, low */
 #define CRTC_R14 14 /* cursor address, high */
@@ -269,6 +270,13 @@ yes_poll(void *priv)
 
         if ((vh < 16) || (vh > YES_YSIZE))
             vh = YES_YSIZE;
+        /* The panel is 25 rows tall while the CRTC names 26, and the firmware
+           only fills the 25 it will show: the last one keeps whatever the RAM
+           held, which is the line of coloured blocks that used to sit under
+           the prompt.  Truncate the picture here, the way the 3477-S does,
+           instead of pretending the CRTC asked for one row less. */
+        if (vh > (YES_VISIBLE_ROWS * (dev->crtc[CRTC_R9] + 1)))
+            vh = YES_VISIBLE_ROWS * (dev->crtc[CRTC_R9] + 1);
         video_blit_memtoscreen(0, 0, YES_XSIZE, vh);
     }
 
