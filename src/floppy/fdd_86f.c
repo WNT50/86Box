@@ -1581,6 +1581,12 @@ d86f_read_sector_id(void *priv, const int side, const int match)
                     dev->id_find.sync_marks = dev->id_find.bits_obtained =
                     dev->id_find.bytes_obtained = 0;
                     dev->id_found |= 1;
+                    /* The length byte is not part of the match, and a driver
+                       that sizes its transfer from the command alone waits for
+                       bytes the medium never sends: hand the matched length to
+                       a controller that keeps its own record size. */
+                    if ((drv->ctrl != NULL) && (drv->ctrl->record_len != NULL))
+                        drv->ctrl->record_len(drv->ctrl_priv, dev->last_sector.id.n);
                     /* The datasheet lists what has to match: track number,
                        sector number, side number and a good CRC -- the sector
                        length byte is not among them, and the length that is

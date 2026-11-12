@@ -856,6 +856,10 @@ wd_start_read(wd279x_t *dev)
             n = wd_sector_size_code(dev);
         dev->sector_size = 128 << n;
     }
+    if (getenv("WDDBG") != NULL)
+        pclog("[WDX] read C=%02X R=%02X size=%d dma=%d multi=%d\n",
+              dev->track_reg, dev->sector_reg, dev->sector_size, dev->dma, dev->multi);
+
     dev->was_first   = dev->first_read;
     dev->first_read  = 0;
 
@@ -2040,6 +2044,23 @@ wd_ctrl_diskchange_interrupt(void *priv, int drive)
     wd_diskchange(priv, drive);
 }
 
+/* The ID the drive matched names the record's length; the command does not
+   carry one for a Type II read. */
+static void
+wd_ctrl_record_len(void *priv, int n)
+{
+    wd279x_t *dev = (wd279x_t *) priv;
+
+    if (getenv("WDDBG") != NULL)
+        pclog("[WDX] record_len n=%d -> size=%d R=%02X C=%02X\n", n, 128 << n,
+              dev ? dev->sector_reg : 0, dev ? dev->track_reg : 0);
+
+    if ((dev == NULL) || (n < 0) || (n > 7))
+        return;
+
+    dev->sector_size = 128 << n;
+}
+
 static const fdd_ctrl_t wd279x_ctrl = {
     .is_pcjx                 = wd_ctrl_is_pcjx,
     .real_drive              = wd_ctrl_real_drive,
@@ -2072,6 +2093,7 @@ static const fdd_ctrl_t wd279x_ctrl = {
     .badcylinder             = wd_ctrl_badcylinder,
     .set_wrong_am            = wd_ctrl_set_wrong_am,
     .sectorid                = wd_ctrl_sectorid,
+    .record_len              = wd_ctrl_record_len,
     .get_read_track_sector   = wd_ctrl_get_read_track_sector,
     .request_next_sector_id  = wd_ctrl_request_next_sector_id,
     .stop_id_request         = wd_ctrl_stop_id_request,
