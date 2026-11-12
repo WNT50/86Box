@@ -1624,6 +1624,13 @@ d86f_read_sector_id(void *priv, const int side, const int match)
                                anything regarding the sector size.
                              */
                         }
+                        /* The transfer length is the one the matched ID names, not
+                           the one the command asked for: on a track of 256-byte
+                           records a request for 512 has to read 256, or the data
+                           phase runs past the field and the command times out with
+                           record not found. */
+                        if (dev->state != STATE_02_READ_ID)
+                            dev->req_sector.id.n = dev->last_sector.id.n;
                         dev->state++;
                     } else {
                         if (dev->last_sector.id.c != dev->req_sector.id.c) {

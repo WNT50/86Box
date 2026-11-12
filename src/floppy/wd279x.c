@@ -374,8 +374,19 @@ wd_sector_read(wd279x_t *dev, int sector)
 
     wd_xfer_sync(dev, drv);
 
-    fdd_readsector(drv, wd_image_sector(dev, sector), dev->track_reg, dev->side,
-                   dev->rate, wd_sector_size_code(dev));
+    {
+        int   code = wd_sector_size_code(dev);
+        int8_t lrn  = dev->medium_n[dev->track_reg & 0x3f][dev->side & 1];
+
+        /* A read command carries no length; the medium's own record length is
+           the only correct answer, and it has to be the one the lookup uses --
+           the data phase is sized from the ID the lookup matches. */
+        if (!dev->dden && (lrn >= 0))
+            code = lrn;
+
+        fdd_readsector(drv, wd_image_sector(dev, sector), dev->track_reg, dev->side,
+                       dev->rate, code);
+    }
 }
 
 /* Chained sectors: the controller looks for the next record once this one is
@@ -499,6 +510,7 @@ wd_data_in(void *priv, uint8_t data, int last)
     }
 
     timer_disable(&dev->timer);
+
 
 
 
@@ -856,10 +868,6 @@ wd_start_read(wd279x_t *dev)
             n = wd_sector_size_code(dev);
         dev->sector_size = 128 << n;
     }
-    if (getenv("WDDBG") != NULL)
-        pclog("[WDX] read C=%02X R=%02X size=%d dma=%d multi=%d\n",
-              dev->track_reg, dev->sector_reg, dev->sector_size, dev->dma, dev->multi);
-
     dev->was_first   = dev->first_read;
     dev->first_read  = 0;
 
@@ -938,6 +946,12 @@ wd_rw_sector(wd279x_t *dev, uint8_t val)
 
     dev->multi    = (val & 0x10) ? 1 : 0;
     dev->tc_seen  = 0;
+    /* The verify flag belongs to Type I (bit 2 of Restore/Seek/Step).  A Type
+       II command has no such bit -- this BIOS issues a bare 0x94 for every
+       read -- and leaving the previous seek's flag set sent the read down the
+       drive layer's VERIFY path, which never hands a byte to the host: the
+       guest then waits for DRQ until the command times out with RNF. */
+    dev->verify   = 0;
     /* The side select on this board lives in the 0xf904 latch, not in the
        command byte: the BIOS issues a bare 0x94 for every read and flips the
        head through the latch.  Reading the command's bit 3 here would clear
@@ -2051,14 +2065,11 @@ wd_ctrl_record_len(void *priv, int n)
 {
     wd279x_t *dev = (wd279x_t *) priv;
 
-    if (getenv("WDDBG") != NULL)
-        pclog("[WDX] record_len n=%d -> size=%d R=%02X C=%02X\n", n, 128 << n,
-              dev ? dev->sector_reg : 0, dev ? dev->track_reg : 0);
-
     if ((dev == NULL) || (n < 0) || (n > 7))
         return;
 
     dev->sector_size = 128 << n;
+    dev->medium_n[dev->track_reg & 0x3f][dev->side & 1] = (int8_t) n;
 }
 
 static const fdd_ctrl_t wd279x_ctrl = {
@@ -2111,6 +2122,11 @@ wd279x_init_at(uint16_t base)
     dev = (wd279x_t *) calloc(1, sizeof(wd279x_t));
     if (dev == NULL)
         return NULL;
+
+    for (i = 0; i < 64; i++) {
+        dev->medium_n[i][0] = -1;
+        dev->medium_n[i][1] = -1;
+    }
 
     /* The PC-X mapping until the board says otherwise. */
     dev->dskctl_side_bit     = 3;

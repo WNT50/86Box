@@ -141,6 +141,12 @@ typedef struct wd279x_t {
        PC-X puts the head on bit 3 and density on bit 4, the :YES puts the head
        on bit 4 and has no density bit at all.  Defaults are the PC-X (and
        common ancestor) mapping; a board that differs says so at init. */
+    /* Record length the medium turned out to hold, per track and side, learned
+       from the ID a read matched.  -1 means "not seen yet".  The drive layer
+       cannot answer this for an image that was never written through it, and
+       guessing from the command reads 256-byte records as 512. */
+    int8_t   medium_n[64][2];
+
     int dskctl_side_bit;    /* latch bit that flips the head */
     int dskctl_drive_onehot;/* drives one hot in the low nibble, else bit 0/1 */
     int dskctl_dden_bit;    /* latch bit for density, -1 when the board has none */
