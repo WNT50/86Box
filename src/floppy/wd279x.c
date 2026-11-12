@@ -1346,8 +1346,9 @@ wd279x_command(wd279x_t *dev, uint8_t val)
        not inherit it, or every read on a write-protected disk reports WP. */
     dev->wp_latched = 0;
 
-    dev->command  = val;
-    dev->busy    = 1;
+    dev->command       = val;
+    dev->chain_wrapped = 0;
+    dev->busy          = 1;
     dev->status &= ~(WD_S_CRC | WD_S_RNF | WD_S_LOST);
 
     switch (val & 0xf0) {
@@ -1563,6 +1564,19 @@ wd_noidam(void *priv)
        ends the operation when the next sector is not on the track; only a
        command that found nothing at all reports Record Not Found. */
     if (dev->chain_follow) {
+        /* A multi record transfer that runs off the end of the track starts
+           again at its first record: the next ID the chain asked for is not on
+           the medium at all, and the guest is waiting for sector 1 rather than
+           for an error -- ending the command here made it add one to the sector
+           number itself and ask for a sector the track does not have, which it
+           then reported as a failed read. */
+        if (!dev->chain_wrapped && (dev->sector_reg > 1)) {
+            dev->chain_wrapped = 1;
+            dev->sector_reg    = 1;
+            wd_sector_read(dev, 1);
+            return;
+        }
+
         dev->chain_follow = 0;
         wd_done(dev);
         return;

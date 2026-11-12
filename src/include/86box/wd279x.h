@@ -146,6 +146,7 @@ typedef struct wd279x_t {
        cannot answer this for an image that was never written through it, and
        guessing from the command reads 256-byte records as 512. */
     int8_t   medium_n[64][2];
+    int      chain_wrapped;
 
     int dskctl_side_bit;    /* latch bit that flips the head */
     int dskctl_drive_onehot;/* drives one hot in the low nibble, else bit 0/1 */
