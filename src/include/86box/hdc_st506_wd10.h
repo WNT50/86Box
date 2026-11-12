@@ -16,28 +16,34 @@
  *          Copyright 2010-2026 Curt Coder.
  *          Copyright 2026 WNT50.
  */
-#ifndef EMU_HDC_ST506_WD10_H
-#define EMU_HDC_ST506_WD10_H
+#ifndef EMU_HDC_ST506_WD1010_H
+#define EMU_HDC_ST506_WD1010_H
 
 #include <stdint.h>
 #include <86box/hdc.h>
 
-typedef struct wd10_t wd10_t;
+typedef struct wd1010_t wd1010_t;
 
 enum {
-    WD10_REG_DATA = 0,
-    WD10_REG_ERROR,
-    WD10_REG_COUNT,
-    WD10_REG_SECTOR,
-    WD10_REG_CYL_LO,
-    WD10_REG_CYL_HI,
-    WD10_REG_SDH,
-    WD10_REG_STATUS
+    WD1010_REG_DATA = 0,
+    WD1010_REG_ERROR,
+    WD1010_REG_COUNT,
+    WD1010_REG_SECTOR,
+    WD1010_REG_CYL_LO,
+    WD1010_REG_CYL_HI,
+    WD1010_REG_SDH,
+    WD1010_REG_STATUS
 };
 
+/* Status register bits. */
+#define WD1010_ST_ERR  0x01
+#define WD1010_ST_DRQ  0x08
+#define WD1010_ST_SC   0x10
+#define WD1010_ST_RDY  0x40
+#define WD1010_ST_BUSY 0x80
+
 typedef struct {
-    uint8_t variant; /* 0 = WD1010, 1 = WD2010 */
-    int     units;
+    uint8_t variant; /* 0 = WD1010, 1 = WD2010, 2 = WD5011 */
     struct {
         int      hdd_num; /* negative: no drive on this unit */
         uint32_t spt;
@@ -46,13 +52,18 @@ typedef struct {
     } unit[MFM_NUM];
     void (*intrq)(void *priv, int level); /* NULL: INTRQ not connected */
     void *priv;
-} wd10_config_t;
+} wd1010_config_t;
 
-extern wd10_t  *wd10_create(const wd10_config_t *cfg);
-extern void    wd10_destroy(wd10_t *dev);
-extern void    wd10_reset(wd10_t *dev);
-extern void    wd10_write(wd10_t *dev, int reg, uint8_t val);
-extern uint8_t wd10_read(wd10_t *dev, int reg);
-extern uint8_t *wd10_buffer(wd10_t *dev);
+extern wd1010_t  *wd1010_create(const wd1010_config_t *cfg);
+extern void    wd1010_destroy(wd1010_t *dev);
+extern void    wd1010_reset(wd1010_t *dev);
+extern void    wd1010_write(wd1010_t *dev, int reg, uint8_t val);
+extern uint8_t wd1010_read(wd1010_t *dev, int reg);
+extern uint8_t *wd1010_buffer(wd1010_t *dev);
 
-#endif /*EMU_HDC_ST506_WD10_H*/
+/* HS3: the fourth head bit. It never reaches the chip itself; the board
+   drives it straight onto the drive interface. The model needs it to
+   compute the sector address. */
+extern void    wd1010_set_hs3(wd1010_t *dev, int level);
+
+#endif /*EMU_HDC_ST506_WD1010_H*/
