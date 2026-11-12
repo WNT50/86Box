@@ -35,6 +35,7 @@
 #include <86box/86box.h>
 #include <86box/plat.h>
 #include <86box/mem.h>
+#include <86box/i8018x.h>
 #include <86box/device.h>
 
 #include <86box/plat_unused.h>
@@ -172,6 +173,24 @@ wd279x_set_dma(wd279x_t *dev, int enable)
         return;
 
     dev->dma_mode = enable ? 1 : 0;
+}
+
+/* Whether the host moves the data with the on-chip DMA or by polling is a
+   property of this command, not of the board: the PC-X loader programs DMA
+   channel 1 with the data register as the I/O source right before a read, and
+   the rest of the boot (and the POST) polls.  Ask the 80186 which descriptor
+   is armed -- a memory-to-memory one left over from the POST must not be used
+   to push floppy bytes.  Publishing a setter instead of this check left the
+   controller in polled mode for every command, so no transfer ever reached
+   terminal count and each command had to be ended by its search timeout. */
+static int
+wd_dma_armed(wd279x_t *dev)
+{
+    if (i8018x_pcb_current == NULL)
+        return dev->dma_mode;
+
+    return (i8018x_pcb_dma_io_port(i8018x_pcb_current, WD279X_DMA, 0) ==
+            (uint16_t) (dev->base + 3 * dev->reg_step));
 }
 
 static uint8_t wd_status(wd279x_t *dev);
@@ -858,9 +877,7 @@ wd_start_read(wd279x_t *dev)
 
     dev->byte_count  = 0;
     dev->state       = WD_ST_READ;
-    /* Whether the host moves the data with DMA or by polling is a property
-       of the board, set before the command is issued. */
-    dev->dma          = dev->dma_mode;
+    dev->dma          = wd_dma_armed(dev);
     dev->in_dma_fetch = 0;
     /* The record length comes from the ID the controller will match, not from
        the command: a Type II command carries no N, and the boot disk mixes
@@ -913,8 +930,7 @@ wd_start_write(wd279x_t *dev)
     dev->byte_count = 0;
     dev->state      = WD_ST_WRITE;
 
-    /* Same board-level choice as a read. */
-    dev->dma          = dev->dma_mode;
+    dev->dma          = wd_dma_armed(dev);
     dev->in_dma_fetch = 0;
 
     /* Same as a read: the length is whatever the ID says, not a default. */
