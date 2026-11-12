@@ -31,38 +31,26 @@
 #include <86box/io.h>
 #include <86box/ui.h>
 #include <86box/timer.h>
+#include <86box/hdc_st506_wd10.h>
 #include <86box/plat_unused.h>
 
-/* The 2000HD option is a WD1010 with a one-sector buffer in front of it. The
-   host moves a sector through the buffer at register 0 and drives the WD1010
-   task file at registers 1-7; the board has no DOR and nothing raises INTRQ,
-   so the host polls the status register. */
-#define REG_DATA         0 /* 270h */
-#define REG_ERROR        1 /* 272h, write = precompensation */
-#define REG_COUNT        2 /* 274h */
-#define REG_SECTOR       3 /* 276h */
-#define REG_CYL_LO       4 /* 278h */
-#define REG_CYL_HI       5 /* 27ah */
-#define REG_SDH          6 /* 27ch */
-#define REG_STATUS       7 /* 27eh, write = command */
+#define ST_ERR            0x01
+#define ST_DRQ            0x08
+#define ST_SC             0x10
+#define ST_RDY            0x40
+#define ST_BUSY           0x80
 
-#define ST_ERR           0x01
-#define ST_DRQ           0x08
-#define ST_SC            0x10
-#define ST_RDY           0x40
-#define ST_BUSY          0x80
+#define ERR_AC            0x04
+#define ERR_ID            0x10
+#define ERR_BB            0x80
 
-#define ERR_AC           0x04
-#define ERR_ID           0x10
-#define ERR_BB           0x80
-
-#define CMD_RESTORE      0x10
-#define CMD_READ_SECTOR  0x20
-#define CMD_WRITE_SECTOR 0x30
-#define CMD_SECT_SCAN_ID 0x40
-#define CMD_WRITE_FORMAT 0x50
-#define CMD_SEEK         0x70
-#define CMD_DIAGS        0x90
+#define CMD_RESTORE       0x10
+#define CMD_READ_SECTOR   0x20
+#define CMD_WRITE_SECTOR  0x30
+#define CMD_SECT_SCAN_ID  0x40
+#define CMD_WRITE_FORMAT  0x50
+#define CMD_SEEK          0x70
+#define CMD_DIAGS         0x90
 
 #define STATE_IDLE        0
 #define STATE_READ_WAIT   1
@@ -90,10 +78,14 @@ typedef struct wd10_variant_t {
     uint8_t ecc;      /* accept READ/WRITE with ECC (command bit 1) */
 } wd10_variant_t;
 
-/* The WD1010 sits on the Tandy 2000HD board (task file on even
-   addresses of 270h, no interrupt). */
-typedef struct wd10_hdc_t {
+/* The chip: task file registers, sector buffer and mechanism timers.
+   The host interface around it lives in the board files. */
+struct wd10_t {
     const wd10_variant_t *var;
+
+    void  (*intrq)(void *priv, int level);
+    void  *priv;
+    int   irq_level;
 
     uint8_t  buf[SECTOR_SIZE];
     uint16_t buf_ptr;
@@ -121,9 +113,21 @@ typedef struct wd10_hdc_t {
     uint32_t   sectors;
     int        state;
     pc_timer_t timer;
+};
+
+/* The Tandy 2000HD option is a WD1010 with a one-sector buffer in front of it.
+   The host moves a sector through the buffer at register 0 and drives the WD1010
+   task file at registers 1-7; the board has no DOR and nothing raises INTRQ, so
+   the host polls the status register. This wrapper supplies the IO mapping and
+   the image lifecycle around the chip. */
+typedef struct {
+    wd10_t  *wd;
+    uint8_t  present[MFM_NUM];
+    uint8_t  hdd_num[MFM_NUM];
 } wd10_hdc_t;
 
 static const wd10_variant_t wd10_variant_1010 = { 0x03, 0 };
+static const wd10_variant_t wd10_variant_2010 = { 0x07, 1 };
 
 #ifdef ENABLE_WD10_HDC_LOG
 int wd10_hdc_do_log = ENABLE_WD10_HDC_LOG;
@@ -143,6 +147,20 @@ wd10_hdc_log(const char *fmt, ...)
 #    define wd10_hdc_log(fmt, ...)
 #endif
 
+/* The chip only drives its INTRQ output; routing it to the host is up to
+   the board that created the device. */
+static void
+wd10_irq(wd10_t *dev, int level)
+{
+    if (dev->irq_level == level)
+        return;
+
+    dev->irq_level = level;
+
+    if (dev->intrq != NULL)
+        dev->intrq(dev->priv, level);
+}
+
 static void
 wd10_hdc_led_off(void)
 {
@@ -151,14 +169,14 @@ wd10_hdc_led_off(void)
 }
 
 static void
-wd10_hdc_led(wd10_hdc_t *dev, int write)
+wd10_hdc_led(wd10_t *dev, int write)
 {
     ui_sb_update_icon(SB_HDD | HDD_BUS_MFM, !write);
     ui_sb_update_icon_write(SB_HDD | HDD_BUS_MFM, write);
 }
 
 static void
-wd10_hdc_reset_state(wd10_hdc_t *dev)
+wd10_hdc_reset_state(wd10_t *dev)
 {
     timer_disable(&dev->timer);
 
@@ -186,7 +204,7 @@ wd10_hdc_reset_state(wd10_hdc_t *dev)
 /* Turn the task file's CHS into a linear sector number, checking it
    against the geometry of the drive the SDH register selected. */
 static int
-wd10_hdc_lba(wd10_hdc_t *dev, uint32_t *lba)
+wd10_hdc_lba(wd10_t *dev, uint32_t *lba)
 {
     uint32_t cyl;
     uint32_t head;
@@ -216,7 +234,7 @@ wd10_hdc_lba(wd10_hdc_t *dev, uint32_t *lba)
    bookkeeping too, so subsequent calls can tell a same-track
    hop from a full cylinder seek. */
 static uint64_t
-wd10_hdc_seek_delay(wd10_hdc_t *dev, uint32_t dst_lba,
+wd10_hdc_seek_delay(wd10_t *dev, uint32_t dst_lba,
                     uint8_t continuous, uint8_t operation)
 {
     double seek_us;
@@ -227,11 +245,15 @@ wd10_hdc_seek_delay(wd10_hdc_t *dev, uint32_t dst_lba,
     seek_us = hdd_seek_get_time(&hdd[dev->hdd_num[dev->unit]],
                                 dst_lba, operation, continuous, 0.0);
 
+    wd10_hdc_log("WD10 HDC: seek to LBA %u, %s, %.0f us\n",
+                 dst_lba, (operation == HDD_OP_SEEK) ? "seek" : "access",
+                 seek_us);
+
     return (uint64_t) (seek_us * TIMER_USEC);
 }
 
 static void
-wd10_hdc_command(wd10_hdc_t *dev, uint8_t command)
+wd10_hdc_command(wd10_t *dev, uint8_t command)
 {
     uint32_t lba;
 
@@ -266,6 +288,9 @@ wd10_hdc_command(wd10_hdc_t *dev, uint8_t command)
                 dev->status = ST_RDY | ST_SC | ST_ERR;
                 break;
         }
+
+        if (!(dev->status & ST_BUSY))
+            wd10_irq(dev, 1);
 
         return;
     }
@@ -313,12 +338,14 @@ wd10_hdc_command(wd10_hdc_t *dev, uint8_t command)
                has no ECC engine and rejects it, the WD2010 accepts it (the
                ECC itself is not modelled, the data path is unchanged). */
             if ((command & 0x02) && !dev->var->ecc) {
+                wd10_hdc_log("WD10 HDC: ECC form rejected (WD1010)\n");
                 dev->status |= ST_ERR;
                 dev->errors  = ERR_AC;
                 break;
             }
 
             if (!wd10_hdc_lba(dev, &lba)) {
+                wd10_hdc_log("WD10 HDC: sector past end of medium\n");
                 dev->status |= ST_ERR;
                 dev->errors  = ERR_ID;
                 break;
@@ -394,16 +421,22 @@ wd10_hdc_command(wd10_hdc_t *dev, uint8_t command)
                does not define end here. No known host software issues them,
                so they answer with the same aborted command instead of
                carrying a half-model of each. */
+            wd10_hdc_log("WD10 HDC: undefined command %02X\n", command);
             dev->status |= ST_ERR;
             dev->errors  = ERR_AC;
             break;
     }
+
+    /* Commands that do not hand the mechanism a timer have completed by
+       now (seeks and transfers leave BUSY set and finish in the callback). */
+    if (!(dev->status & ST_BUSY))
+        wd10_irq(dev, 1);
 }
 
 /* Fills the track the format command selected with the E5 pattern the chip
    writes into data fields it is not given contents for. */
 static void
-wd10_hdc_finish_format(wd10_hdc_t *dev)
+wd10_hdc_finish_format(wd10_t *dev)
 {
     dev->fmt_bytes = 0;
     dev->state    = STATE_IDLE;
@@ -427,7 +460,10 @@ wd10_hdc_finish_format(wd10_hdc_t *dev)
 static void
 wd10_hdc_callback(void *priv)
 {
-    wd10_hdc_t *dev = (wd10_hdc_t *) priv;
+    wd10_t *dev = (wd10_t *) priv;
+
+    wd10_hdc_log("WD10 HDC: callback, state %i, status %02X\n",
+                 dev->state, dev->status);
 
     switch (dev->state) {
         case STATE_READ_WAIT:
@@ -435,8 +471,10 @@ wd10_hdc_callback(void *priv)
             dev->status &= ~ST_BUSY;
 
             if (hdd_image_read(dev->hdd_num[dev->unit], dev->lba_prev, 1, dev->buf) < 0) {
+                wd10_hdc_log("WD10 HDC: read error at LBA %u\n", dev->lba_prev);
                 dev->status |= ST_ERR;
                 dev->errors  = ERR_BB;
+                dev->xfers   = 0;
                 wd10_hdc_led_off();
                 break;
             }
@@ -481,11 +519,15 @@ wd10_hdc_callback(void *priv)
             break;
     }
 
+    /* A completed command with no data left in flight asserts INTRQ. */
+    if ((dev->state == STATE_IDLE) && (dev->xfers == 0))
+        wd10_irq(dev, 1);
+
     wd10_hdc_log("WD10 HDC: done, status %02X, error %02X\n", dev->status, dev->errors);
 }
 
 static uint8_t
-wd10_hdc_read_data(wd10_hdc_t *dev)
+wd10_hdc_read_data(wd10_t *dev)
 {
     uint8_t ret = dev->buf[dev->buf_ptr];
 
@@ -507,6 +549,7 @@ wd10_hdc_read_data(wd10_hdc_t *dev)
                                                     HDD_OP_READ));
         } else {
             dev->xfers = 0;
+            wd10_irq(dev, 1);
         }
     }
 
@@ -514,7 +557,7 @@ wd10_hdc_read_data(wd10_hdc_t *dev)
 }
 
 static void
-wd10_hdc_write_data(wd10_hdc_t *dev, uint8_t val)
+wd10_hdc_write_data(wd10_t *dev, uint8_t val)
 {
     if (dev->state == STATE_FORMAT_SEND) {
         /* Four ID bytes per sector arrive in one burst; the IDs themselves
@@ -541,6 +584,7 @@ wd10_hdc_write_data(wd10_hdc_t *dev, uint8_t val)
         wd10_hdc_led_off();
 
         if (hdd_image_write(dev->hdd_num[dev->unit], dev->lba_prev, 1, dev->buf) < 0) {
+            wd10_hdc_log("WD10 HDC: write error at LBA %u\n", dev->lba_prev);
             dev->status |= ST_ERR;
             dev->errors  = ERR_BB;
             dev->xfers   = 0;
@@ -556,85 +600,172 @@ wd10_hdc_write_data(wd10_hdc_t *dev, uint8_t val)
             dev->status |= ST_DRQ;
         } else {
             dev->xfers = 0;
+            wd10_irq(dev, 1);
         }
     }
 }
 
+/* On Tandy 2000HD the task file sits at 270h - 27Fh on even addresses:
+   DATA 270h, ERROR 272h (write = precomp), COUNT 274h, SECTOR 276h,
+   CYL_LO 278h, CYL_HI 27ah, SDH 27ch, STATUS 27eh (read = status,
+   write = command). */
 static int
-wd10_hdc_reg(wd10_hdc_t *dev, uint16_t addr)
+wd10_hdc_reg(uint16_t addr)
 {
-    /* The Tandy task file spreads the eight registers over 270h - 27Fh
-       on even addresses. */
     return (addr - 0x0270) >> 1;
 }
 
 static uint8_t
 wd10_hdc_read(uint16_t addr, void *priv)
 {
-    wd10_hdc_t *dev = (wd10_hdc_t *) priv;
+    wd10_hdc_t *hdc = (wd10_hdc_t *) priv;
 
-    switch (wd10_hdc_reg(dev, addr)) {
-        case REG_DATA:
-            return wd10_hdc_read_data(dev);
-        case REG_STATUS:
-            return dev->status;
-        case REG_SECTOR:
-            return dev->sector;
-        case REG_CYL_LO:
-            return dev->cyl_lo;
-        case REG_CYL_HI:
-            return dev->cyl_hi;
-        case REG_ERROR:
-            return dev->errors;
-        case REG_COUNT:
-            return dev->count;
-        case REG_SDH:
-            return dev->sdh;
-        default:
-            break;
-    }
-
-    return 0xff;
+    return wd10_read(hdc->wd, wd10_hdc_reg(addr));
 }
 
 static void
 wd10_hdc_write(uint16_t addr, uint8_t val, void *priv)
 {
-    wd10_hdc_t *dev = (wd10_hdc_t *) priv;
+    wd10_hdc_t *hdc = (wd10_hdc_t *) priv;
 
-    switch (wd10_hdc_reg(dev, addr)) {
-        case REG_DATA:
+    wd10_write(hdc->wd, wd10_hdc_reg(addr), val);
+}
+
+wd10_t *
+wd10_create(const wd10_config_t *cfg)
+{
+    wd10_t *dev = (wd10_t *) calloc(1, sizeof(wd10_t));
+
+    dev->var   = (cfg->variant == 1) ? &wd10_variant_2010 : &wd10_variant_1010;
+    dev->intrq = cfg->intrq;
+    dev->priv  = cfg->priv;
+
+    wd10_hdc_log("WD10 HDC: %s, %i unit(s)\n",
+                 (cfg->variant == 1) ? "WD2010" : "WD1010", cfg->units);
+
+    for (uint8_t unit = 0; unit < MFM_NUM; unit++) {
+        if (cfg->unit[unit].hdd_num < 0)
+            continue;
+
+        dev->present[unit] = 1;
+        dev->hdd_num[unit] = (uint8_t) cfg->unit[unit].hdd_num;
+        dev->tracks[unit]  = cfg->unit[unit].tracks;
+        dev->spt[unit]     = cfg->unit[unit].spt;
+        dev->hpc[unit]     = cfg->unit[unit].hpc;
+
+        wd10_hdc_log("WD10 HDC: unit %i: hdd %i (%u/%u/%u)\n",
+                     unit, cfg->unit[unit].hdd_num, cfg->unit[unit].tracks,
+                     cfg->unit[unit].hpc, cfg->unit[unit].spt);
+    }
+
+    timer_add(&dev->timer, wd10_hdc_callback, dev, 0);
+
+    wd10_reset(dev);
+
+    return dev;
+}
+
+void
+wd10_destroy(wd10_t *dev)
+{
+    timer_disable(&dev->timer);
+
+    free(dev);
+}
+
+void
+wd10_reset(wd10_t *dev)
+{
+    wd10_hdc_log("WD10 HDC: reset\n");
+
+    wd10_hdc_reset_state(dev);
+    wd10_irq(dev, 0);
+}
+
+uint8_t
+wd10_read(wd10_t *dev, int reg)
+{
+    uint8_t ret;
+
+    if (reg == WD10_REG_STATUS)
+        wd10_irq(dev, 0);
+
+    switch (reg) {
+        case WD10_REG_DATA:
+            ret = wd10_hdc_read_data(dev);
+            break;
+        case WD10_REG_STATUS:
+            ret = dev->status;
+            break;
+        case WD10_REG_SECTOR:
+            ret = dev->sector;
+            break;
+        case WD10_REG_CYL_LO:
+            ret = dev->cyl_lo;
+            break;
+        case WD10_REG_CYL_HI:
+            ret = dev->cyl_hi;
+            break;
+        case WD10_REG_ERROR:
+            ret = dev->errors;
+            break;
+        case WD10_REG_COUNT:
+            ret = dev->count;
+            break;
+        case WD10_REG_SDH:
+            ret = dev->sdh;
+            break;
+        default:
+            ret = 0xff;
+            break;
+    }
+
+    wd10_hdc_log("WD10 HDC: read(%i) = %02X\n", reg, ret);
+
+    return ret;
+}
+
+void
+wd10_write(wd10_t *dev, int reg, uint8_t val)
+{
+    wd10_hdc_log("WD10 HDC: write(%i, %02X)\n", reg, val);
+
+    /* Writing the command register also acknowledges the previous INTRQ. */
+    if (reg == WD10_REG_STATUS)
+        wd10_irq(dev, 0);
+
+    switch (reg) {
+        case WD10_REG_DATA:
             wd10_hdc_write_data(dev, val);
             break;
-        case REG_ERROR:
+        case WD10_REG_ERROR:
             /* Write only: write precompensation, not modelled. */
             break;
-        case REG_COUNT:
+        case WD10_REG_COUNT:
             dev->count = val;
             break;
-        case REG_SECTOR:
+        case WD10_REG_SECTOR:
             dev->sector = val;
             break;
-        case REG_CYL_LO:
+        case WD10_REG_CYL_LO:
             dev->cyl_lo = val;
             break;
-        case REG_CYL_HI:
+        case WD10_REG_CYL_HI:
             dev->cyl_hi = val & dev->var->cyl_mask;
             break;
-        case REG_SDH:
+        case WD10_REG_SDH:
             dev->sdh  = val;
             dev->head = val & 0x07;
             /* The Tandy board uses bits 3-4 as a straight unit number. */
             dev->unit = (val >> 3) & 0x03;
 
             /* Selecting a drive clears a transfer that was left pending. */
-            if (dev->status & ST_DRQ) {
+            if (dev->status & ST_DRQ)
                 wd10_hdc_led_off();
-            }
 
             dev->status &= ~ST_DRQ;
             break;
-        case REG_STATUS:
+        case WD10_REG_STATUS:
             /* The chip ignores a new command while it is still busy with the
                previous one. */
             if (!(dev->status & ST_BUSY))
@@ -645,12 +776,20 @@ wd10_hdc_write(uint16_t addr, uint8_t val, void *priv)
     }
 }
 
-/* The board's reset port answers reads and takes writes; either one resets the
-   controller, which is how the BIOS probes for the card. */
+uint8_t *
+wd10_buffer(wd10_t *dev)
+{
+    return dev->buf;
+}
+
+/* The board's reset port answers reads and takes writes; either one resets
+   the controller, which is how the BIOS probes for the card. */
 static uint8_t
 wd10_hdc_reset_r(UNUSED(uint16_t addr), void *priv)
 {
-    wd10_hdc_reset_state((wd10_hdc_t *) priv);
+    wd10_hdc_t *hdc = (wd10_hdc_t *) priv;
+
+    wd10_reset(hdc->wd);
 
     return 0xff;
 }
@@ -658,27 +797,35 @@ wd10_hdc_reset_r(UNUSED(uint16_t addr), void *priv)
 static void
 wd10_hdc_reset_w(UNUSED(uint16_t addr), UNUSED(uint8_t val), void *priv)
 {
-    wd10_hdc_reset_state((wd10_hdc_t *) priv);
+    wd10_hdc_t *hdc = (wd10_hdc_t *) priv;
+
+    wd10_reset(hdc->wd);
 }
 
 static void
 wd10_hdc_reset(void *priv)
 {
-    wd10_hdc_t *dev = (wd10_hdc_t *) priv;
+    wd10_hdc_t *hdc = (wd10_hdc_t *) priv;
 
     wd10_hdc_led_off();
 
-    wd10_hdc_reset_state(dev);
+    wd10_reset(hdc->wd);
 }
 
 static void *
 wd10_hdc_init(const device_t *info)
 {
-    wd10_hdc_t *dev = (wd10_hdc_t *) calloc(1, sizeof(wd10_hdc_t));
+    wd10_hdc_t   *hdc = (wd10_hdc_t *) calloc(1, sizeof(wd10_hdc_t));
+    wd10_config_t cfg;
 
-    /* The only device using this file is the Tandy 2000HD board, which
-       carries the WD1010. */
-    dev->var = &wd10_variant_1010;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.variant = 0;
+    cfg.intrq   = NULL;
+    cfg.priv    = NULL;
+    cfg.units   = MFM_NUM;
+
+    for (uint8_t i = 0; i < MFM_NUM; i++)
+        cfg.unit[i].hdd_num = -1;
 
     for (uint8_t i = 0; i < HDD_NUM; i++) {
         if ((hdd[i].bus_type != HDD_BUS_MFM) || (hdd[i].mfm_channel >= MFM_NUM))
@@ -687,36 +834,40 @@ wd10_hdc_init(const device_t *info)
         if (!hdd_image_load(i))
             continue;
 
-        dev->present[hdd[i].mfm_channel] = 1;
-        dev->hdd_num[hdd[i].mfm_channel] = i;
-        dev->spt[hdd[i].mfm_channel]     = hdd[i].spt;
-        dev->hpc[hdd[i].mfm_channel]     = hdd[i].hpc;
-        dev->tracks[hdd[i].mfm_channel]  = hdd[i].tracks;
+        hdc->present[hdd[i].mfm_channel] = 1;
+        hdc->hdd_num[hdd[i].mfm_channel] = i;
+
+        cfg.unit[hdd[i].mfm_channel].hdd_num = i;
+        cfg.unit[hdd[i].mfm_channel].spt     = hdd[i].spt;
+        cfg.unit[hdd[i].mfm_channel].hpc     = hdd[i].hpc;
+        cfg.unit[hdd[i].mfm_channel].tracks  = hdd[i].tracks;
     }
 
+    /* The only board using this file is the Tandy 2000HD, which carries the
+       WD1010 and leaves INTRQ unconnected. */
+    hdc->wd = wd10_create(&cfg);
+
     io_sethandler(0x026c, 0x0002, wd10_hdc_reset_r, NULL, NULL,
-                  wd10_hdc_reset_w, NULL, NULL, dev);
+                  wd10_hdc_reset_w, NULL, NULL, hdc);
     io_sethandler(0x0270, 0x0010, wd10_hdc_read, NULL, NULL,
-                  wd10_hdc_write, NULL, NULL, dev);
+                  wd10_hdc_write, NULL, NULL, hdc);
 
-    timer_add(&dev->timer, wd10_hdc_callback, dev, 0);
-
-    wd10_hdc_reset_state(dev);
-
-    return dev;
+    return hdc;
 }
 
 static void
 wd10_hdc_close(void *priv)
 {
-    wd10_hdc_t *dev = (wd10_hdc_t *) priv;
+    wd10_hdc_t *hdc = (wd10_hdc_t *) priv;
+
+    wd10_destroy(hdc->wd);
 
     for (uint8_t i = 0; i < MFM_NUM; i++) {
-        if (dev->present[i])
-            hdd_image_close(dev->hdd_num[i]);
+        if (hdc->present[i])
+            hdd_image_close(hdc->hdd_num[i]);
     }
 
-    free(dev);
+    free(hdc);
 }
 
 const device_t st506_wd1010_device = {
