@@ -626,7 +626,12 @@ wd_data_in(void *priv, uint8_t data, int last)
                    wd_buf_pop() once it has taken the last byte.  Only when the
                    queue is already empty (the host read ahead of the medium)
                    does the next record start here. */
-                if (dev->buf_len > 0)
+                /* Only a host whose DMA channel paces the bytes can be trusted
+                   to drain the queue and so start the next record.  A polled
+                   host waits for BUSY before it reads anything, so deferring on
+                   a non-empty queue left both sides waiting for each other at
+                   the end of the track. */
+                if ((dev->buf_len > 0) && dev->dma)
                     dev->chain_pending = 1;
                 else
                     wd_chain_next(dev);
