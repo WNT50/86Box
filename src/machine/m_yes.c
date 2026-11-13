@@ -630,6 +630,8 @@ machine_yes_init(const machine_t *model)
     /* This latch puts the head on bit 4, selects one of four drives with the
        low nibble, and has no density bit. */
     wd279x_set_dskctl_bits(yes.fdc, 4, 1, -1);
+    /* The ROM polls 0x480 bit 0 and only then takes the sector's bytes. */
+    wd279x_set_busy_on_end(yes.fdc, 1);
     {
         const char *sb = getenv("YES_SBASE");
 

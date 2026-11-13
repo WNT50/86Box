@@ -82,6 +82,9 @@ typedef struct wd279x_t {
     uint32_t bitcell_period;
     int      dma;      /* the transfer runs through the DMA channel */
     int      dma_mode; /* board setting: transfers may use the DMA channel */
+    /* A board whose ROM waits for BUSY to drop before it takes the sector's
+       bytes: the command then has to finish with those bytes still queued. */
+    int      busy_on_end;
     int      dma_ch;
     int      tc;       /* terminal count was reported */
     int      dtl;      /* transfer length the drive layer works from */
@@ -199,6 +202,7 @@ extern void wd279x_set_post_us(wd279x_t *dev, uint32_t us);
 /* Whether data transfers use the DMA channel. Boards that move the bytes with
    their own DMA controller enable this before issuing a read or write. */
 extern void wd279x_set_dma(wd279x_t *dev, int enable);
+extern void wd279x_set_busy_on_end(wd279x_t *dev, int enable);
 extern void      wd279x_close(void);
 extern void      wd279x_reset(void);
 extern void      wd279x_set_dskctl(wd279x_t *dev, uint8_t val);

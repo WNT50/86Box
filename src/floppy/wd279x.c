@@ -165,6 +165,16 @@ wd279x_set_post_us(wd279x_t *dev, uint32_t us)
         dev->post_us = us;
 }
 
+/* A ROM that waits for BUSY to drop before it takes the sector's bytes cannot
+   be told to wait for the buffer to drain: it will not read while BUSY is up,
+   so the command must finish with the bytes still queued and stay readable. */
+void
+wd279x_set_busy_on_end(wd279x_t *dev, int enable)
+{
+    if (dev != NULL)
+        dev->busy_on_end = enable ? 1 : 0;
+}
+
 void
 wd279x_set_dma(wd279x_t *dev, int enable)
 {
@@ -202,6 +212,7 @@ wd_irq_lower(wd279x_t *dev)
 static void
 wd_finish(wd279x_t *dev)
 {
+
     /* Post-byte gap: CRC and the status phase.  Without it the interrupt lands
        in the same emulated instant as the last data byte, which is the one
        moment a polled driver is not yet listening for it. */
@@ -233,7 +244,7 @@ wd_done(wd279x_t *dev)
     /* Hold the command open until the host has read the bytes still queued
        behind the data register, or a polling driver would see BUSY drop in the
        middle of the sector. */
-    if ((dev->buf_len > 0) || dev->dr_full) {
+    if (!dev->busy_on_end && ((dev->buf_len > 0) || dev->dr_full)) {
         dev->done_pending = 1;
         return;
     }
@@ -484,6 +495,8 @@ wd_data_in(void *priv, uint8_t data, int last)
 {
     wd279x_t *dev = (wd279x_t *) priv;
     int       res;
+
+
 
     /* A record starts with an empty data register.  Since the medium only
        queues bytes now, whatever the register held belongs to the previous
@@ -1311,6 +1324,7 @@ wd279x_command(wd279x_t *dev, uint8_t val)
        survive until the driver reads the status, but a later read command must
        not inherit it, or every read on a write-protected disk reports WP. */
     dev->wp_latched = 0;
+
 
     dev->command  = val;
     dev->busy    = 1;
