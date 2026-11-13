@@ -165,6 +165,11 @@ typedef struct fdd_ctrl_t {
     int         (*get_gap)(void *priv);
     int         (*get_gap2)(void *priv, int drive);
 
+    /* Length of the record the controller just matched, in its own size code.
+       A read command carries no length of its own, so a controller that keeps
+       one has to be told what the medium actually holds. */
+    void        (*record_len)(void *priv, int n);
+
     /* Data path: one byte at a time, in both directions. */
     int         (*data)(void *priv, uint8_t data, int last);
     int         (*getdata)(void *priv, int last);
