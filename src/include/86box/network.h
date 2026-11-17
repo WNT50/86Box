@@ -309,6 +309,10 @@ extern const device_t ibm_ethernet_efd4_device;
 extern const device_t ibm_ethernet_efd5_device;
 extern const device_t ibm_ethernet_efe5_device;
 
+/* IBM LAN Adapter/A for Ethernet (SONIC-T) */
+extern const device_t ibm_lan_a_device;
+extern const device_t ibm_lan_a_short_device;
+
 /* National Semiconductor */
 extern const device_t dp83815_device;
 extern const device_t dp83815_onboard_device;

@@ -22,6 +22,7 @@ list(APPEND net_sources
     net_slirp_dhcp.c
     net_switch.c
     net_dp8390.c
+    net_dp8393x.c
     net_lance.c
     net_3c501.c
     net_3c503.c
