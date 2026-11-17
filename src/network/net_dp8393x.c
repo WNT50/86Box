@@ -33,6 +33,7 @@
 #include <86box/thread.h>
 #include <86box/timer.h>
 #include <86box/network.h>
+#include <86box/pic.h>
 
 /* =========================================================================
  * 区 1：公共定义
@@ -68,10 +69,17 @@ typedef struct dp8393x_t {
     netcard_t *card;
     uint8_t    mac[6];
 
-    /* 区 2：控制器核心状态（P0 仅分配，行为在 P1 起实现） */
+    /* 区 2：控制器核心状态 */
     uint16_t regs[64];
-    uint8_t  cam[16][6];
-    uint16_t ce;
+    uint16_t cam[48]; /* 16 entries x 3 words */
+    uint16_t cam_enable;
+    uint16_t cep;
+    uint16_t cam_valid;
+    uint8_t  rx_enabled;
+    uint8_t  stopped;
+    uint8_t  irq_level;
+    void   (*irq_cb)(void *priv, int level);
+    void    *irq_priv;
     uint8_t  ram[SONIC_RAM_SIZE];
 
     /* 区 3：MCA 板级状态 */
@@ -113,8 +121,247 @@ dp8393x_log(const char *fmt, ...)
 /* =========================================================================
  * 区 2：SONIC/SONIC-T 控制器核心
  *
- * P0 只提供空的骨架。寄存器、CAM、描述符与收发状态机从 P1 开始实现。
+ * P1 实现寄存器阵列、写掩码、复位默认值、CAM 装载与中断聚合。
+ * 收发状态机在 P2/P3 接入，这里只保留命令位与状态位的落点。
  * ========================================================================= */
+
+enum {
+    SONIC_CR   = 0x00,
+    SONIC_DCR  = 0x02,
+    SONIC_RCR  = 0x04,
+    SONIC_TCR  = 0x06,
+    SONIC_IMR  = 0x08,
+    SONIC_ISR  = 0x0A,
+    SONIC_UTDA = 0x0C,
+    SONIC_CTDA = 0x0E,
+    SONIC_URDA = 0x1A,
+    SONIC_CRDA = 0x1C,
+    SONIC_EOBC = 0x26,
+    SONIC_URRA = 0x28,
+    SONIC_RSA  = 0x2A,
+    SONIC_REA  = 0x2C,
+    SONIC_RRP  = 0x2E,
+    SONIC_RWP  = 0x30,
+    SONIC_CEP  = 0x42,
+    SONIC_CAP2 = 0x44,
+    SONIC_CAP1 = 0x46,
+    SONIC_CAP0 = 0x48,
+    SONIC_CE   = 0x4A,
+    SONIC_CDP  = 0x4C,
+    SONIC_CDC  = 0x4E,
+    SONIC_SR   = 0x50,
+    SONIC_WT0  = 0x52,
+    SONIC_WT1  = 0x54,
+    SONIC_RSC  = 0x56,
+    SONIC_CRCT = 0x58,
+    SONIC_FAET = 0x5A,
+    SONIC_MPT  = 0x5C,
+    SONIC_DCR2 = 0x7E
+};
+
+#define SONIC_CR_HTX   0x0001
+#define SONIC_CR_TXP   0x0002
+#define SONIC_CR_RXDIS 0x0004
+#define SONIC_CR_RXEN  0x0008
+#define SONIC_CR_STP   0x0010
+#define SONIC_CR_ST    0x0020
+#define SONIC_CR_RST   0x0080
+#define SONIC_CR_RRRA  0x0100
+#define SONIC_CR_LCAM  0x0200
+
+#define SONIC_ISR_LCD  0x1000
+
+static uint16_t
+dp8393x_ram_read16(const dp8393x_t *dev, uint16_t off)
+{
+    uint32_t size = dev->mem_size ? dev->mem_size : SONIC_RAM_SIZE;
+    uint32_t o    = (uint32_t) (off & (size - 1)) & (SONIC_RAM_SIZE - 1);
+
+    return (uint16_t) (dev->ram[o] | (dev->ram[(o + 1) & (SONIC_RAM_SIZE - 1)] << 8));
+}
+
+static void
+dp8393x_update_irq(dp8393x_t *dev)
+{
+    int level = ((dev->regs[SONIC_ISR >> 1] & dev->regs[SONIC_IMR >> 1]) != 0) ? 1 : 0;
+
+    if (level == dev->irq_level)
+        return;
+
+    dev->irq_level = (uint8_t) level;
+    if (dev->irq_cb != NULL)
+        dev->irq_cb(dev->irq_priv, level);
+}
+
+static void
+dp8393x_raise_isr(dp8393x_t *dev, uint16_t bits)
+{
+    dev->regs[SONIC_ISR >> 1] |= bits;
+    dp8393x_update_irq(dev);
+}
+
+static void
+dp8393x_core_reset(dp8393x_t *dev)
+{
+    memset(dev->regs, 0x00, sizeof(dev->regs));
+    memset(dev->cam, 0x00, sizeof(dev->cam));
+
+    dev->cam_enable = 0x0000;
+    dev->cep        = 0x0000;
+    dev->cam_valid  = 0x00;
+    dev->rx_enabled = 0;
+    dev->stopped    = 1;
+
+    /* 硬件复位：RST|STP|RXDIS = 0094h。 */
+    dev->regs[SONIC_CR >> 1] = SONIC_CR_RST | SONIC_CR_STP | SONIC_CR_RXDIS;
+
+    dp8393x_update_irq(dev);
+}
+
+/* LCAM: CDP 指向窗口内的 CAM 描述符区，CDC 为描述符个数。
+ * 每个描述符 16 字节：+0 控制/入口号，+4/+8/+0C 为 6 字节地址。 */
+static void
+dp8393x_cam_load(dp8393x_t *dev)
+{
+    uint16_t cdp = dev->regs[SONIC_CDP >> 1];
+    uint16_t cdc = dev->regs[SONIC_CDC >> 1] & 0x000F;
+    uint16_t i;
+
+    memset(dev->cam, 0x00, sizeof(dev->cam));
+    dev->cam_valid = 0x00;
+
+    for (i = 0; i < cdc; i++) {
+        uint16_t base = (uint16_t) (cdp + (i << 4));
+        uint16_t ctrl = dp8393x_ram_read16(dev, base);
+        uint16_t slot = ctrl & 0x000F;
+
+        if (slot == 0x0000)
+            slot = (uint16_t) (i & 0x000F);
+
+        dev->cam[(slot * 3) + 0] = dp8393x_ram_read16(dev, (uint16_t) (base + 0x04));
+        dev->cam[(slot * 3) + 1] = dp8393x_ram_read16(dev, (uint16_t) (base + 0x08));
+        dev->cam[(slot * 3) + 2] = dp8393x_ram_read16(dev, (uint16_t) (base + 0x0C));
+        dev->cam_valid |= (uint16_t) (1u << slot);
+    }
+
+    /* CAM Enable 字段紧跟在最后一个描述符之后。 */
+    dev->cam_enable = dp8393x_ram_read16(dev, (uint16_t) (cdp + (cdc << 4)));
+
+    dev->regs[SONIC_CR >> 1] &= (uint16_t) ~SONIC_CR_LCAM;
+    dp8393x_raise_isr(dev, SONIC_ISR_LCD);
+}
+
+static uint16_t
+dp8393x_reg_read(dp8393x_t *dev, uint16_t off)
+{
+    switch (off) {
+        case SONIC_SR:
+            return 0x0000;
+
+        case SONIC_CE: {
+            uint16_t val = dev->cam[dev->cep & 0x3F];
+
+            dev->cep = (uint16_t) ((dev->cep + 1) & 0x3F);
+            dev->regs[SONIC_CEP >> 1] = dev->cep;
+            return val;
+        }
+
+        default:
+            break;
+    }
+
+    if (off >= 0x80)
+        return 0xFFFF;
+
+    return dev->regs[off >> 1];
+}
+
+static void
+dp8393x_reg_write(dp8393x_t *dev, uint16_t off, uint16_t val)
+{
+    switch (off) {
+        case SONIC_CR: {
+            if (val & SONIC_CR_RST) {
+                dp8393x_core_reset(dev);
+                return;
+            }
+
+            if (val & SONIC_CR_RRRA) {
+                /* RRRA 复位读指针，命令位自清。 */
+                dev->regs[SONIC_RRP >> 1] = dev->regs[SONIC_RSA >> 1];
+            }
+
+            if (val & SONIC_CR_LCAM)
+                dp8393x_cam_load(dev);
+
+            if (val & SONIC_CR_RXEN)
+                dev->rx_enabled = 1;
+            if (val & SONIC_CR_RXDIS)
+                dev->rx_enabled = 0;
+
+            if (val & SONIC_CR_STP)
+                dev->stopped = 1;
+            if (val & SONIC_CR_ST)
+                dev->stopped = 0;
+
+            /* TXP/HTX/RRRA/LCAM 为命令位，不保持；STP/RXEN/RXDIS 为状态位。 */
+            dev->regs[SONIC_CR >> 1] = (uint16_t) ((dev->stopped ? SONIC_CR_STP : 0x0000)
+                                                 | (dev->rx_enabled ? SONIC_CR_RXEN : SONIC_CR_RXDIS));
+            break;
+        }
+
+        case SONIC_DCR:
+            /* bit9-8、bit6 固定为 1，bit7、bit15-10 固定为 0。 */
+            dev->regs[SONIC_DCR >> 1] = (uint16_t) ((val & 0x003F) | 0x0360);
+            break;
+
+        case SONIC_RCR:
+            dev->regs[SONIC_RCR >> 1] = val;
+            break;
+
+        case SONIC_TCR:
+            dev->regs[SONIC_TCR >> 1] = val & 0x0FFF;
+            break;
+
+        case SONIC_IMR:
+            dev->regs[SONIC_IMR >> 1] = val & 0x7FFF;
+            dp8393x_update_irq(dev);
+            break;
+
+        case SONIC_ISR:
+            dev->regs[SONIC_ISR >> 1] &= (uint16_t) ~(val & 0x7FFF);
+            dp8393x_update_irq(dev);
+            break;
+
+        case SONIC_CDC:
+            dev->regs[SONIC_CDC >> 1] = val & 0x000F;
+            break;
+
+        case SONIC_CEP:
+            dev->cep = val & 0x003F;
+            dev->regs[SONIC_CEP >> 1] = dev->cep;
+            break;
+
+        case SONIC_CE:
+            dev->cam[dev->cep & 0x3F] = val;
+            dev->cep = (uint16_t) ((dev->cep + 1) & 0x3F);
+            dev->regs[SONIC_CEP >> 1] = dev->cep;
+            break;
+
+        case SONIC_SR:
+        case SONIC_RSC:
+        case SONIC_CRCT:
+        case SONIC_FAET:
+        case SONIC_MPT:
+            /* 只读：状态/计数器在 P4/P5 接入。 */
+            break;
+
+        default:
+            if (off < 0x80)
+                dev->regs[off >> 1] = val;
+            break;
+    }
+}
 
 /* =========================================================================
  * 区 3：MCA 板级
@@ -225,25 +472,21 @@ lan_a_ioremove(dp8393x_t *dev)
     dev->io_set = 0;
 }
 
-/* 内部控制寄存器：P0 仅完成地址解码，行为从 P1 起实现。 */
+/* 内部控制寄存器：解码后交给区 2 的芯片核心。 */
 static uint16_t
 lan_a_reg_read16(uint16_t port, void *priv)
 {
-    const dp8393x_t *dev = (dp8393x_t *) priv;
+    dp8393x_t *dev = (dp8393x_t *) priv;
 
-    dp8393x_log("%s: 读内部寄存器 +%02X（P1 待实现）\n",
-                dev->name, (unsigned) (uint16_t) (port - dev->io_base));
-
-    return 0xFFFF;
+    return dp8393x_reg_read(dev, (uint16_t) (port - dev->io_base));
 }
 
 static void
 lan_a_reg_write16(uint16_t port, uint16_t val, void *priv)
 {
-    const dp8393x_t *dev = (dp8393x_t *) priv;
+    dp8393x_t *dev = (dp8393x_t *) priv;
 
-    dp8393x_log("%s: 写内部寄存器 +%02X = %04X（P1 待实现）\n",
-                dev->name, (unsigned) (uint16_t) (port - dev->io_base), val);
+    dp8393x_reg_write(dev, (uint16_t) (port - dev->io_base), val);
 }
 
 static uint8_t
@@ -260,11 +503,26 @@ lan_a_board_control_read(const dp8393x_t *dev)
 }
 
 static void
+lan_a_irq(void *priv, int level)
+{
+    dp8393x_t *dev = (dp8393x_t *) priv;
+
+    if (dev->irq == 0)
+        return;
+
+    if (level)
+        picint((uint16_t) (1 << dev->irq));
+    else
+        picintc((uint16_t) (1 << dev->irq));
+}
+
+static void
 lan_a_board_reset(dp8393x_t *dev)
 {
     dev->board_control = 0x00;
     dev->reset_armed   = 0;
 
+    dp8393x_core_reset(dev);
     lan_a_update_window(dev);
 
     dp8393x_log("%s: 板级硬件复位\n", dev->name);
@@ -348,6 +606,9 @@ lan_a_apply_pos(dp8393x_t *dev)
     static const uint8_t irq_table[4] = { 5, 15, 10, 11 };
 
     lan_a_ioremove(dev);
+
+    if ((dev->irq != 0) && dev->irq_level)
+        picintc((uint16_t) (1 << dev->irq));
 
     dev->adapter_enabled = dev->pos_regs[2] & 0x01;
     dev->io_base         = (uint16_t) (((dev->pos_regs[2] >> 5) & 0x07) << 12);
@@ -551,6 +812,10 @@ lan_a_init(const device_t *info)
     dev->link_up   = 1;
     dev->mem_base  = 0x000C8000;
     dev->mem_size  = 0x4000;
+    dev->irq_cb    = lan_a_irq;
+    dev->irq_priv  = dev;
+
+    dp8393x_core_reset(dev);
 
     if (dev->variant == IBM_LAN_A_SHORT)
         dev->bootrom_loaded = (rom_load_linear(ROM_PATH_SHORT, 0, SONIC_BOOTROM_SIZE, 0, dev->bootrom) != 0);
