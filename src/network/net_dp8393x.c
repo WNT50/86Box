@@ -41,6 +41,7 @@
 
 #define SONIC_RAM_SIZE     0x8000 /* 8K x 32-bit shared SRAM */
 #define SONIC_BOOTROM_SIZE 0x4000 /* 16 KB boot ROM */
+#define SONIC_TX_FRAME_MAX (NET_MAX_FRAME + 4) /* 1522 */
 
 #define SONIC_IO_REGS_SIZE 0x80 /* +00h .. +7Fh: internal registers */
 #define SONIC_IO_BYTE_SIZE 0x20 /* +80h .. +9Fh: board and ID registers */
@@ -81,6 +82,8 @@ typedef struct dp8393x_t {
     void   (*irq_cb)(void *priv, int level);
     void    *irq_priv;
     uint8_t  ram[SONIC_RAM_SIZE];
+    uint8_t  tx_frame[SONIC_TX_FRAME_MAX];
+    uint8_t  tx_active;
 
     /* 区 3：MCA 板级状态 */
     uint8_t       pos_regs[8];
@@ -169,7 +172,32 @@ enum {
 #define SONIC_CR_RRRA  0x0100
 #define SONIC_CR_LCAM  0x0200
 
+#define SONIC_ISR_TXER 0x0100
+#define SONIC_ISR_PTDN 0x0200
+#define SONIC_ISR_PINT 0x0800
 #define SONIC_ISR_LCD  0x1000
+
+/* Transmit descriptor (TDA) layout, 32-byte slots. */
+#define SONIC_TDA_STATUS       0x00
+#define SONIC_TDA_CONFIG       0x04
+#define SONIC_TDA_SIZE         0x08
+#define SONIC_TDA_FRAGS        0x0C
+#define SONIC_TDA_FRAG         0x10
+#define SONIC_TDA_FRAG_STEP    12
+#define SONIC_TDA_CONFIG_PINTR 0x8000
+
+/* Transmit status bits written back to TXpkt.status. */
+#define SONIC_TSR_PTX  0x0001
+#define SONIC_TSR_BCM  0x0002
+#define SONIC_TSR_FU   0x0004
+#define SONIC_TSR_PMB  0x0008
+#define SONIC_TSR_OWC  0x0020
+#define SONIC_TSR_EXC  0x0040
+#define SONIC_TSR_CRSL 0x0080
+#define SONIC_TSR_NCRS 0x0100
+#define SONIC_TSR_DEF  0x0200
+#define SONIC_TSR_EXD  0x0400
+#define SONIC_TSR_ERR  (SONIC_TSR_BCM | SONIC_TSR_FU | SONIC_TSR_EXC | SONIC_TSR_EXD)
 
 static uint16_t
 dp8393x_ram_read16(const dp8393x_t *dev, uint16_t off)
@@ -178,6 +206,39 @@ dp8393x_ram_read16(const dp8393x_t *dev, uint16_t off)
     uint32_t o    = (uint32_t) (off & (size - 1)) & (SONIC_RAM_SIZE - 1);
 
     return (uint16_t) (dev->ram[o] | (dev->ram[(o + 1) & (SONIC_RAM_SIZE - 1)] << 8));
+}
+
+static uint8_t
+dp8393x_ram_read8(const dp8393x_t *dev, uint16_t off)
+{
+    uint32_t size = dev->mem_size ? dev->mem_size : SONIC_RAM_SIZE;
+    uint32_t o    = (uint32_t) (off & (size - 1)) & (SONIC_RAM_SIZE - 1);
+
+    return dev->ram[o];
+}
+
+static uint32_t
+dp8393x_ram_read32(const dp8393x_t *dev, uint16_t off)
+{
+    return (uint32_t) dp8393x_ram_read16(dev, off)
+         | ((uint32_t) dp8393x_ram_read16(dev, (uint16_t) (off + 2)) << 16);
+}
+
+static void
+dp8393x_ram_write16(dp8393x_t *dev, uint16_t off, uint16_t val)
+{
+    uint32_t size = dev->mem_size ? dev->mem_size : SONIC_RAM_SIZE;
+    uint32_t o    = (uint32_t) (off & (size - 1)) & (SONIC_RAM_SIZE - 1);
+
+    dev->ram[o]                             = (uint8_t) (val & 0xFF);
+    dev->ram[(o + 1) & (SONIC_RAM_SIZE - 1)] = (uint8_t) (val >> 8);
+}
+
+static void
+dp8393x_ram_write32(dp8393x_t *dev, uint16_t off, uint32_t val)
+{
+    dp8393x_ram_write16(dev, off, (uint16_t) val);
+    dp8393x_ram_write16(dev, (uint16_t) (off + 2), (uint16_t) (val >> 16));
 }
 
 static void
@@ -251,6 +312,126 @@ dp8393x_cam_load(dp8393x_t *dev)
     dp8393x_raise_isr(dev, SONIC_ISR_LCD);
 }
 
+/* TXP: walk the transmit descriptor chain starting at CTDA.
+ *
+ * The descriptor layout is the one measured in IBMENIIN.SYS: a 32-byte slot
+ * with dword fields, fragments starting at +0x10 and 12 bytes apart, and the
+ * link field after the last fragment (bit 0 is EOL; bit 15 of the config word
+ * is PINTR, not EOL).  The real driver always terminates each TDA with EOL and
+ * re-issues TXP per packet, but the chain walk follows the manual.
+ *
+ * Multi-fragment descriptors place the link beyond the 32-byte slot; this is
+ * kept for compatibility because the driver only ever uses one fragment.
+ */
+static void
+dp8393x_tx(dp8393x_t *dev)
+{
+    uint16_t tda;
+
+    if (dev->tx_active) {
+        /* TXP must not be set while a transmission is in progress. */
+        dp8393x_log("%s: 发送过程中重复置位 TXP，已忽略\n", dev->name);
+        return;
+    }
+
+    dev->tx_active = 1;
+    tda = (uint16_t) (dev->regs[SONIC_CTDA >> 1] & 0xFFFE);
+
+    for (;;) {
+        uint16_t config = dp8393x_ram_read16(dev, (uint16_t) (tda + SONIC_TDA_CONFIG));
+        uint32_t size   = dp8393x_ram_read32(dev, (uint16_t) (tda + SONIC_TDA_SIZE));
+        uint32_t frags  = dp8393x_ram_read32(dev, (uint16_t) (tda + SONIC_TDA_FRAGS));
+        uint32_t gather = 0;
+        uint32_t i;
+        uint16_t status = 0x0000;
+        uint16_t link;
+        uint8_t  abort = 0;
+
+        /* TXpkt.config carries the TCR configuration bits; the status bits
+         * start cleared for every packet. */
+        dev->regs[SONIC_TCR >> 1] = (uint16_t) (config & 0xF000);
+
+        /* PINTR raises PINT as soon as the descriptor has been read. */
+        if (config & SONIC_TDA_CONFIG_PINTR)
+            dp8393x_raise_isr(dev, SONIC_ISR_PINT);
+
+        if ((frags == 0) || (frags > 16) || (size > SONIC_TX_FRAME_MAX)) {
+            status = SONIC_TSR_BCM;
+            abort  = 1;
+        } else {
+            for (i = 0; i < frags; i++) {
+                uint16_t frag = (uint16_t) (tda + SONIC_TDA_FRAG + (i * SONIC_TDA_FRAG_STEP));
+                uint32_t addr = (uint32_t) (dp8393x_ram_read32(dev, frag) & 0xFFFF);
+                uint32_t len  = dp8393x_ram_read32(dev, (uint16_t) (frag + 0x08));
+                uint32_t b;
+
+                addr |= (uint32_t) dp8393x_ram_read8(dev, (uint16_t) (frag + 0x04)) << 16;
+
+                if ((len > (size - gather)) || ((gather + len) > SONIC_TX_FRAME_MAX)) {
+                    status = SONIC_TSR_BCM;
+                    abort  = 1;
+                    break;
+                }
+
+                for (b = 0; b < len; b++)
+                    dev->tx_frame[gather + b] = dp8393x_ram_read8(dev, (uint16_t) (addr + b));
+
+                gather += len;
+            }
+
+            if (!abort && (gather != size)) {
+                status = SONIC_TSR_BCM;
+                abort  = 1;
+            }
+        }
+
+        if (!abort) {
+            status = SONIC_TSR_PTX;
+
+            /* With CRCI=0 the controller appends a 4-byte FCS on the wire.
+             * 86Box network backends carry frames without an FCS, so the
+             * gathered descriptor data is handed over unchanged. */
+            if (dev->card != NULL)
+                network_tx(dev->card, dev->tx_frame, (int) size);
+        }
+
+        /* Write TXpkt.status and clear the TCR status bits after write-back
+         * (this is also what clears OWC/DEF). */
+        dp8393x_ram_write32(dev, (uint16_t) (tda + SONIC_TDA_STATUS), status);
+        dev->regs[SONIC_TCR >> 1] = (uint16_t) ((dev->regs[SONIC_TCR >> 1] & 0xF000) | status);
+
+        if (status & SONIC_TSR_ERR) {
+            dp8393x_raise_isr(dev, SONIC_ISR_TXER);
+            dp8393x_raise_isr(dev, SONIC_ISR_PTDN);
+            break;
+        }
+
+        link = dp8393x_ram_read16(dev,
+                                  (uint16_t) (tda + SONIC_TDA_FRAG + (frags * SONIC_TDA_FRAG_STEP)));
+
+        if (link & 0x0001) {
+            dev->regs[SONIC_CTDA >> 1] = link;
+            dp8393x_raise_isr(dev, SONIC_ISR_PTDN);
+            break;
+        }
+
+        if (dev->regs[SONIC_CR >> 1] & SONIC_CR_HTX) {
+            /* HTX: stop after this packet; CTDA points at the last
+             * transmitted descriptor. */
+            dev->regs[SONIC_CTDA >> 1] = tda;
+            dp8393x_raise_isr(dev, SONIC_ISR_PTDN);
+            break;
+        }
+
+        dev->regs[SONIC_CTDA >> 1] = (uint16_t) (link & 0xFFFE);
+        tda = (uint16_t) (link & 0xFFFE);
+    }
+
+    /* TXP is a command bit; it is cleared on EOL, HTX or abort. */
+    dev->regs[SONIC_CR >> 1] &= (uint16_t) ~(SONIC_CR_TXP | SONIC_CR_HTX);
+    dev->tx_active = 0;
+}
+
 static uint16_t
 dp8393x_reg_read(dp8393x_t *dev, uint16_t off)
 {
@@ -281,6 +462,9 @@ dp8393x_reg_write(dp8393x_t *dev, uint16_t off, uint16_t val)
 {
     switch (off) {
         case SONIC_CR: {
+            uint8_t txp = (val & SONIC_CR_TXP) ? 1 : 0;
+            uint8_t htx = (val & SONIC_CR_HTX) ? 1 : 0;
+
             if (val & SONIC_CR_RST) {
                 dp8393x_core_reset(dev);
                 return;
@@ -304,9 +488,14 @@ dp8393x_reg_write(dp8393x_t *dev, uint16_t off, uint16_t val)
             if (val & SONIC_CR_ST)
                 dev->stopped = 0;
 
-            /* TXP/HTX/RRRA/LCAM 为命令位，不保持；STP/RXEN/RXDIS 为状态位。 */
+            /* TXP/RRRA/LCAM 为命令位，不保持；STP/RXEN/RXDIS/HTX 保持。
+             * HTX 在发送期间必须可见，发送结束后由 dp8393x_tx() 清除。 */
             dev->regs[SONIC_CR >> 1] = (uint16_t) ((dev->stopped ? SONIC_CR_STP : 0x0000)
-                                                 | (dev->rx_enabled ? SONIC_CR_RXEN : SONIC_CR_RXDIS));
+                                                 | (dev->rx_enabled ? SONIC_CR_RXEN : SONIC_CR_RXDIS)
+                                                 | (htx ? SONIC_CR_HTX : 0x0000));
+
+            if (txp)
+                dp8393x_tx(dev);
             break;
         }
 
