@@ -65,6 +65,7 @@
 #include <86box/ui.h>
 #include <86box/timer.h>
 #include <86box/network.h>
+#include <86box/net_dp8393x.h>
 #include <86box/net_ne2000.h>
 #include <86box/net_pcnet.h>
 #include <86box/net_wd8003.h>
@@ -130,6 +131,8 @@ static const NETWORK_CARD net_cards[] = {
     { &wd8003ea_device            },
     { &wd8003eta_device           },
     { &wd8013epa_device           },
+    { &ibm_lan_a_device           },
+    { &ibm_lan_a_short_device     },
     /* VLB */
     { &pcnet_am79c960_vlb_device  },
     /* PCI */
