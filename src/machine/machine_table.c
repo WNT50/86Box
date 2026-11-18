@@ -26524,6 +26524,86 @@ const machine_t machines[] = {
         .aliases                  = { "" }
     },
 
+    /* Cobalt */
+    {
+        .name              = "[Cobalt] SGI Visual Workstation 320",
+        .internal_name     = "sgi320",
+        .type              = MACHINE_TYPE_SLOT1,
+        .chipset           = MACHINE_CHIPSET_COBALT,
+        .init              = machine_at_sgivw320_init,
+        .p1_handler        = NULL,
+        .gpio_handler      = NULL,
+        .available_flag    = MACHINE_AVAILABLE,
+        .gpio_acpi_handler = NULL,
+        .cpu               = {
+            .package     = CPU_PKG_SLOT1,
+            .block       = CPU_BLOCK(CPU_PENTIUMPRO, CPU_CYRIX3S),
+            .min_bus     = 66666667,
+            .max_bus     = 100000000,
+            .min_voltage = 1800,
+            .max_voltage = 3500,
+            .min_multi   = 1.5,
+            .max_multi   = 8.0
+        },
+        .bus_flags = MACHINE_BUS_PCI | MACHINE_BUS_USB,
+        .flags     = MACHINE_PIIX4 | MACHINE_VIDEO_FIXED | MACHINE_NIC | MACHINE_SOUND,
+        .ram = {
+            .min  = 128 * 1024,
+            .max  = 1024 * 1024,
+            .step = 128 * 1024
+        },
+        .nvrmask     = 511,
+        .kbc_device  = NULL,
+        .kbc_p1      = 0xff,
+        .gpio        = 0xffffffff,
+        .gpio_acpi   = 0xffffffff,
+        .device      = NULL,
+        .fdc_device  = NULL,
+        .sio_device  = NULL,
+        .vid_device  = NULL,
+        .snd_device  = NULL,
+        .net_device  = NULL
+    },
+    {
+        .name              = "[Cobalt] SGI Visual Workstation 540",
+        .internal_name     = "sgi540",
+        .type              = MACHINE_TYPE_SLOT1,
+        .chipset           = MACHINE_CHIPSET_COBALT,
+        .init              = machine_at_sgivw540_init,
+        .p1_handler        = NULL,
+        .gpio_handler      = NULL,
+        .available_flag    = MACHINE_AVAILABLE,
+        .gpio_acpi_handler = NULL,
+        .cpu               = {
+            .package     = CPU_PKG_SLOT1,
+            .block       = CPU_BLOCK(CPU_PENTIUMPRO, CPU_CYRIX3S),
+            .min_bus     = 66666667,
+            .max_bus     = 100000000,
+            .min_voltage = 1800,
+            .max_voltage = 3500,
+            .min_multi   = 1.5,
+            .max_multi   = 8.0
+        },
+        .bus_flags = MACHINE_BUS_PCI | MACHINE_BUS_USB,
+        .flags     = MACHINE_PIIX4 | MACHINE_VIDEO_FIXED | MACHINE_NIC | MACHINE_SOUND,
+        .ram = {
+            .min  = 128 * 1024,
+            .max  = 2048 * 1024,
+            .step = 128 * 1024
+        },
+        .nvrmask     = 511,
+        .kbc_device  = NULL,
+        .kbc_p1      = 0xff,
+        .gpio        = 0xffffffff,
+        .gpio_acpi   = 0xffffffff,
+        .device      = NULL,
+        .fdc_device  = NULL,
+        .sio_device  = NULL,
+        .vid_device  = NULL,
+        .snd_device  = NULL,
+        .net_device  = NULL
+    },
+
     /* Slot 1/2 machines */
     /* 440GX */
     /* Has a National Semiconductors PC87309 Super I/O chip with on-chip KBC

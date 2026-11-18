@@ -322,6 +322,7 @@ enum {
     MACHINE_CHIPSET_VLSI_SUPERCORE,
     MACHINE_CHIPSET_VLSI_WILDCAT,
     MACHINE_CHIPSET_WD76C10,
+    MACHINE_CHIPSET_COBALT,
     MACHINE_CHIPSET_ZYMOS_POACH,
     MACHINE_CHIPSET_MAX
 };
@@ -1508,6 +1509,8 @@ extern const device_t  al440lx_device;
 #endif
 extern int             machine_at_al440lx_init(const machine_t *);
 extern int             machine_at_spitfire_init(const machine_t *);
+extern int             machine_at_sgivw320_init(const machine_t *);
+extern int             machine_at_sgivw540_init(const machine_t *);
 extern int             machine_at_ma30d_init(const machine_t *);
 
 /* i440EX */
