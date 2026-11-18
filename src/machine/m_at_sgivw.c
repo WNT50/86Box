@@ -86,7 +86,12 @@ machine_at_sgivw_common_init(const machine_t *model, int is_320)
     device_add(&pc87307_device);
     device_add(&cobalt_chipset_device);
     device_add(&st_flash_29f400t_device);
-    device_add(&i82557_device);
+    {
+        static const uint8_t sgivw_mac[6] = { 0x08, 0x00, 0x69, 0x12, 0x34, 0x56 };
+        void *nic = device_add(&i82557_device);
+
+        i8255x_set_bia(nic, sgivw_mac);
+    }
 
     return ret;
 }

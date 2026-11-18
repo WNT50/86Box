@@ -332,3 +332,5 @@ extern const device_t via_vt6105m_device;
 #endif
 
 #endif /*EMU_NETWORK_H*/
+
+extern void i8255x_set_bia(void *priv, const uint8_t *mac);
