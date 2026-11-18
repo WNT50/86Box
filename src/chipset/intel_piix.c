@@ -1823,6 +1823,13 @@ piix_speed_changed(void *priv)
         timer_on_auto(&dev->fast_off_timer, ((double) cpu_fast_off_val + 1) * dev->fast_off_period);
 }
 
+static void
+piix4_special_cycle(uint8_t bus, uint32_t data)
+{
+    pclog("PIIX4: special cycle on bus %i, data %08X%s\n", bus, data,
+          (data == 0x00120002) ? " (stop grant)" : "");
+}
+
 static void *
 piix_init(const device_t *info)
 {
@@ -1848,6 +1855,7 @@ piix_init(const device_t *info)
     if (dev->type == 4) {
         flash_bios_write_gate      = piix4_bios_write_gate;
         flash_bios_write_gate_priv = dev;
+        pci_set_special_cycle_handler(piix4_special_cycle);
     }
 
     dev->bm[0] = device_add_inst(&sff8038i_device, 1);
