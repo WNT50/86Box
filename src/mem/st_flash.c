@@ -374,6 +374,8 @@ st_flash_init(UNUSED(const device_t *info))
                     st_shadow_write8, st_shadow_write16, st_shadow_write32,
                     dev->shadow, MEM_MAPPING_EXTERNAL, dev);
 
+    mem_set_mem_state_both(0x000A0000, 0x00050000, MEM_READ_INTERNAL | MEM_WRITE_INTERNAL);
+
     mem_mapping_add(&dev->mapping_high, ST_FLASH_BASE_HIGH, ST_FLASH_SIZE,
                     st_flash_read8, st_flash_read16, st_flash_read32,
                     st_flash_write8, st_flash_write16, st_flash_write32,
