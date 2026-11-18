@@ -51,7 +51,8 @@ cobalt_core_init(UNUSED(const device_t *info))
     /* Register CMOS memory with additional bank. TODO: move this into the PIIX4 source code */
     nvr = device_add(&nvr_at_device);
     nvr_bank_set(0, 0, nvr);
-    nvr_bank_set(1, 0, nvr);
+    /* The PIIX4 extended bank lives in the second 128-byte half of NVRAM. */
+    nvr_bank_set(1, 1, nvr);
     nvr_at_sec_handler(1, 0x72, nvr);
 
     device_add(&cobalt_device);
