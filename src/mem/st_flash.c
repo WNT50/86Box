@@ -89,23 +89,14 @@ typedef struct st_flash_t {
     char path[1024];
 } st_flash_t;
 
-static uint16_t
-st_flash_read_word(const st_flash_t *dev, uint32_t off)
+static uint8_t
+st_flash_read_byte(const st_flash_t *dev, uint32_t off)
 {
-    uint32_t word = off & ~1;
-
     if (dev->mode == ST_MODE_AUTOSELECT) {
-        switch (word) {
-            case 0x0000:
-                return ST_MANUFACTURER_ID;
-            case 0x0002:
-                return ST_DEVICE_ID;
-            default:
-                return 0x0000;
-        }
+        uint16_t id = ((off & ~1) == 0x0000) ? ST_MANUFACTURER_ID : ST_DEVICE_ID;
+        return (off & 1) ? (uint8_t) (id >> 8) : (uint8_t) id;
     }
-
-    return (uint16_t) (dev->array[word] | (dev->array[word + 1] << 8));
+    return dev->array[off];
 }
 
 static uint8_t
@@ -113,17 +104,18 @@ st_flash_read8(uint32_t addr, void *priv)
 {
     const st_flash_t *dev = (const st_flash_t *) priv;
     uint32_t          off = addr & ST_FLASH_MASK;
-    uint16_t          word = st_flash_read_word(dev, off);
 
-    return (off & 1) ? (uint8_t) (word >> 8) : (uint8_t) word;
+    return st_flash_read_byte(dev, off);
 }
 
 static uint16_t
 st_flash_read16(uint32_t addr, void *priv)
 {
     const st_flash_t *dev = (const st_flash_t *) priv;
+    uint32_t          off = addr & ST_FLASH_MASK;
 
-    return st_flash_read_word(dev, addr & ST_FLASH_MASK);
+    return (uint16_t) st_flash_read_byte(dev, off) |
+           ((uint16_t) st_flash_read_byte(dev, off + 1) << 8);
 }
 
 static uint32_t
@@ -132,8 +124,10 @@ st_flash_read32(uint32_t addr, void *priv)
     const st_flash_t *dev = (const st_flash_t *) priv;
     uint32_t          off = addr & ST_FLASH_MASK;
 
-    return (uint32_t) st_flash_read_word(dev, off) |
-           ((uint32_t) st_flash_read_word(dev, off + 2) << 16);
+    return (uint32_t) st_flash_read_byte(dev, off) |
+           ((uint32_t) st_flash_read_byte(dev, off + 1) << 8) |
+           ((uint32_t) st_flash_read_byte(dev, off + 2) << 16) |
+           ((uint32_t) st_flash_read_byte(dev, off + 3) << 24);
 }
 
 static void
