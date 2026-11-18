@@ -121,4 +121,9 @@ add_library(chipset OBJECT
     vl82c480.c
     vl82c59x.c
     wd76c10.c
+    sgivw/cobalt.c
+    sgivw/cobalt_cpu.c
+    sgivw/cobalt_gfx.c
+    sgivw/cobalt_ioapic.c
+    sgivw/cobalt_mem.c
 )
