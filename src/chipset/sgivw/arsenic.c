@@ -32,16 +32,30 @@ arsenic_log(const char *fmt, ...)
 #    define arsenic_log(fmt, ...)
 #endif
 
+static uint32_t arsenic_mmio_decode_address(uint32_t addr);
+
 static uint8_t
 arsenic_mmio_read8(uint32_t addr, void* priv)
 {
-    uint8_t ret = 0;
+    const ars_t *dev   = priv;
+    uint32_t     off   = addr & VW_ARS_IO_DECODE_MASK;
+    uint32_t     idx   = arsenic_mmio_decode_address(addr);
+    uint8_t      ret   = (uint8_t) (dev->regs[idx] >> ((addr & 3) * 8));
 
     /*
      * The Linux dbe driver states that all I/O access for Arsenic must be 32-bit size.
      * However, the PROM attempts a byte access to 0x10003, 0x30008, 0x20004, and 0x40002.
      */
-    arsenic_log("ARS: [R08] [%X] --> %X Unhandled\n", addr & VW_ARS_IO_DECODE_MASK, ret);
+    switch (off) {
+        case 0x30008:
+        case 0x20004:
+            ret = 0x01;
+            break;
+        default:
+            break;
+    }
+
+    arsenic_log("ARS: [R08] [%X] --> %X\n", off, ret);
 
     return ret;
 }
@@ -49,9 +63,12 @@ arsenic_mmio_read8(uint32_t addr, void* priv)
 static uint16_t
 arsenic_mmio_read16(uint32_t addr, void* priv)
 {
-    arsenic_log("ARS: [R16] [%X] --> %X Unhandled\n", addr, 0);
-    assert(0);
-    return 0;
+    const ars_t *dev = priv;
+    uint32_t     idx = arsenic_mmio_decode_address(addr & ~1);
+    uint16_t     ret = (uint16_t) (dev->regs[idx] >> ((addr & 2) * 8));
+
+    arsenic_log("ARS: [R16] [%X] --> %X\n", addr, ret);
+    return ret;
 }
 
 static inline uint32_t
@@ -102,15 +119,23 @@ arsenic_mmio_decode_address(uint32_t addr)
 static void
 arsenic_mmio_write8(uint32_t addr, uint8_t val, void* priv)
 {
-    arsenic_log("ARS: [W08] [%X] <-- %X unhandled\n", addr, val);
-    assert(0);
+    ars_t   *dev   = priv;
+    uint32_t idx   = arsenic_mmio_decode_address(addr & ~3);
+    uint32_t shift = (addr & 3) * 8;
+
+    dev->regs[idx] = (dev->regs[idx] & ~(0xFFu << shift)) | ((uint32_t) val << shift);
+    arsenic_log("ARS: [W08] [%X] <-- %X\n", addr, val);
 }
 
 static void
 arsenic_mmio_write16(uint32_t addr, uint16_t val, void* priv)
 {
-    arsenic_log("ARS: [W16] [%X] <-- %X unhandled\n", addr, val);
-    assert(0);
+    ars_t   *dev   = priv;
+    uint32_t idx   = arsenic_mmio_decode_address(addr & ~3);
+    uint32_t shift = (addr & 2) * 8;
+
+    dev->regs[idx] = (dev->regs[idx] & ~(0xFFFFu << shift)) | ((uint32_t) val << shift);
+    arsenic_log("ARS: [W16] [%X] <-- %X\n", addr, val);
 }
 
 static uint32_t
@@ -124,6 +149,10 @@ arsenic_mmio_read32(uint32_t addr, void* priv)
     addr = arsenic_mmio_decode_address(addr);
 
     ret = dev->regs[addr];
+
+    /* The PROM waits for bit 16 of the 0x40000 register (routine 0xF3E950). */
+    if (addr == (0x40000 / 4))
+        ret |= 0x00010000;
 
     switch (addr) {
         case VW_ARS_REG_CRT_I2C_CTRL: {
@@ -343,6 +372,20 @@ arsenic_init(const device_t *info)
 
     mem_mapping_add(&dev->mmio_mapping,
                     VW_ARS_IO_BASE,
+                    VW_ARS_IO_SIZE,
+                    arsenic_mmio_read8,
+                    arsenic_mmio_read16,
+                    arsenic_mmio_read32,
+                    arsenic_mmio_write8,
+                    arsenic_mmio_write16,
+                    arsenic_mmio_write32,
+                    NULL,
+                    MEM_MAPPING_EXTERNAL,
+                    dev);
+
+    /* The firmware addresses the ASIC through the window at BD000000h. */
+    mem_mapping_add(&dev->mmio_alt_mapping,
+                    0xBD000000,
                     VW_ARS_IO_SIZE,
                     arsenic_mmio_read8,
                     arsenic_mmio_read16,
