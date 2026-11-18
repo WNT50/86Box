@@ -195,5 +195,6 @@ extern const device_t amd_flash_29f020a_device;
 extern const device_t amd_flash_29f002nbt_device;
 extern const device_t amd_flash_29f040a_device;
 extern const device_t amd_flash_29f080a_device;
+extern const device_t amd_flash_29f400t_device;
 
 #endif /*EMU_FLASH_H*/
