@@ -34,18 +34,43 @@
 #include <86box/sio.h>
 #include <86box/network.h>
 #include <86box/flash.h>
+#include "cpu.h"
+
+#define VW_PIIX_GPI_DEFAULT              0x0000607E
+#define VW_PIIX_GPI_CPU_BUS_100MHZ       0x00010000
+#define VW_PIIX_GPI_MODEL_320            0x00000000
+#define VW_PIIX_GPI_MODEL_540            0x00040000
+
+#define VW_SIO_GPIO_DEFAULT              0xFF000080
+#define VW_SIO_GPIO_320_BOARD_REV_006F   0x11
+#define VW_SIO_GPIO_540_BOARD_REV_001A   0x21
+
+static void
+machine_sgivw_gpio_init(int is_320)
+{
+    uint32_t piix_gpio = VW_PIIX_GPI_DEFAULT;
+
+    piix_gpio |= is_320 ? VW_PIIX_GPI_MODEL_320 : VW_PIIX_GPI_MODEL_540;
+    if (cpu_busspeed > 66666667)
+        piix_gpio |= VW_PIIX_GPI_CPU_BUS_100MHZ;
+
+    machine_set_gpio_acpi_default(piix_gpio);
+    machine_set_gpio_default(VW_SIO_GPIO_DEFAULT |
+                             (is_320 ? VW_SIO_GPIO_320_BOARD_REV_006F
+                                     : VW_SIO_GPIO_540_BOARD_REV_001A));
+}
 
 static int
 machine_at_sgivw_common_init(const machine_t *model, int is_320)
 {
     int ret;
 
-    (void) is_320;
-
     ret = bios_load_linear("roms/machines/sgivw/prom0006.bin",
                            0x00080000, 512 * 1024, 0x200);
     if (bios_only || !ret)
         return ret;
+
+    machine_sgivw_gpio_init(is_320);
 
     machine_at_common_init_ex(model, 2);
 
