@@ -94,6 +94,11 @@ typedef struct dp8393x_t {
     uint8_t  rx_pkt_seq;  /* RSC 低字节：RBA 内的包序号 */
     uint8_t  rx_rba_seq;  /* RSC 高字节：RBA 序号 */
 
+    /* 通用看门狗定时器（WT0/WT1），Boot ROM POST 会用到 */
+    pc_timer_t wt_timer;
+    uint32_t wt_count;
+    uint8_t  wt_running;
+
     /* 区 3：MCA 板级状态 */
     uint8_t       pos_regs[8];
     uint8_t       board_control;
@@ -181,14 +186,22 @@ enum {
 #define SONIC_CR_RRRA  0x0100
 #define SONIC_CR_LCAM  0x0200
 
+#define SONIC_ISR_MP    0x0002
+#define SONIC_ISR_FAE   0x0004
+#define SONIC_ISR_CRC   0x0008
 #define SONIC_ISR_RBAE  0x0010
 #define SONIC_ISR_RBE   0x0020
 #define SONIC_ISR_RDE   0x0040
+#define SONIC_ISR_TC    0x0080
 #define SONIC_ISR_TXER  0x0100
 #define SONIC_ISR_PTDN  0x0200
 #define SONIC_ISR_PKTRX 0x0400
 #define SONIC_ISR_PINT  0x0800
 #define SONIC_ISR_LCD   0x1000
+
+/* 看门狗按 1/2 TXC = 5 MHz 递减；用 1 ms 定时器每次补扣 5000 个计数。 */
+#define SONIC_WT_TICK_US     1000
+#define SONIC_WT_TICK_COUNTS 5000u
 
 /* Receive Control Register: configuration bits 15-9, status bits 8-0. */
 #define SONIC_RCR_ERR  0x8000
@@ -196,6 +209,9 @@ enum {
 #define SONIC_RCR_BRD  0x2000
 #define SONIC_RCR_PRO  0x1000
 #define SONIC_RCR_AMC  0x0800
+
+/* Loopback mode select (LB1-0, bits 10-9) and status bit LBK. */
+#define SONIC_RCR_LB_MASK 0x0600
 #define SONIC_RCR_MC   0x0100
 #define SONIC_RCR_BC   0x0080
 #define SONIC_RCR_LPKT 0x0040
@@ -315,6 +331,46 @@ dp8393x_raise_isr(dp8393x_t *dev, uint16_t bits)
     dp8393x_update_irq(dev);
 }
 
+/* 通用看门狗：从 WT1/WT0 装载值递减，0 → FFFFFFFF 时置 ISR.TC。
+ * 手册 2.7.14：由 1/2 TXC 时钟驱动，ST 启动、STP/RST 停止。 */
+static void
+dp8393x_wt_tick(void *priv)
+{
+    dp8393x_t *dev = (dp8393x_t *) priv;
+
+    if (!dev->wt_running)
+        return;
+
+    if (dev->wt_count < SONIC_WT_TICK_COUNTS) {
+        dev->wt_count = 0xFFFFFFFFu - (SONIC_WT_TICK_COUNTS - dev->wt_count - 1u);
+        dp8393x_raise_isr(dev, SONIC_ISR_TC);
+    } else {
+        dev->wt_count -= SONIC_WT_TICK_COUNTS;
+    }
+
+    timer_set_delay_u64(&dev->wt_timer, SONIC_WT_TICK_US * TIMER_USEC);
+}
+
+static void
+dp8393x_wt_start(dp8393x_t *dev)
+{
+    if (dev->wt_running)
+        return;
+
+    dev->wt_running = 1;
+    timer_set_delay_u64(&dev->wt_timer, SONIC_WT_TICK_US * TIMER_USEC);
+}
+
+static void
+dp8393x_wt_stop(dp8393x_t *dev)
+{
+    if (!dev->wt_running)
+        return;
+
+    dev->wt_running = 0;
+    timer_disable(&dev->wt_timer);
+}
+
 static void
 dp8393x_core_reset(dp8393x_t *dev)
 {
@@ -334,6 +390,9 @@ dp8393x_core_reset(dp8393x_t *dev)
     dev->rx_rde      = 0;
     dev->rx_pkt_seq  = 0;
     dev->rx_rba_seq  = 0;
+
+    dp8393x_wt_stop(dev);
+    dev->wt_count = 0;
 
     /* 硬件复位：RST|STP|RXDIS = 0094h。 */
     dev->regs[SONIC_CR >> 1] = SONIC_CR_RST | SONIC_CR_STP | SONIC_CR_RXDIS;
@@ -355,6 +414,9 @@ dp8393x_sw_reset(dp8393x_t *dev)
     dev->rx_rde      = 0;
     dev->rx_enabled  = 0;
 
+    /* 手册 2.7.14：复位停止定时器但不清零。 */
+    dp8393x_wt_stop(dev);
+
     /* 软件复位清 bit9/8/1/0（LCAM/RRRA/TXP/HTX），置 bit7/2（RST/RXDIS），
      * ST、STP 等其余位保持。 */
     dev->regs[SONIC_CR >> 1] = (uint16_t) ((dev->regs[SONIC_CR >> 1]
@@ -370,7 +432,7 @@ static void
 dp8393x_cam_load(dp8393x_t *dev)
 {
     uint16_t cdp = dev->regs[SONIC_CDP >> 1];
-    uint16_t cdc = dev->regs[SONIC_CDC >> 1] & 0x000F;
+    uint16_t cdc = dev->regs[SONIC_CDC >> 1] & 0x001F;
     uint16_t i;
 
     memset(dev->cam, 0x00, sizeof(dev->cam));
@@ -520,9 +582,20 @@ dp8393x_read_rra(dp8393x_t *dev)
     return (dev->rx_words != 0) ? 1 : 0;
 }
 
+/* Tally 递增：0000 → FFFF 回卷时置对应的 ISR 位（手册 2.7.11）。 */
+static void
+dp8393x_tally_inc(dp8393x_t *dev, uint16_t reg, uint16_t isr_bit)
+{
+    uint16_t val = (uint16_t) (dev->regs[reg >> 1] + 1);
+
+    dev->regs[reg >> 1] = val;
+    if (val == 0x0000)
+        dp8393x_raise_isr(dev, isr_bit);
+}
+
 /* 收包：过滤 → 取 RBA → 写数据 + FCS → 写 RDA → 推进 CRDA / 置中断。 */
 static int
-dp8393x_rx(dp8393x_t *dev, const uint8_t *buf, int len)
+dp8393x_rx(dp8393x_t *dev, const uint8_t *buf, int len, int loopback)
 {
     uint16_t status;
     uint16_t rcr;
@@ -534,24 +607,24 @@ dp8393x_rx(dp8393x_t *dev, const uint8_t *buf, int len)
     int      i;
 
     if (!dev->rx_enabled || (len < 14) || (len > NET_MAX_FRAME)) {
-        dev->regs[SONIC_MPT >> 1]++;
+        dp8393x_tally_inc(dev, SONIC_MPT, SONIC_ISR_MP);
         return 0;
     }
 
     if (!dp8393x_rx_accept(dev, buf, len, &status)) {
-        dev->regs[SONIC_MPT >> 1]++;
+        dp8393x_tally_inc(dev, SONIC_MPT, SONIC_ISR_MP);
         return 0;
     }
 
     /* RDA 耗尽后停止收包，直到软件清 RDE。 */
     if (dev->rx_rde) {
-        dev->regs[SONIC_MPT >> 1]++;
+        dp8393x_tally_inc(dev, SONIC_MPT, SONIC_ISR_MP);
         return 0;
     }
 
     if (dev->rx_rba_full || (dev->rx_words == 0)) {
         if (dev->rx_rbe || !dp8393x_read_rra(dev)) {
-            dev->regs[SONIC_MPT >> 1]++;
+            dp8393x_tally_inc(dev, SONIC_MPT, SONIC_ISR_MP);
             return 0;
         }
     }
@@ -562,7 +635,7 @@ dp8393x_rx(dp8393x_t *dev, const uint8_t *buf, int len)
     if ((used / 2u) > dev->rx_words) {
         /* 缓冲区放不下：丢弃该包、不写 RDA，换下一个 RRA。 */
         dp8393x_raise_isr(dev, SONIC_ISR_RBAE);
-        dev->regs[SONIC_MPT >> 1]++;
+        dp8393x_tally_inc(dev, SONIC_MPT, SONIC_ISR_MP);
         if (!dev->rx_rbe)
             dp8393x_read_rra(dev);
         return 0;
@@ -581,6 +654,9 @@ dp8393x_rx(dp8393x_t *dev, const uint8_t *buf, int len)
 
     dev->rx_buf += used;
     dev->rx_words -= used / 2u;
+
+    if (loopback)
+        status |= SONIC_RCR_LBK;
 
     /* LPKT：剩余字数已不足一个最大帧，标记本包为当前 RBA 的最后一包。 */
     if (dev->rx_words <= (uint32_t) (dev->regs[SONIC_EOBC >> 1] & 0xFFFF)) {
@@ -693,17 +769,24 @@ dp8393x_tx(dp8393x_t *dev)
         }
 
         if (!abort) {
+            uint16_t lb = (uint16_t) (dev->regs[SONIC_RCR >> 1] & SONIC_RCR_LB_MASK);
+
             status = SONIC_TSR_PTX;
 
-            /* With CRCI=0 the controller appends a 4-byte FCS on the wire.
-             * 86Box network backends carry frames without an FCS, so the
-             * gathered descriptor data is handed over unchanged. */
-            if (dev->card != NULL)
+            if (lb != 0) {
+                /* 环回诊断（Boot ROM POST 使用）：数据不外发，直接进接收引擎，
+                 * RDA status 置 LBK。手册要求 CAM/RCR 能接受该目的地址。 */
+                dp8393x_rx(dev, dev->tx_frame, (int) size, 1);
+            } else if (dev->card != NULL) {
+                /* 86Box 后端帧不含 FCS，描述符数据原样上交。 */
                 network_tx(dev->card, dev->tx_frame, (int) size);
+            }
         }
 
         /* Write TXpkt.status and clear the TCR status bits after write-back
-         * (this is also what clears OWC/DEF). */
+         * (this is also what clears OWC/DEF).  Bits 15-11 are the collision
+         * count read by the driver as status >> 11; 86Box injects no
+         * collisions, so they stay 0. */
         dp8393x_ram_write32(dev, (uint16_t) (tda + SONIC_TDA_STATUS), status);
         dev->regs[SONIC_TCR >> 1] = (uint16_t) ((dev->regs[SONIC_TCR >> 1] & 0xF000) | status);
 
@@ -744,15 +827,26 @@ dp8393x_reg_read(dp8393x_t *dev, uint16_t off)
 {
     switch (off) {
         case SONIC_SR:
-            return 0x0000;
+            /* 硅版本，手册/QEMU 均为 0004h；Boot ROM POST 可见。 */
+            return 0x0004;
 
-        case SONIC_CE: {
-            uint16_t val = dev->cam[dev->cep & 0x3F];
+        case SONIC_CAP2:
+            return dev->cam[((dev->cep & 0x000F) * 3) + 2];
 
-            dev->cep = (uint16_t) ((dev->cep + 1) & 0x3F);
-            dev->regs[SONIC_CEP >> 1] = dev->cep;
-            return val;
-        }
+        case SONIC_CAP1:
+            return dev->cam[((dev->cep & 0x000F) * 3) + 1];
+
+        case SONIC_CAP0:
+            return dev->cam[(dev->cep & 0x000F) * 3];
+
+        case SONIC_CE:
+            return dev->cam_enable;
+
+        case SONIC_WT0:
+            return (uint16_t) (dev->wt_count & 0xFFFF);
+
+        case SONIC_WT1:
+            return (uint16_t) (dev->wt_count >> 16);
 
         default:
             break;
@@ -811,6 +905,12 @@ dp8393x_reg_write(dp8393x_t *dev, uint16_t off, uint16_t val)
             else if (val & SONIC_CR_STP)
                 dev->stopped = 1;
 
+            /* ST/STP 直接控制通用看门狗；复位只停表不清零。 */
+            if (dev->stopped)
+                dp8393x_wt_stop(dev);
+            else
+                dp8393x_wt_start(dev);
+
             /* TXP/RRRA/LCAM 为命令位，不保持；STP/RXEN/RXDIS/HTX 保持。
              * HTX 在发送期间必须可见，发送结束后由 dp8393x_tx() 清除。 */
             dev->regs[SONIC_CR >> 1] = (uint16_t) ((dev->stopped ? SONIC_CR_STP : SONIC_CR_ST)
@@ -832,11 +932,14 @@ dp8393x_reg_write(dp8393x_t *dev, uint16_t off, uint16_t val)
             break;
 
         case SONIC_TCR:
-            dev->regs[SONIC_TCR >> 1] = val & 0x0FFF;
+            /* 高 4 位配置可写，低 12 位是硬件维护的状态位。 */
+            dev->regs[SONIC_TCR >> 1] = (uint16_t) ((dev->regs[SONIC_TCR >> 1] & 0x0FFF)
+                                                  | (val & 0xF000));
             break;
 
         case SONIC_IMR:
-            dev->regs[SONIC_IMR >> 1] = val & 0x7FFF;
+            /* POST 会写 0xBCFF 并原样读回，因此不做位裁剪。 */
+            dev->regs[SONIC_IMR >> 1] = val;
             dp8393x_update_irq(dev);
             break;
 
@@ -861,33 +964,35 @@ dp8393x_reg_write(dp8393x_t *dev, uint16_t off, uint16_t val)
         }
 
         case SONIC_CDC:
-            dev->regs[SONIC_CDC >> 1] = val & 0x000F;
+            dev->regs[SONIC_CDC >> 1] = val & 0x001F;
             break;
 
         case SONIC_CEP:
-            dev->cep = val & 0x003F;
+            dev->cep = val & 0x000F;
             dev->regs[SONIC_CEP >> 1] = dev->cep;
             break;
 
         case SONIC_CE:
-            dev->cam[dev->cep & 0x3F] = val;
-            dev->cep = (uint16_t) ((dev->cep + 1) & 0x3F);
-            dev->regs[SONIC_CEP >> 1] = dev->cep;
+            dev->cam_enable = val;
             break;
 
         case SONIC_SR:
         case SONIC_RSC:
+            break;
+
         case SONIC_CRCT:
         case SONIC_FAET:
         case SONIC_MPT:
-            /* 只读：Tally 计数器在 P5 接入。 */
+            /* 手册 2.7.11：写入数据反相后锁存，写 FFFFh 即清零。 */
+            dev->regs[off >> 1] = (uint16_t) ~val;
             break;
 
         case SONIC_WT0:
+            dev->wt_count = (dev->wt_count & 0xFFFF0000u) | val;
+            break;
+
         case SONIC_WT1:
-            /* 按实测不建模：IBMENIIN.SYS 从不访问看门狗（WT0/WT1、ST/STP），
-             * 因此不做递减计数、不产生 ISR.TC，仅保留寄存器读写。 */
-            dev->regs[off >> 1] = val;
+            dev->wt_count = (dev->wt_count & 0x0000FFFFu) | ((uint32_t) val << 16);
             break;
 
         case SONIC_DCR2:
@@ -1293,7 +1398,7 @@ lan_a_rx(void *priv, uint8_t *buf, int len)
         return 1;
 
     /* 返回 1 表示本帧已被消费，网络队列可以继续下发。 */
-    dp8393x_rx(dev, buf, len);
+    dp8393x_rx(dev, buf, len, 0);
     return 1;
 }
 
@@ -1357,6 +1462,8 @@ lan_a_init(const device_t *info)
     dev->irq_cb    = lan_a_irq;
     dev->irq_priv  = dev;
 
+    timer_add(&dev->wt_timer, dp8393x_wt_tick, dev, 0);
+
     dp8393x_core_reset(dev);
 
     if (dev->variant == IBM_LAN_A_SHORT)
@@ -1400,6 +1507,7 @@ lan_a_close(void *priv)
 
     lan_a_ioremove(dev);
     mem_mapping_disable(&dev->window);
+    timer_disable(&dev->wt_timer);
 
     if (dev->card != NULL)
         netcard_close(dev->card);
