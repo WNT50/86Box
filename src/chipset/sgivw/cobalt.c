@@ -43,7 +43,6 @@ cobalt_init(UNUSED(const device_t *info))
 {
     co_t *dev = (co_t*)calloc(1, sizeof(co_t));
 
-    cobalt_apic_init(dev);
     cobalt_cpu_init(dev);
     cobalt_gfx_init(dev);
     cobalt_mem_init(dev);

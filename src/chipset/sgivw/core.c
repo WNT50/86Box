@@ -46,6 +46,7 @@ static void *
 cobalt_core_init(UNUSED(const device_t *info))
 {
     nvr_t *nvr;
+    void  *ioapic;
 
     /* Register CMOS memory with additional bank. TODO: move this into the PIIX4 source code */
     nvr = device_add(&nvr_at_device);
@@ -56,6 +57,12 @@ cobalt_core_init(UNUSED(const device_t *info))
     device_add(&cobalt_device);
     device_add(&lithium_device);
     device_add(&arsenic_device);
+
+    ioapic = device_add(&ioapic_device);
+    if (ioapic != NULL)
+        ioapic_set_mmio_base(ioapic, VW_CO_APIC_IO_BASE);
+
+    return NULL;
 }
 
 const device_t cobalt_chipset_device = {
