@@ -106,6 +106,10 @@ static pci_mirq_t  pci_mirqs[PCI_MIRQS_NUM];
 static int         pci_index;
 static int         pci_func;
 static int         pci_card;
+
+/* A configuration write to device 1Fh function 7 is the x86 way of asking
+   the chipset for a PCI special cycle; the chipset, not a card, consumes it. */
+static void      (*pci_special_cycle_handler)(uint8_t bus, uint32_t data) = NULL;
 static int         pci_bus;
 static int         pci_key;
 static int         pci_trc_reg = 0;
@@ -935,6 +939,11 @@ pci_writel(uint16_t port, uint32_t val, UNUSED(void *priv))
                 break;
             case 0xcfc:
             case 0xc000 ... 0xcffc:
+                if ((pci_card == 0x1f) && (pci_func == 7)) {
+                    if (pci_special_cycle_handler != NULL)
+                        pci_special_cycle_handler(pci_bus, val);
+                    break;
+                }
                 /* Still split because we cheat. */
                 pci_access_len = 4;
                 pci_writew(port, val & 0xffff, priv);
@@ -1134,6 +1143,12 @@ uint8_t
 pci_register_bus(void)
 {
     return last_pci_bus++;
+}
+
+void
+pci_set_special_cycle_handler(void (*fn)(uint8_t bus, uint32_t data))
+{
+    pci_special_cycle_handler = fn;
 }
 
 void
