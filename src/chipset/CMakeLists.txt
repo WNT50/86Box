@@ -128,4 +128,9 @@ add_library(chipset OBJECT
     sgivw/cobalt_gfx.c
     sgivw/cobalt_ioapic.c
     sgivw/cobalt_mem.c
+    sgivw/core.c
+    sgivw/lithium.c
+    sgivw/lithium_1394.c
+    sgivw/lithium_dma.c
+    sgivw/lithium_hostbridge.c
 )

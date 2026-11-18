@@ -85,7 +85,6 @@ machine_at_sgivw_common_init(const machine_t *model, int is_320)
     device_add(&piix4e_device);
     device_add(&pc87307_device);
     device_add(&cobalt_chipset_device);
-    device_add(&arsenic_device);
     device_add(&st_flash_29f400t_device);
     device_add(&i82557_device);
 
