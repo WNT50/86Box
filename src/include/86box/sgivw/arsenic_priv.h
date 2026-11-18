@@ -44,6 +44,7 @@ typedef struct ars_t
 {
     uint32_t regs[VW_ARS_IO_DECODE_MAX + sizeof(uint32_t)];
     mem_mapping_t mmio_mapping;
+    mem_mapping_t mmio_alt_mapping;
     void *crt_i2c;
     void *lcd_i2c;
     void *ddc;
