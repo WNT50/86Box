@@ -30,6 +30,23 @@
 
 #include <86box/sgivw/cobalt.h>
 
+static uint8_t cobalt_io_latch[0x1000];
+
+static uint8_t
+cobalt_io_read8(uint16_t port, UNUSED(void *priv))
+{
+    if (port == 0x0fb2)
+        return 0x00; /* Board/clock strap, bits 2-5 */
+
+    return cobalt_io_latch[port & 0xfff];
+}
+
+static void
+cobalt_io_write8(uint16_t port, uint8_t val, UNUSED(void *priv))
+{
+    cobalt_io_latch[port & 0xfff] = val;
+}
+
 static void
 cobalt_close(void *priv)
 {
@@ -46,6 +63,10 @@ cobalt_init(UNUSED(const device_t *info))
     cobalt_cpu_init(dev);
     cobalt_gfx_init(dev);
     cobalt_mem_init(dev);
+
+    io_sethandler(0x0505, 0x0002, cobalt_io_read8, NULL, NULL, cobalt_io_write8, NULL, NULL, dev);
+    io_sethandler(0x0fb2, 0x0001, cobalt_io_read8, NULL, NULL, cobalt_io_write8, NULL, NULL, dev);
+    io_sethandler(0x0fb7, 0x0001, cobalt_io_read8, NULL, NULL, cobalt_io_write8, NULL, NULL, dev);
 
     return dev;
 }
