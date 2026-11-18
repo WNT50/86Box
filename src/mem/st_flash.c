@@ -381,6 +381,7 @@ st_flash_init(UNUSED(const device_t *info))
 
     /* The full 512 KiB image is mapped by this device, not by rom.c. */
     mem_mapping_disable(&bios_mapping);
+    mem_mapping_disable(&bios_high_mapping);
 
 
     st_flash_reset(dev);
