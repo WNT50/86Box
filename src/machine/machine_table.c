@@ -26546,7 +26546,7 @@ const machine_t machines[] = {
             .max_multi   = 8.0
         },
         .bus_flags = MACHINE_BUS_PCI | MACHINE_BUS_USB,
-        .flags     = MACHINE_PIIX4 | MACHINE_VIDEO_FIXED | MACHINE_NIC | MACHINE_SOUND,
+        .flags     = MACHINE_PIIX4 | MACHINE_VIDEO_FIXED | MACHINE_NIC | MACHINE_SOUND | MACHINE_USB,
         .ram = {
             .min  = 128 * 1024,
             .max  = 1024 * 1024,
@@ -26585,7 +26585,7 @@ const machine_t machines[] = {
             .max_multi   = 8.0
         },
         .bus_flags = MACHINE_BUS_PCI | MACHINE_BUS_USB,
-        .flags     = MACHINE_PIIX4 | MACHINE_VIDEO_FIXED | MACHINE_NIC | MACHINE_SOUND,
+        .flags     = MACHINE_PIIX4 | MACHINE_VIDEO_FIXED | MACHINE_NIC | MACHINE_SOUND | MACHINE_USB,
         .ram = {
             .min  = 128 * 1024,
             .max  = 2048 * 1024,
