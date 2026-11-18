@@ -982,12 +982,14 @@ piix_write(int func, int addr, UNUSED(int len), uint8_t val, void *priv)
                 break;
             case 0xcb:
                 if (dev->type > 3) {
-                    fregs[addr] = val & 0x3d;
+                    /* RTCCFG: bits 3 and 4 lock the upper RAM bytes and are
+                       write-once until a hardware reset. */
+                    fregs[addr] = (val & 0x25) | ((val | fregs[addr]) & 0x18);
 
                     nvr_update_io_mapping(dev);
 
-                    nvr_wp_set(!!(val & 0x08), 0, dev->nvr);
-                    nvr_wp_set(!!(val & 0x10), 1, dev->nvr);
+                    nvr_wp_set(!!(fregs[addr] & 0x08), 0, dev->nvr);
+                    nvr_wp_set(!!(fregs[addr] & 0x10), 1, dev->nvr);
                 }
                 break;
             case 0xd4:
