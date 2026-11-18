@@ -46,15 +46,6 @@ arsenic_mmio_read8(uint32_t addr, void* priv)
      * The Linux dbe driver states that all I/O access for Arsenic must be 32-bit size.
      * However, the PROM attempts a byte access to 0x10003, 0x30008, 0x20004, and 0x40002.
      */
-    switch (off) {
-        case 0x30008:
-        case 0x20004:
-            ret = 0x01;
-            break;
-        default:
-            break;
-    }
-
     arsenic_log("ARS: [R08] [%X] --> %X\n", off, ret);
 
     return ret;
@@ -149,10 +140,6 @@ arsenic_mmio_read32(uint32_t addr, void* priv)
     addr = arsenic_mmio_decode_address(addr);
 
     ret = dev->regs[addr];
-
-    /* The PROM waits for bit 16 of the 0x40000 register (routine 0xF3E950). */
-    if (addr == (0x40000 / 4))
-        ret |= 0x00010000;
 
     switch (addr) {
         case VW_ARS_REG_CRT_I2C_CTRL: {
@@ -339,6 +326,24 @@ arsenic_mmio_write32(uint32_t addr, uint32_t val, void* priv)
 
         case VW_ARS_REG_LCD_I2C_CTRL:
             i2c_gpio_set(dev->lcd_i2c, !(val & VW_ARS_I2C_SCL_LOW), !(val & VW_ARS_I2C_SDA_LOW));
+            break;
+
+        /* The "in hardware" registers mirror the enable bits of the
+           corresponding control registers (sgivw.h: OVR_INHWCTRL,
+           FRM_INHWCTRL and DID_INHWCTRL). */
+        case VW_ARS_REG_OVERLAY_CTRL:
+            dev->regs[VW_ARS_REG_OVERLAY_STATUS] =
+                (dev->regs[VW_ARS_REG_OVERLAY_STATUS] & ~0x00000001) | (val & 0x00000001);
+            break;
+
+        case VW_ARS_REG_FB_CTRL:
+            dev->regs[VW_ARS_REG_FB_STATUS] =
+                (dev->regs[VW_ARS_REG_FB_STATUS] & ~0x00000001) | (val & 0x00000001);
+            break;
+
+        case VW_ARS_REG_DID_CTRL:
+            dev->regs[VW_ARS_REG_DID_STATUS] =
+                (dev->regs[VW_ARS_REG_DID_STATUS] & ~0x00010000) | ((val & 0x00000001) << 16);
             break;
 
         default:
