@@ -29,6 +29,8 @@
 #include <86box/machine.h>
 #include <86box/rom.h>
 #include <86box/device.h>
+#include <86box/keyboard.h>
+#include <86box/usb.h>
 #include <86box/pci.h>
 #include <86box/chipset.h>
 #include <86box/sio.h>
@@ -92,6 +94,10 @@ machine_at_sgivw_common_init(const machine_t *model, int is_320)
 
         i8255x_set_bia(nic, sgivw_mac);
     }
+
+    /* The firmware drives the keyboard through the KBC; give it a device
+       to answer its commands. */
+    device_add(&keyboard_at_device);
 
     return ret;
 }
