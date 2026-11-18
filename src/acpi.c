@@ -3357,7 +3357,9 @@ acpi_reset(void *priv)
            Compaq Mustang-S BIOS does early in POST, before it has installed
            an SMI handler. */
         if ((dev->vendor != VEN_SIS_5582) && (dev->vendor != VEN_SIS_5595_1997) &&
-            (dev->vendor != VEN_SIS_5595))
+            (dev->vendor != VEN_SIS_5595) &&
+            (machines[machine].init != machine_at_sgivw320_init) &&
+            (machines[machine].init != machine_at_sgivw540_init))
             dev->regs.pmsts |= 0x8100;
         dev->power_on = 0;
     }
