@@ -173,6 +173,31 @@ arsenic_mmio_read32(uint32_t addr, void* priv)
 }
 
 static void
+arsenic_retrace(void *priv)
+{
+    ars_t   *dev  = priv;
+    uint32_t max  = dev->regs[VW_ARS_REG_RETRACE_POS_MAX];
+    uint32_t maxx = max & 0x0fff;
+    uint32_t maxy = (max >> 12) & 0x0fff;
+    uint32_t pos  = dev->regs[VW_ARS_REG_RETRACE_POS];
+    uint32_t y    = (pos >> 12) & 0x0fff;
+
+    if (maxx == 0)
+        maxx = 1279;
+    if (maxy == 0)
+        maxy = 1023;
+
+    y++;
+    if (y > maxy)
+        y = 0;
+
+    /* x is left at the end of the line; software only uses y for vblank. */
+    dev->regs[VW_ARS_REG_RETRACE_POS] = (maxx & 0x0fff) | ((y & 0x0fff) << 12);
+
+    timer_advance_u64(&dev->retrace_timer, 1000 * TIMER_USEC);
+}
+
+static void
 arsenic_mmio_write32(uint32_t addr, uint32_t val, void* priv)
 {
     ars_t *dev = priv;
@@ -401,6 +426,8 @@ arsenic_init(const device_t *info)
                     NULL,
                     MEM_MAPPING_EXTERNAL,
                     dev);
+
+    timer_add(&dev->retrace_timer, arsenic_retrace, dev, 1);
 
     arsenic_reset_hard(dev);
 
