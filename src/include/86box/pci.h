@@ -307,6 +307,7 @@ extern int         pci_config_write(uint8_t bus, uint8_t dev, uint8_t func, uint
 
 extern uint8_t     pci_register_bus(void);
 extern void        pci_remap_bus(uint8_t bus_index, uint8_t bus_number);
+extern void        pci_set_special_cycle_handler(void (*fn)(uint8_t bus, uint32_t data));
 extern void        pci_register_bus_slot(int bus, int card, int type, int inta, int intb, int intc, int intd);
 /* One more slot on the bus a slot of this type sits on, next device
    number, INTA-D rotated (a two-IDSEL card such as the Rage Fury MAXX). */
