@@ -625,6 +625,19 @@ nic_eeprom_init(eepro100_t *s)
     i8255x_log("checksum=0x%04x\n", eeprom_contents[EEPROM_SIZE - 1]);
 }
 
+/* Replace the burned-in address and rebuild the EEPROM image around it. */
+void
+i8255x_set_bia(void *priv, const uint8_t *mac)
+{
+    eepro100_t *s = (eepro100_t *) priv;
+
+    if ((s == NULL) || (mac == NULL) || (s->eeprom == NULL))
+        return;
+
+    memcpy(s->bia, mac, 6);
+    nic_eeprom_init(s);
+}
+
 /* Port selective reset: the CU and RU go idle. The CU and RU base, the error
    counters, the configuration, the IA and the multicast setup are kept. */
 static void
