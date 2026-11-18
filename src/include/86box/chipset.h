@@ -442,4 +442,5 @@ extern const device_t zenith_scratchpad_device;
 
 /* SGI Visual Workstation */
 extern const device_t cobalt_chipset_device;
+extern const device_t arsenic_device;
 #endif /*EMU_CHIPSET_H*/
