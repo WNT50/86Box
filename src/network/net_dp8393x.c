@@ -341,6 +341,29 @@ dp8393x_core_reset(dp8393x_t *dev)
     dp8393x_update_irq(dev);
 }
 
+/* 软件复位（CR.RST=1）。手册 2.7.1：只复位内部状态机，CRC 发生器停用、
+ * Tally 暂停但不零；CTDA/CRDA/RRP/RWP 等指针、CAM/CE、CDC/CEP、RSC 均
+ * 不受软件复位影响（这些只在硬件复位时清空）。 */
+static void
+dp8393x_sw_reset(dp8393x_t *dev)
+{
+    dev->tx_active   = 0;
+    dev->rx_buf      = 0;
+    dev->rx_words    = 0;
+    dev->rx_rba_full = 0;
+    dev->rx_rbe      = 0;
+    dev->rx_rde      = 0;
+    dev->rx_enabled  = 0;
+
+    /* 软件复位清 bit9/8/1/0（LCAM/RRRA/TXP/HTX），置 bit7/2（RST/RXDIS），
+     * ST、STP 等其余位保持。 */
+    dev->regs[SONIC_CR >> 1] = (uint16_t) ((dev->regs[SONIC_CR >> 1]
+                                           & (uint16_t) ~(SONIC_CR_LCAM | SONIC_CR_RRRA
+                                                          | SONIC_CR_TXP | SONIC_CR_HTX
+                                                          | SONIC_CR_RXEN))
+                                          | SONIC_CR_RST | SONIC_CR_RXDIS);
+}
+
 /* LCAM: CDP 指向窗口内的 CAM 描述符区，CDC 为描述符个数。
  * 每个描述符 16 字节：+0 控制/入口号，+4/+8/+0C 为 6 字节地址。 */
 static void
@@ -369,6 +392,11 @@ dp8393x_cam_load(dp8393x_t *dev)
 
     /* CAM Enable 字段紧跟在最后一个描述符之后。 */
     dev->cam_enable = dp8393x_ram_read16(dev, (uint16_t) (cdp + (cdc << 4)));
+
+    /* 手册：LCAM 完成后 CDP 指向 CE 字段之后，CDC 归零。TX/RX 在模型里
+     * 都是同步完成，因此无需等待传输结束再执行 CAM DMA。 */
+    dev->regs[SONIC_CDP >> 1] = (uint16_t) (cdp + ((cdc + 1) << 4));
+    dev->regs[SONIC_CDC >> 1] = 0x0000;
 
     dev->regs[SONIC_CR >> 1] &= (uint16_t) ~SONIC_CR_LCAM;
     dp8393x_raise_isr(dev, SONIC_ISR_LCD);
@@ -741,40 +769,55 @@ dp8393x_reg_write(dp8393x_t *dev, uint16_t off, uint16_t val)
 {
     switch (off) {
         case SONIC_CR: {
-            uint8_t txp = (val & SONIC_CR_TXP) ? 1 : 0;
-            uint8_t htx = (val & SONIC_CR_HTX) ? 1 : 0;
+            uint8_t txp;
+            uint8_t htx;
+            uint8_t release = 0;
 
+            /* RST 是电平命令：写 1 进入软件复位，写 0 才释放。 */
             if (val & SONIC_CR_RST) {
-                dp8393x_core_reset(dev);
+                dp8393x_sw_reset(dev);
                 return;
             }
 
-            if (val & SONIC_CR_RRRA) {
-                /* RRRA 读取 RRP 指向的下一个 RRA；清 RBE 后同样走这条恢复路径。 */
+            /* 释放软件复位的这次写入只落状态位，不执行命令位。 */
+            if (dev->regs[SONIC_CR >> 1] & SONIC_CR_RST) {
+                release                     = 1;
+                dev->regs[SONIC_CR >> 1]    = 0x0000;
+            }
+
+            txp = (val & SONIC_CR_TXP) ? 1 : 0;
+            htx = (val & SONIC_CR_HTX) ? 1 : 0;
+
+            /* RRRA 同步完成，命令位立即自清；驱动轮询的 CR bit8 读回 0。
+             * 清 RBE 后的恢复路径也复用这里。 */
+            if (!release && (val & SONIC_CR_RRRA)) {
                 dev->rx_rbe = 0;
                 dp8393x_read_rra(dev);
             }
 
-            if (val & SONIC_CR_LCAM)
+            if (!release && (val & SONIC_CR_LCAM))
                 dp8393x_cam_load(dev);
 
-            if (val & SONIC_CR_RXEN)
+            if (!release && (val & SONIC_CR_RXEN))
                 dev->rx_enabled = 1;
-            if (val & SONIC_CR_RXDIS)
+            if (!release && (val & SONIC_CR_RXDIS))
                 dev->rx_enabled = 0;
 
-            if (val & SONIC_CR_STP)
+            /* ST/STP 互斥；同时置位时停表（手册 2.7.1）。 */
+            if ((val & (SONIC_CR_ST | SONIC_CR_STP)) == (SONIC_CR_ST | SONIC_CR_STP))
                 dev->stopped = 1;
-            if (val & SONIC_CR_ST)
+            else if (val & SONIC_CR_ST)
                 dev->stopped = 0;
+            else if (val & SONIC_CR_STP)
+                dev->stopped = 1;
 
             /* TXP/RRRA/LCAM 为命令位，不保持；STP/RXEN/RXDIS/HTX 保持。
              * HTX 在发送期间必须可见，发送结束后由 dp8393x_tx() 清除。 */
-            dev->regs[SONIC_CR >> 1] = (uint16_t) ((dev->stopped ? SONIC_CR_STP : 0x0000)
+            dev->regs[SONIC_CR >> 1] = (uint16_t) ((dev->stopped ? SONIC_CR_STP : SONIC_CR_ST)
                                                  | (dev->rx_enabled ? SONIC_CR_RXEN : SONIC_CR_RXDIS)
                                                  | (htx ? SONIC_CR_HTX : 0x0000));
 
-            if (txp)
+            if (!release && txp)
                 dp8393x_tx(dev);
             break;
         }
@@ -837,7 +880,20 @@ dp8393x_reg_write(dp8393x_t *dev, uint16_t off, uint16_t val)
         case SONIC_CRCT:
         case SONIC_FAET:
         case SONIC_MPT:
-            /* 只读：状态/计数器在 P4/P5 接入。 */
+            /* 只读：Tally 计数器在 P5 接入。 */
+            break;
+
+        case SONIC_WT0:
+        case SONIC_WT1:
+            /* 按实测不建模：IBMENIIN.SYS 从不访问看门狗（WT0/WT1、ST/STP），
+             * 因此不做递减计数、不产生 ISR.TC，仅保留寄存器读写。 */
+            dev->regs[off >> 1] = val;
+            break;
+
+        case SONIC_DCR2:
+            /* 按实测不建模：驱动从不访问 DCR2。仅保留 bit0（RJCM）供接收
+             * 过滤使用，其余位不参与行为。 */
+            dev->regs[SONIC_DCR2 >> 1] = val;
             break;
 
         default:
