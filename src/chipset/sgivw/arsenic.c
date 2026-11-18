@@ -323,7 +323,7 @@ arsenic_mmio_write32(uint32_t addr, uint32_t val, void* priv)
                 write_bits_mask = 0x0000FFFF;
             /* 0x50000 - 0x55FFC */
             else if (addr >= VW_ARS_REG_COLOR_MAP_START && addr <= VW_ARS_REG_COLOR_MAP_END)
-                write_bits_mask = 0x00FFFFFF;
+                write_bits_mask = 0xFFFFFFFF;
             /* 0x60000 - 0x603FC */
             else if (addr >= VW_ARS_REG_GAMMA_MAP_START && addr <= VW_ARS_REG_GAMMA_MAP_END)
                 write_bits_mask = 0xFFFFFF00;
