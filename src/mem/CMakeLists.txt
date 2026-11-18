@@ -29,4 +29,5 @@ add_library(mem OBJECT
     smram.c
     spd.c
     sst_flash.c
+    st_flash.c
 )

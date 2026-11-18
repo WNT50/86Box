@@ -174,9 +174,6 @@ typedef struct sst_bios_t {
 #define AMD29F040A    0xa400
 #define AMD29F080A    0xd500
 
-#define ST          0x20 /* STMicroelectronics Manufacturer's ID */
-#define ST29F400T   0xd500
-
 #define SIZE_512K   0x010000
 #define SIZE_1M     0x020000
 #define SIZE_2M     0x040000
@@ -193,21 +190,6 @@ static const sst_sector_t amd29f020a_sectors[] = {
     { 0x38000, 0x02000 },
     { 0x3a000, 0x02000 },
     { 0x3c000, 0x04000 },
-    { 0x00000, 0x00000 }
-};
-
-static const sst_sector_t st29f400t_sectors[] = {
-    { 0x00000, 0x10000 },
-    { 0x10000, 0x10000 },
-    { 0x20000, 0x10000 },
-    { 0x30000, 0x10000 },
-    { 0x40000, 0x10000 },
-    { 0x50000, 0x10000 },
-    { 0x60000, 0x10000 },
-    { 0x70000, 0x08000 },
-    { 0x78000, 0x02000 },
-    { 0x7a000, 0x02000 },
-    { 0x7c000, 0x04000 },
     { 0x00000, 0x00000 }
 };
 
@@ -409,11 +391,6 @@ sst_write(uint32_t addr, uint8_t val, void *priv)
         mask >>= 4;
         addr0 >>= 4;
         addr1 >>= 4;
-    } else if (dev->manufacturer == ST) {
-        /* ST M29F400: AAAA/5555 in byte mode (datasheet Table 6). */
-        mask  = 0xffff;
-        addr0 = 0xaaaa;
-        addr1 = 0x5555;
     }
 
     switch (dev->command_state) {
@@ -630,14 +607,12 @@ sst_flash_create(const device_t *model, const sst_flash_cfg_t *cfg)
     dev->id           = (model->local >> 8) & 0xff;
     dev->has_bbp      = (dev->manufacturer == WINBOND) && ((model->local & 0xff00) >= W29C020);
     dev->is_39        = (dev->manufacturer == SST) && ((model->local & 0xff00) >= SST39SF512);
-    if ((dev->manufacturer == AMD) || (dev->manufacturer == ST))
+    if (dev->manufacturer == AMD)
         dev->is_39 = 1;
 
     dev->sector_size = 0x1000;
     if ((dev->manufacturer == AMD) && ((model->local & 0xff00) == AMD29F020A))
         dev->sectors = amd29f020a_sectors;
-    else if ((dev->manufacturer == ST) && ((model->local & 0xff00) == ST29F400T))
-        dev->sectors = st29f400t_sectors;
     else if ((dev->manufacturer == AMD) && ((model->local & 0xff00) == AMD29F010A))
         dev->sector_size = 0x4000;
     else if ((dev->manufacturer == AMD) && (((model->local & 0xff00) == AMD29F040A) || ((model->local & 0xff00) == AMD29F080A)))
@@ -1381,20 +1356,6 @@ const device_t amd_flash_29f080a_device = {
     .internal_name = "amd_flash_29f080a",
     .flags         = 0,
     .local         = AMD | AMD29F080A | SIZE_8M,
-    .init          = sst_init,
-    .close         = sst_close,
-    .reset         = sst_reset,
-    .available     = NULL,
-    .speed_changed = NULL,
-    .force_redraw  = NULL,
-    .config        = NULL
-};
-
-const device_t amd_flash_29f400t_device = {
-    .name          = "ST M29F400T Flash BIOS",
-    .internal_name = "amd_flash_29f400t",
-    .flags         = 0,
-    .local         = ST | ST29F400T | SIZE_4M,
     .init          = sst_init,
     .close         = sst_close,
     .reset         = sst_reset,
