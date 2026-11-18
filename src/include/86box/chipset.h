@@ -446,4 +446,7 @@ extern const device_t ibm_pc700_power_device;
 extern const device_t radisys_config_device;
 
 extern const device_t zenith_scratchpad_device;
+
+/* SGI Visual Workstation */
+extern const device_t cobalt_chipset_device;
 #endif /*EMU_CHIPSET_H*/
