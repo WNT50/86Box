@@ -86,6 +86,8 @@ typedef struct st_flash_t {
     mem_mapping_t mapping_low;
     mem_mapping_t mapping_high;
 
+    uint8_t shadow[0x10000];
+
     char path[1024];
 } st_flash_t;
 
@@ -248,6 +250,65 @@ st_flash_write_word(st_flash_t *dev, uint32_t addr, uint16_t val)
     }
 }
 
+static uint8_t
+st_shadow_read8(uint32_t addr, void *priv)
+{
+    st_flash_t *dev = (st_flash_t *) priv;
+
+    return dev->shadow[addr & 0xFFFF];
+}
+
+static uint16_t
+st_shadow_read16(uint32_t addr, void *priv)
+{
+    st_flash_t *dev = (st_flash_t *) priv;
+    uint32_t    off = addr & 0xFFFF;
+
+    return (uint16_t) (dev->shadow[off] | (dev->shadow[(off + 1) & 0xFFFF] << 8));
+}
+
+static uint32_t
+st_shadow_read32(uint32_t addr, void *priv)
+{
+    st_flash_t *dev = (st_flash_t *) priv;
+    uint32_t    off = addr & 0xFFFF;
+
+    return (uint32_t) dev->shadow[off] |
+           ((uint32_t) dev->shadow[(off + 1) & 0xFFFF] << 8) |
+           ((uint32_t) dev->shadow[(off + 2) & 0xFFFF] << 16) |
+           ((uint32_t) dev->shadow[(off + 3) & 0xFFFF] << 24);
+}
+
+static void
+st_shadow_write8(uint32_t addr, uint8_t val, void *priv)
+{
+    st_flash_t *dev = (st_flash_t *) priv;
+
+    dev->shadow[addr & 0xFFFF] = val;
+}
+
+static void
+st_shadow_write16(uint32_t addr, uint16_t val, void *priv)
+{
+    st_flash_t *dev = (st_flash_t *) priv;
+    uint32_t    off = addr & 0xFFFF;
+
+    dev->shadow[off]                 = (uint8_t) val;
+    dev->shadow[(off + 1) & 0xFFFF]  = (uint8_t) (val >> 8);
+}
+
+static void
+st_shadow_write32(uint32_t addr, uint32_t val, void *priv)
+{
+    st_flash_t *dev = (st_flash_t *) priv;
+    uint32_t    off = addr & 0xFFFF;
+
+    dev->shadow[off]                 = (uint8_t) val;
+    dev->shadow[(off + 1) & 0xFFFF]  = (uint8_t) (val >> 8);
+    dev->shadow[(off + 2) & 0xFFFF]  = (uint8_t) (val >> 16);
+    dev->shadow[(off + 3) & 0xFFFF]  = (uint8_t) (val >> 24);
+}
+
 static void
 st_flash_write8(uint32_t addr, uint8_t val, void *priv)
 {
@@ -304,7 +365,14 @@ st_flash_init(UNUSED(const device_t *info))
     if (bytes < ST_FLASH_SIZE)
         memset(&dev->array[bytes], 0xFF, ST_FLASH_SIZE - bytes);
 
-    /* The ROM is only mapped through the high alias; the whole low 1 MiB is RAM. */
+    /* The top 64 KiB is shadow RAM: it starts as a copy of the ROM and the
+       firmware may write to it (there is no ROMCS switch on this board). */
+    memcpy(dev->shadow, &dev->array[0x70000], sizeof(dev->shadow));
+
+    mem_mapping_add(&dev->mapping_low, 0x000F0000, sizeof(dev->shadow),
+                    st_shadow_read8, st_shadow_read16, st_shadow_read32,
+                    st_shadow_write8, st_shadow_write16, st_shadow_write32,
+                    dev->shadow, MEM_MAPPING_EXTERNAL, dev);
 
     mem_mapping_add(&dev->mapping_high, ST_FLASH_BASE_HIGH, ST_FLASH_SIZE,
                     st_flash_read8, st_flash_read16, st_flash_read32,
@@ -313,6 +381,7 @@ st_flash_init(UNUSED(const device_t *info))
 
     /* The full 512 KiB image is mapped by this device, not by rom.c. */
     mem_mapping_disable(&bios_mapping);
+
 
     st_flash_reset(dev);
 
