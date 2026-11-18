@@ -34,6 +34,29 @@
 
 extern const device_t arsenic_device;
 
+/* CO_APIC_ID (cobalt.h): the Cobalt APIC answers its enable bit at 0FFCh. */
+#define VW_CO_APIC_ID_REG 0x00000100
+
+static uint32_t
+cobalt_apic_id_readl(UNUSED(uint32_t addr), UNUSED(void *priv))
+{
+    return VW_CO_APIC_ID_REG;
+}
+
+static uint16_t
+cobalt_apic_id_readw(uint32_t addr, UNUSED(void *priv))
+{
+    return (VW_CO_APIC_ID_REG >> ((addr & 2) * 8)) & 0xffff;
+}
+
+static uint8_t
+cobalt_apic_id_readb(uint32_t addr, UNUSED(void *priv))
+{
+    return (VW_CO_APIC_ID_REG >> ((addr & 3) * 8)) & 0xff;
+}
+
+static mem_mapping_t cobalt_apic_id_mapping;
+
 static void
 cobalt_core_close(void *priv)
 {
@@ -62,6 +85,10 @@ cobalt_core_init(UNUSED(const device_t *info))
     ioapic = device_add(&ioapic_device);
     if (ioapic != NULL)
         ioapic_set_mmio_base(ioapic, VW_CO_APIC_IO_BASE);
+
+    mem_mapping_add(&cobalt_apic_id_mapping, VW_CO_APIC_IO_BASE + 0x00000ffc, 4,
+                    cobalt_apic_id_readb, cobalt_apic_id_readw, cobalt_apic_id_readl,
+                    NULL, NULL, NULL, NULL, MEM_MAPPING_EXTERNAL, NULL);
 
     return NULL;
 }
