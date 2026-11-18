@@ -304,10 +304,7 @@ st_flash_init(UNUSED(const device_t *info))
     if (bytes < ST_FLASH_SIZE)
         memset(&dev->array[bytes], 0xFF, ST_FLASH_SIZE - bytes);
 
-    mem_mapping_add(&dev->mapping_low, ST_FLASH_BASE_LOW, ST_FLASH_SIZE,
-                    st_flash_read8, st_flash_read16, st_flash_read32,
-                    st_flash_write8, st_flash_write16, st_flash_write32,
-                    dev->array, MEM_MAPPING_EXTERNAL, dev);
+    /* The ROM is only mapped through the high alias; the whole low 1 MiB is RAM. */
 
     mem_mapping_add(&dev->mapping_high, ST_FLASH_BASE_HIGH, ST_FLASH_SIZE,
                     st_flash_read8, st_flash_read16, st_flash_read32,
