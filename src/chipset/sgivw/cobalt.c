@@ -65,8 +65,7 @@ cobalt_init(UNUSED(const device_t *info))
     cobalt_mem_init(dev);
 
     io_sethandler(0x0505, 0x0002, cobalt_io_read8, NULL, NULL, cobalt_io_write8, NULL, NULL, dev);
-    io_sethandler(0x0fb2, 0x0001, cobalt_io_read8, NULL, NULL, cobalt_io_write8, NULL, NULL, dev);
-    io_sethandler(0x0fb7, 0x0001, cobalt_io_read8, NULL, NULL, cobalt_io_write8, NULL, NULL, dev);
+    io_sethandler(0x0fb0, 0x0008, cobalt_io_read8, NULL, NULL, cobalt_io_write8, NULL, NULL, dev);
 
     return dev;
 }
