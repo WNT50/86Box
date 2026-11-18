@@ -85,6 +85,15 @@ typedef struct dp8393x_t {
     uint8_t  tx_frame[SONIC_TX_FRAME_MAX];
     uint8_t  tx_active;
 
+    /* 区 2：接收引擎状态（P3） */
+    uint32_t rx_buf;      /* 当前 RBA 在共享 RAM 内的字节偏移 */
+    uint32_t rx_words;    /* 当前 RBA 剩余字数（16 位字） */
+    uint8_t  rx_rba_full; /* LPKT：下一个包之前必须换 RRA */
+    uint8_t  rx_rbe;      /* RRA 耗尽，清 RBE 前停止收包 */
+    uint8_t  rx_rde;      /* RDA 耗尽，清 RDE 前停止收包 */
+    uint8_t  rx_pkt_seq;  /* RSC 低字节：RBA 内的包序号 */
+    uint8_t  rx_rba_seq;  /* RSC 高字节：RBA 序号 */
+
     /* 区 3：MCA 板级状态 */
     uint8_t       pos_regs[8];
     uint8_t       board_control;
@@ -172,10 +181,46 @@ enum {
 #define SONIC_CR_RRRA  0x0100
 #define SONIC_CR_LCAM  0x0200
 
-#define SONIC_ISR_TXER 0x0100
-#define SONIC_ISR_PTDN 0x0200
-#define SONIC_ISR_PINT 0x0800
-#define SONIC_ISR_LCD  0x1000
+#define SONIC_ISR_RBAE  0x0010
+#define SONIC_ISR_RBE   0x0020
+#define SONIC_ISR_RDE   0x0040
+#define SONIC_ISR_TXER  0x0100
+#define SONIC_ISR_PTDN  0x0200
+#define SONIC_ISR_PKTRX 0x0400
+#define SONIC_ISR_PINT  0x0800
+#define SONIC_ISR_LCD   0x1000
+
+/* Receive Control Register: configuration bits 15-9, status bits 8-0. */
+#define SONIC_RCR_ERR  0x8000
+#define SONIC_RCR_RNT  0x4000
+#define SONIC_RCR_BRD  0x2000
+#define SONIC_RCR_PRO  0x1000
+#define SONIC_RCR_AMC  0x0800
+#define SONIC_RCR_MC   0x0100
+#define SONIC_RCR_BC   0x0080
+#define SONIC_RCR_LPKT 0x0040
+#define SONIC_RCR_CRS  0x0020
+#define SONIC_RCR_COL  0x0010
+#define SONIC_RCR_CRCR 0x0008
+#define SONIC_RCR_FAER 0x0004
+#define SONIC_RCR_LBK  0x0002
+#define SONIC_RCR_PRX  0x0001
+#define SONIC_RCR_STATUS_MASK 0x01FF
+
+/* Receive descriptor (RDA) layout, 28-byte slots. */
+#define SONIC_RDA_STATUS  0x00
+#define SONIC_RDA_CONFIG  0x02
+#define SONIC_RDA_BYTES   0x04
+#define SONIC_RDA_ADDR_LO 0x08
+#define SONIC_RDA_ADDR_HI 0x0C
+#define SONIC_RDA_LINK    0x14
+#define SONIC_RDA_SEQ     0x18
+
+/* Receive resource (RRA) layout, 16-byte slots. */
+#define SONIC_RRA_ADDR_LO 0x00
+#define SONIC_RRA_ADDR_HI 0x04
+#define SONIC_RRA_WORDS   0x08
+#define SONIC_RRA_STEP    16
 
 /* Transmit descriptor (TDA) layout, 32-byte slots. */
 #define SONIC_TDA_STATUS       0x00
@@ -222,6 +267,15 @@ dp8393x_ram_read32(const dp8393x_t *dev, uint16_t off)
 {
     return (uint32_t) dp8393x_ram_read16(dev, off)
          | ((uint32_t) dp8393x_ram_read16(dev, (uint16_t) (off + 2)) << 16);
+}
+
+static void
+dp8393x_ram_write8(dp8393x_t *dev, uint16_t off, uint8_t val)
+{
+    uint32_t size = dev->mem_size ? dev->mem_size : SONIC_RAM_SIZE;
+    uint32_t o    = (uint32_t) (off & (size - 1)) & (SONIC_RAM_SIZE - 1);
+
+    dev->ram[o] = val;
 }
 
 static void
@@ -273,6 +327,14 @@ dp8393x_core_reset(dp8393x_t *dev)
     dev->rx_enabled = 0;
     dev->stopped    = 1;
 
+    dev->rx_buf      = 0;
+    dev->rx_words    = 0;
+    dev->rx_rba_full = 0;
+    dev->rx_rbe      = 0;
+    dev->rx_rde      = 0;
+    dev->rx_pkt_seq  = 0;
+    dev->rx_rba_seq  = 0;
+
     /* 硬件复位：RST|STP|RXDIS = 0094h。 */
     dev->regs[SONIC_CR >> 1] = SONIC_CR_RST | SONIC_CR_STP | SONIC_CR_RXDIS;
 
@@ -310,6 +372,223 @@ dp8393x_cam_load(dp8393x_t *dev)
 
     dev->regs[SONIC_CR >> 1] &= (uint16_t) ~SONIC_CR_LCAM;
     dp8393x_raise_isr(dev, SONIC_ISR_LCD);
+}
+
+/* -------------------------------------------------------------------------
+ * 接收路径（P3）
+ *
+ * 描述符布局取自 IBMENIIN.SYS：RDA 为 28 字节槽，status/byte_count/包地址是
+ * word，link 是 dword 且最低位为 EOL；RRA 为 16 字节槽，缓冲区地址 24 位、
+ * 大小以 16 位字计。RDA 的 +0x18 在手册中定义为 RXpkt.seq_no，但驱动把它
+ * 当作“描述符占用”标志（初始为 1，只有为 0 时才处理，处理完写回 1）。
+ * 已决定以驱动行为为准：交付包时写 0。见 p3/spec.md 的 C6。
+ * ------------------------------------------------------------------------- */
+
+static uint32_t
+dp8393x_crc32(const uint8_t *buf, int len)
+{
+    uint32_t crc = 0xFFFFFFFF;
+    int      i;
+    int      b;
+
+    for (i = 0; i < len; i++) {
+        crc ^= buf[i];
+        for (b = 0; b < 8; b++)
+            crc = (crc >> 1) ^ (0xEDB88320u & (uint32_t) -(int32_t) (crc & 1));
+    }
+
+    return ~crc;
+}
+
+/* 48 位 CAM 比较：网络字节序先到的字节是低地址，按小端字拼装。 */
+static int
+dp8393x_cam_match(const dp8393x_t *dev, const uint8_t *addr)
+{
+    uint16_t w0 = (uint16_t) (addr[0] | (addr[1] << 8));
+    uint16_t w1 = (uint16_t) (addr[2] | (addr[3] << 8));
+    uint16_t w2 = (uint16_t) (addr[4] | (addr[5] << 8));
+    uint16_t enabled = (uint16_t) (dev->cam_enable & dev->cam_valid);
+    int      i;
+
+    for (i = 0; i < 16; i++) {
+        if (!(enabled & (1u << i)))
+            continue;
+
+        if ((dev->cam[(i * 3) + 0] == w0) && (dev->cam[(i * 3) + 1] == w1)
+            && (dev->cam[(i * 3) + 2] == w2))
+            return 1;
+    }
+
+    return 0;
+}
+
+/* 手册 2.7.3 / 2.7.12 的过滤顺序：PRO → AMC → BRD → CAM（RJCM 只反转 CAM）。 */
+static int
+dp8393x_rx_accept(const dp8393x_t *dev, const uint8_t *buf, int len, uint16_t *status)
+{
+    uint16_t rcr = dev->regs[SONIC_RCR >> 1];
+    int      broadcast = (buf[0] == 0xFF) && (buf[1] == 0xFF) && (buf[2] == 0xFF)
+                  && (buf[3] == 0xFF) && (buf[4] == 0xFF) && (buf[5] == 0xFF);
+    int      multicast = !broadcast && (buf[0] & 0x01);
+    int      accept    = 0;
+
+    *status = 0;
+
+    /* RNT=0 时拒绝短包；线路上不足 64 字节即净帧不足 60 字节。 */
+    if (!(rcr & SONIC_RCR_RNT) && ((len + 4) < 64))
+        return 0;
+
+    if (broadcast)
+        accept = (rcr & (SONIC_RCR_BRD | SONIC_RCR_AMC)) != 0;
+    else if (multicast)
+        accept = (rcr & SONIC_RCR_AMC) != 0;
+    else
+        accept = (rcr & SONIC_RCR_PRO) != 0;
+
+    if (!accept && dp8393x_cam_match(dev, buf))
+        accept = (dev->regs[SONIC_DCR2 >> 1] & 0x0001) ? 0 : 1; /* RJCM */
+
+    if (!accept)
+        return 0;
+
+    *status = SONIC_RCR_PRX;
+    if (broadcast)
+        *status |= SONIC_RCR_BC;
+    else if (multicast)
+        *status |= SONIC_RCR_MC;
+
+    return 1;
+}
+
+/* RRRA：按 RRP 读取下一个 RRA，装载 CRBA/RBWC。RRP 到 REA 后回卷到 RSA。 */
+static int
+dp8393x_read_rra(dp8393x_t *dev)
+{
+    uint16_t rrp = (uint16_t) (dev->regs[SONIC_RRP >> 1] & 0xFFFE);
+    uint16_t rwp = (uint16_t) (dev->regs[SONIC_RWP >> 1] & 0xFFFE);
+    uint16_t rsa = (uint16_t) (dev->regs[SONIC_RSA >> 1] & 0xFFFE);
+    uint16_t rea = (uint16_t) (dev->regs[SONIC_REA >> 1] & 0xFFFE);
+    uint32_t lo  = dp8393x_ram_read32(dev, rrp) & 0xFFFF;
+    uint32_t hi  = dp8393x_ram_read32(dev, (uint16_t) (rrp + SONIC_RRA_ADDR_HI)) & 0xFF;
+    uint32_t words = dp8393x_ram_read32(dev, (uint16_t) (rrp + SONIC_RRA_WORDS)) & 0xFFFF;
+
+    dev->rx_buf      = (lo & 0xFFFE) | (hi << 16);
+    dev->rx_words    = words;
+    dev->rx_rba_full = 0;
+    dev->rx_pkt_seq  = 0;
+    dev->rx_rba_seq++;
+
+    rrp = (uint16_t) (rrp + SONIC_RRA_STEP);
+    if ((rea != 0x0000) && (rrp >= rea))
+        rrp = rsa;
+    dev->regs[SONIC_RRP >> 1] = rrp;
+
+    /* 手册：读完最后一个 RRA 后 RRP 与 RWP 相等即置 RBE。 */
+    if ((rrp & 0xFFFE) == rwp) {
+        dev->rx_rbe = 1;
+        dp8393x_raise_isr(dev, SONIC_ISR_RBE);
+    }
+
+    return (dev->rx_words != 0) ? 1 : 0;
+}
+
+/* 收包：过滤 → 取 RBA → 写数据 + FCS → 写 RDA → 推进 CRDA / 置中断。 */
+static int
+dp8393x_rx(dp8393x_t *dev, const uint8_t *buf, int len)
+{
+    uint16_t status;
+    uint16_t rcr;
+    uint16_t rda;
+    uint16_t link;
+    uint32_t pkt_addr;
+    uint32_t used;
+    uint32_t crc;
+    int      i;
+
+    if (!dev->rx_enabled || (len < 14) || (len > NET_MAX_FRAME)) {
+        dev->regs[SONIC_MPT >> 1]++;
+        return 0;
+    }
+
+    if (!dp8393x_rx_accept(dev, buf, len, &status)) {
+        dev->regs[SONIC_MPT >> 1]++;
+        return 0;
+    }
+
+    /* RDA 耗尽后停止收包，直到软件清 RDE。 */
+    if (dev->rx_rde) {
+        dev->regs[SONIC_MPT >> 1]++;
+        return 0;
+    }
+
+    if (dev->rx_rba_full || (dev->rx_words == 0)) {
+        if (dev->rx_rbe || !dp8393x_read_rra(dev)) {
+            dev->regs[SONIC_MPT >> 1]++;
+            return 0;
+        }
+    }
+
+    /* 数据 + 4 字节 FCS，按 32 位对齐占用 RBA。 */
+    used = ((uint32_t) len + 4u + 3u) & ~3u;
+
+    if ((used / 2u) > dev->rx_words) {
+        /* 缓冲区放不下：丢弃该包、不写 RDA，换下一个 RRA。 */
+        dp8393x_raise_isr(dev, SONIC_ISR_RBAE);
+        dev->regs[SONIC_MPT >> 1]++;
+        if (!dev->rx_rbe)
+            dp8393x_read_rra(dev);
+        return 0;
+    }
+
+    pkt_addr = dev->rx_buf;
+
+    for (i = 0; i < len; i++)
+        dp8393x_ram_write8(dev, (uint16_t) (pkt_addr + (uint32_t) i), buf[i]);
+
+    /* 86Box 后端帧不含 FCS；驱动按“长度含 FCS”处理，因此在 RBA 末尾补 CRC32。 */
+    crc = dp8393x_crc32(buf, len);
+    for (i = 0; i < 4; i++)
+        dp8393x_ram_write8(dev, (uint16_t) (pkt_addr + (uint32_t) len + (uint32_t) i),
+                           (uint8_t) (crc >> (i * 8)));
+
+    dev->rx_buf += used;
+    dev->rx_words -= used / 2u;
+
+    /* LPKT：剩余字数已不足一个最大帧，标记本包为当前 RBA 的最后一包。 */
+    if (dev->rx_words <= (uint32_t) (dev->regs[SONIC_EOBC >> 1] & 0xFFFF)) {
+        status |= SONIC_RCR_LPKT;
+        dev->rx_rba_full = 1;
+    }
+
+    /* RCR 低 9 位是最近一个包的接收状态，随后写进 RXpkt.status。 */
+    rcr = dev->regs[SONIC_RCR >> 1];
+    dev->regs[SONIC_RCR >> 1] = (uint16_t) ((rcr & (uint16_t) ~SONIC_RCR_STATUS_MASK) | status);
+
+    rda  = (uint16_t) (dev->regs[SONIC_CRDA >> 1] & 0xFFFE);
+    dp8393x_ram_write16(dev, (uint16_t) (rda + SONIC_RDA_STATUS), status);
+    dp8393x_ram_write16(dev, (uint16_t) (rda + SONIC_RDA_BYTES), (uint16_t) (len + 4));
+    dp8393x_ram_write16(dev, (uint16_t) (rda + SONIC_RDA_ADDR_LO), (uint16_t) (pkt_addr & 0xFFFF));
+    dp8393x_ram_write16(dev, (uint16_t) (rda + SONIC_RDA_ADDR_HI), (uint16_t) (pkt_addr >> 16));
+
+    /* 手册把 +0x18 命名为 RXpkt.seq_no，但驱动把它当“描述符占用”标志：
+     * 初始化写 1、只有为 0 才处理（0x12BC0）、处理完写回 1（0x12EAD）。
+     * 以驱动实测行为为准，交付时写 0。见 p3/spec.md 的 C6。 */
+    dp8393x_ram_write32(dev, (uint16_t) (rda + SONIC_RDA_SEQ), 0x00000000);
+
+    dev->rx_pkt_seq++;
+    dev->regs[SONIC_RSC >> 1] = (uint16_t) ((dev->rx_rba_seq << 8) | dev->rx_pkt_seq);
+
+    link = (uint16_t) dp8393x_ram_read32(dev, (uint16_t) (rda + SONIC_RDA_LINK));
+    dev->regs[SONIC_CRDA >> 1] = link;
+
+    dp8393x_raise_isr(dev, SONIC_ISR_PKTRX);
+
+    if (link & 0x0001) {
+        dev->rx_rde = 1;
+        dp8393x_raise_isr(dev, SONIC_ISR_RDE);
+    }
+
+    return 1;
 }
 
 /* TXP: walk the transmit descriptor chain starting at CTDA.
@@ -471,8 +750,9 @@ dp8393x_reg_write(dp8393x_t *dev, uint16_t off, uint16_t val)
             }
 
             if (val & SONIC_CR_RRRA) {
-                /* RRRA 复位读指针，命令位自清。 */
-                dev->regs[SONIC_RRP >> 1] = dev->regs[SONIC_RSA >> 1];
+                /* RRRA 读取 RRP 指向的下一个 RRA；清 RBE 后同样走这条恢复路径。 */
+                dev->rx_rbe = 0;
+                dp8393x_read_rra(dev);
             }
 
             if (val & SONIC_CR_LCAM)
@@ -517,10 +797,25 @@ dp8393x_reg_write(dp8393x_t *dev, uint16_t off, uint16_t val)
             dp8393x_update_irq(dev);
             break;
 
-        case SONIC_ISR:
+        case SONIC_ISR: {
+            uint8_t rbe = (val & SONIC_ISR_RBE) ? 1 : 0;
+            uint8_t rde = (val & SONIC_ISR_RDE) ? 1 : 0;
+
             dev->regs[SONIC_ISR >> 1] &= (uint16_t) ~(val & 0x7FFF);
+
+            if (rbe)
+                dev->rx_rbe = 0;
+            if (rde)
+                dev->rx_rde = 0;
+
+            /* 手册：清 RBE 后若软件已补充 RRA，适配器会重新读取 RRP 指向的
+             * 资源描述符，效果等同一次 RRRA。 */
+            if (rbe && !dev->rx_rbe && dev->rx_rba_full)
+                dp8393x_read_rra(dev);
+
             dp8393x_update_irq(dev);
             break;
+        }
 
         case SONIC_CDC:
             dev->regs[SONIC_CDC >> 1] = val & 0x000F;
@@ -936,12 +1231,14 @@ lan_a_build_id_rom(dp8393x_t *dev)
 static int
 lan_a_rx(void *priv, uint8_t *buf, int len)
 {
-    (void) priv;
-    (void) buf;
-    (void) len;
+    dp8393x_t *dev = (dp8393x_t *) priv;
 
-    /* 接收在 P3 实现。 */
-    return 0;
+    if ((dev == NULL) || (buf == NULL) || (len < 14))
+        return 1;
+
+    /* 返回 1 表示本帧已被消费，网络队列可以继续下发。 */
+    dp8393x_rx(dev, buf, len);
+    return 1;
 }
 
 static int
