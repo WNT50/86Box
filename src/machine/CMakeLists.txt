@@ -64,6 +64,7 @@ add_library(mch OBJECT
     m_at_socket7.c
     m_at_sockets7.c
     m_at_socket8.c
+    m_at_sgivw.c
     m_at_slot1.c
     m_at_slot1_2.c
     m_at_slot1_socket370.c
