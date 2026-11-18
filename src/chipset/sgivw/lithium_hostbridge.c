@@ -75,9 +75,6 @@ lithium_pci_generate_configuration_cycles(li_bridge_t *dev)
 {
     uint32_t address;
 
-    if (lithium_pci_is_pci_access_enabled(dev))
-        return;
-
     /* Read the CONFIG_ADDRESS register */
     address = dev->regs[0xF8];
     address |= dev->regs[0xF9] << 8;
