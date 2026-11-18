@@ -159,6 +159,15 @@ lithium_pci_mmio_write8(uint32_t addr, uint8_t val, void* priv)
     val |= dev->regs[addr] & ~write_bits_mask;
 
     dev->regs[addr] = val;
+
+    /* Data bytes of the configuration window must reach the PCI subsystem. */
+    if ((addr >= 0xFC) && (addr <= 0xFF) && lithium_pci_is_pci_access_enabled(dev)) {
+        uint32_t shift = (addr - 0xFC) << 3;
+        uint32_t data  = pci_readl(0xCFC, NULL);
+
+        data = (data & ~(0xFFu << shift)) | ((uint32_t) val << shift);
+        pci_writel(0xCFC, data, NULL);
+    }
 }
 
 static void
