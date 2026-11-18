@@ -51,9 +51,9 @@ cobalt_init(UNUSED(const device_t *info))
     return dev;
 }
 
-const device_t cobalt_chipset_device = {
+const device_t cobalt_device = {
     .name          = "Cobalt I/O ASIC",
-    .internal_name = "cobalt",
+    .internal_name = "co",
     .flags         = 0,
     .local         = 0,
     .init          = cobalt_init,
