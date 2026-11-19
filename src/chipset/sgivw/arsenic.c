@@ -188,6 +188,38 @@ arsenic_mmio_read32(uint32_t addr, void* priv)
 #define ARS_CURSOR_W 32
 #define ARS_CURSOR_H 32
 
+/* One frame buffer pixel in 86Box's XXRRGGBB format.  The colour mode in the
+   WID table (bits 4..2 of mode_regs[0]) says how a pixel is laid out: the
+   Linux driver uses I8 for 8 bpp, RGBA5 for 16 bpp and RGB8 for 32 bpp. */
+static uint32_t
+arsenic_pixel(ars_t *dev, uint32_t base, uint32_t pos)
+{
+    uint32_t v;
+
+    switch (dev->fb_bpp) {
+        case 2:
+            v = mem_readw_phys(base + pos);
+            {
+                uint32_t r = (v >> 10) & 0x1f;
+                uint32_t g = (v >> 5) & 0x1f;
+                uint32_t b = v & 0x1f;
+
+                return 0xff000000 | (((r << 3) | (r >> 2)) << 16) |
+                       (((g << 3) | (g >> 2)) << 8) | ((b << 3) | (b >> 2));
+            }
+
+        case 4:
+            v = mem_readl_phys(base + pos);
+
+            return 0xff000000 | (v & 0x00ffffff);
+
+        default:
+            v = dev->regs[VW_ARS_REG_COLOR_MAP_START + mem_readb_phys(base + pos)];
+
+            return 0xff000000 | (v >> 8);
+    }
+}
+
 static void
 arsenic_cursor_rect(ars_t *dev, uint32_t *line[], int width, int height, int restore)
 {
@@ -207,11 +239,11 @@ arsenic_cursor_rect(ars_t *dev, uint32_t *line[], int width, int height, int res
                 continue;
 
             if (restore) {
-                uint32_t src = dev->regs[VW_ARS_REG_FB_CTRL] & 0xfffffe00;
+                uint32_t base = dev->regs[VW_ARS_REG_FB_CTRL] & 0xfffffe00;
 
-                c = dev->regs[VW_ARS_REG_COLOR_MAP_START +
-                              mem_readb_phys(src + (uint32_t) py * ARS_FB_WIDTH + (uint32_t) px)];
-                line[py][px] = 0xff000000 | (c >> 8);
+                line[py][px] = arsenic_pixel(dev, base,
+                                             (uint32_t) py * dev->fb_stride +
+                                             (uint32_t) px * dev->fb_bpp);
                 continue;
             }
 
@@ -250,7 +282,6 @@ arsenic_draw_cursor(ars_t *dev, uint32_t *line[], int width, int height)
 
     arsenic_cursor_rect(dev, line, width, height, 0);
     dev->cursor_on = 1;
-
 }
 
 static void
@@ -279,11 +310,18 @@ arsenic_blit_frame(ars_t *dev)
     tiles  = (int) ((tile >> 5) & 0xff);
     depth  = (int) ((tile >> 13) & 0x03);
 
-    /* Only the 8 bpp path is modelled for now. */
-    if (depth != 0)
-        return;
+    /* 0 = 8 bpp through the colour map, 1 = 16 bpp, 2 = 32 bpp. */
+    dev->fb_bpp = (depth == 0) ? 1 : ((depth == 1) ? 2 : 4);
 
-    width = tiles * 512;
+    /* The WID table says how the pixels are packed. */
+    dev->fb_cmode = (int) ((dev->regs[VW_ARS_REG_MODE_REGS_START] >> 2) & 0x07);
+
+    /* A line is a whole number of 512-byte tiles. */
+    dev->fb_stride = tiles * 512;
+    if (dev->fb_stride <= 0)
+        dev->fb_stride = ARS_FB_WIDTH * dev->fb_bpp;
+
+    width = dev->fb_stride / dev->fb_bpp;
     if ((width <= 0) || (width > 2048))
         width = ARS_FB_WIDTH;
 
@@ -303,7 +341,7 @@ arsenic_blit_frame(ars_t *dev)
        its own; a shadow copy plus a per-4K compare gives the same effect
        without converting a million pixels on every field. */
     {
-        uint32_t total = (uint32_t) height * ARS_FB_WIDTH;
+        uint32_t total = (uint32_t) dev->fb_stride * height;
         uint32_t off;
 
         for (off = 0; off < total; off += 4096) {
@@ -317,20 +355,16 @@ arsenic_blit_frame(ars_t *dev)
             if (p != NULL)
                 memcpy(dev->fb_shadow + off, p, len);
 
-            for (i = 0; i < len; i++) {
+            for (i = 0; (i + (uint32_t) dev->fb_bpp) <= len; i += (uint32_t) dev->fb_bpp) {
                 uint32_t pos = off + i;
-                int      py  = (int) (pos / ARS_FB_WIDTH);
-                int      px  = (int) (pos % ARS_FB_WIDTH);
-                uint8_t  idx;
-                uint32_t c;
+                int      py  = (int) (pos / (uint32_t) dev->fb_stride);
+                int      px  = (int) ((pos % (uint32_t) dev->fb_stride) /
+                                      (uint32_t) dev->fb_bpp);
 
                 if ((py >= height) || (px >= width))
                     continue;
 
-                idx = (p != NULL) ? p[i] : mem_readb_phys(base + pos);
-                c   = dev->regs[VW_ARS_REG_COLOR_MAP_START + idx];
-
-                buffer32->line[py][px] = 0xff000000 | (c >> 8);
+                buffer32->line[py][px] = arsenic_pixel(dev, base, pos);
             }
         }
 
@@ -661,7 +695,7 @@ arsenic_init(const device_t *info)
     timer_add(&dev->retrace_timer, arsenic_retrace, dev, 1);
     timer_add(&dev->blit_timer, arsenic_blit_tick, dev, 1);
 
-    dev->fb_shadow_size = 1024 * 1024;
+    dev->fb_shadow_size = 4 * 1024 * 1024;
     dev->fb_shadow      = calloc(1, dev->fb_shadow_size);
 
     arsenic_reset_hard(dev);
