@@ -27,7 +27,6 @@
 #include <86box/mem.h>
 #include <86box/plat_unused.h>
 #include <86box/chipset.h>
-#include <86box/nvr.h>
 
 #include <86box/sgivw/cobalt.h>
 #include <86box/sgivw/lithium.h>
@@ -68,15 +67,13 @@ cobalt_core_close(void *priv)
 static void *
 cobalt_core_init(UNUSED(const device_t *info))
 {
-    nvr_t *nvr;
-    void  *ioapic;
+    void *ioapic;
 
-    /* Register CMOS memory with additional bank. TODO: move this into the PIIX4 source code */
-    nvr = device_add(&nvr_at_device);
-    nvr_bank_set(0, 0, nvr);
-    /* The PIIX4 extended bank lives in the second 128-byte half of NVRAM. */
-    nvr_bank_set(1, 1, nvr);
-    nvr_at_sec_handler(1, 0x72, nvr);
+    /* The PIIX4 owns NVRAM, including the extended bank at ports 72h and 73h.
+       A second nvr_at_device here would take those ports over with an array of
+       its own: nvr_at_init() lets only the first instance have ports 70h and
+       71h, so writes to the extended half would land in a different NVRAM from
+       reads of the low half. */
 
     device_add(&cobalt_device);
     device_add(&lithium_device);
