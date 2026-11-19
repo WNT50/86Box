@@ -172,6 +172,55 @@ arsenic_mmio_read32(uint32_t addr, void* priv)
     return ret;
 }
 
+
+/* The display reads its pixels out of system memory; there is no VRAM of
+   its own.  The PROM enables the linear frame buffer in FB_CTRL, puts the
+   pixel height in FB_HEIGHT and then draws 1024x768 in 8 bpp, so this first
+   cut of the output path copies that rectangle straight into 86Box's 32-bit
+   frame buffer, one colour map entry per pixel. */
+#define ARS_FB_WIDTH   1024
+#define ARS_FB_HEIGHT  768
+
+static void
+arsenic_blit_frame(ars_t *dev)
+{
+    uint32_t  fb  = dev->regs[VW_ARS_REG_FB_CTRL];
+    uint32_t  base;
+    int       x, y;
+
+    /* Nothing is on screen until the firmware has enabled the linear
+       frame buffer and told us where it is. */
+    if (!(fb & 0x00000003))
+        return;
+
+    base = fb & 0xfffff000;
+
+    for (y = 0; y < ARS_FB_HEIGHT; y++) {
+        uint32_t  src = base + (uint32_t) (y * ARS_FB_WIDTH);
+        uint32_t *row = buffer32->line[y];
+
+        for (x = 0; x < ARS_FB_WIDTH; x++) {
+            /* Colour map entries are RRGGBB00; the screen wants XXRRGGBB. */
+            uint32_t c = dev->regs[VW_ARS_REG_COLOR_MAP_START + mem_readb_phys(src + x)];
+
+            row[x] = 0xff000000 | (c >> 8);
+        }
+    }
+
+    video_blit_memtoscreen(0, 0, ARS_FB_WIDTH, ARS_FB_HEIGHT);
+}
+static void
+arsenic_blit_tick(void *priv)
+{
+    ars_t *dev = priv;
+
+    arsenic_blit_frame(dev);
+
+    /* The panel is refreshed on its own clock; the retrace counter is left
+       to the firmware, which polls it for vblank. */
+    timer_advance_u64(&dev->blit_timer, 50000 * TIMER_USEC);
+}
+
 static void
 arsenic_retrace(void *priv)
 {
@@ -428,6 +477,7 @@ arsenic_init(const device_t *info)
                     dev);
 
     timer_add(&dev->retrace_timer, arsenic_retrace, dev, 1);
+    timer_add(&dev->blit_timer, arsenic_blit_tick, dev, 1);
 
     arsenic_reset_hard(dev);
 
