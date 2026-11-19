@@ -95,9 +95,8 @@ machine_at_sgivw_common_init(const machine_t *model, int is_320)
         i8255x_set_bia(nic, sgivw_mac);
     }
 
-    /* The firmware drives the keyboard through the KBC; give it a device
-       to answer its commands. */
-    device_add(&keyboard_at_device);
+    /* The board has no PS/2 ports: its keyboard is a USB one. */
+    device_add(&keyboard_usb_device);
 
     return ret;
 }
