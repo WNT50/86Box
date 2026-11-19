@@ -227,12 +227,43 @@ arsenic_blit_frame(ars_t *dev)
     if (height > buffer32->h)
         height = buffer32->h;
 
+    /* The PROM redraws the same picture over and over; a cheap sample of the
+       frame buffer tells us whether there is anything new to present. */
+    {
+        uint32_t hash = 0x811c9dc5;
+        uint32_t i;
+
+        for (i = 0; i < (uint32_t) (height * ARS_FB_WIDTH); i += 256)
+            hash = (hash ^ mem_readb_phys(base + i)) * 16777619;
+
+        if (dev->fb_valid && (hash == dev->fb_hash)) {
+            /* Nothing new: keep the picture on screen with an occasional
+               refresh instead of redrawing it on every field. */
+            if (++dev->fb_idle < 8)
+                return;
+        }
+
+        dev->fb_idle  = 0;
+        dev->fb_hash  = hash;
+        dev->fb_valid = 1;
+    }
+
     for (y = 0; y < height; y++) {
         uint32_t  src = base + (uint32_t) (y * ARS_FB_WIDTH);
         uint32_t *row = buffer32->line[y];
 
-        for (x = 0; x < width; x++) {
-            /* Colour map entries are RRGGBB00; the screen wants XXRRGGBB. */
+        /* Four pixels per bus read: the frame buffer is plain system RAM,
+           and at the field rate this loop runs at the cost of the mapping
+           lookups, not the pixel work. */
+        for (x = 0; (x + 4) <= width; x += 4) {
+            uint32_t px = mem_readl_phys(src + x);
+
+            row[x    ] = 0xff000000 | (dev->regs[VW_ARS_REG_COLOR_MAP_START + (px & 0xff)] >> 8);
+            row[x + 1] = 0xff000000 | (dev->regs[VW_ARS_REG_COLOR_MAP_START + ((px >> 8) & 0xff)] >> 8);
+            row[x + 2] = 0xff000000 | (dev->regs[VW_ARS_REG_COLOR_MAP_START + ((px >> 16) & 0xff)] >> 8);
+            row[x + 3] = 0xff000000 | (dev->regs[VW_ARS_REG_COLOR_MAP_START + (px >> 24)] >> 8);
+        }
+        for (; x < width; x++) {
             uint32_t c = dev->regs[VW_ARS_REG_COLOR_MAP_START + mem_readb_phys(src + x)];
 
             row[x] = 0xff000000 | (c >> 8);
@@ -241,16 +272,50 @@ arsenic_blit_frame(ars_t *dev)
 
     video_blit_memtoscreen(0, 0, width, height);
 }
+/* Field rates the DBE can be programmed for, from the dot clock PLL and the
+   total raster size: f = refclk * M / (N * 2^P) / (htotal * vtotal).  The
+   27 MHz reference is the one the Linux visws timings fit (800x600 at 75 Hz
+   comes out at exactly 49.5 MHz). */
+static double
+arsenic_refresh_hz(const ars_t *dev)
+{
+    uint32_t clk    = dev->regs[VW_ARS_REG_DOT_CLOCK];
+    uint32_t xymax  = dev->regs[VW_ARS_REG_RETRACE_POS_MAX];
+    int      m      = (int) (clk & 0xff) + 1;
+    int      n      = (int) ((clk >> 8) & 0x3f) + 1;
+    int      p      = (int) ((clk >> 14) & 0x03);
+    int      htotal = (int) (xymax & 0xfff);
+    int      vtotal = (int) ((xymax >> 12) & 0xfff);
+    double   dotclk;
+    double   hz;
+
+    if (!(clk & 0x00100000) || (htotal == 0) || (vtotal == 0))
+        return 0.0;
+
+    dotclk = 27000000.0 * m / (n * (1 << p));
+    hz     = dotclk / ((double) htotal * (double) vtotal);
+
+    /* Anything outside a sane raster rate means the registers are not
+       programmed yet. */
+    if ((hz < 30.0) || (hz > 200.0))
+        return 0.0;
+
+    return hz;
+}
+
 static void
 arsenic_blit_tick(void *priv)
 {
     ars_t *dev = priv;
+    double hz  = arsenic_refresh_hz(dev);
+    uint64_t period;
 
     arsenic_blit_frame(dev);
 
-    /* The panel is refreshed on its own clock; the retrace counter is left
-       to the firmware, which polls it for vblank. */
-    timer_advance_u64(&dev->blit_timer, 50000 * TIMER_USEC);
+    /* Follow the programmed field rate; fall back to 20 Hz until the
+       firmware has set the dot clock up. */
+    period = (hz > 0.0) ? (uint64_t) (1000000.0 / hz) : 50000ULL;
+    timer_advance_u64(&dev->blit_timer, period * TIMER_USEC);
 }
 
 static void
