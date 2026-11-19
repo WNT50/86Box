@@ -45,7 +45,8 @@ typedef struct ars_t
     uint32_t regs[VW_ARS_IO_DECODE_MAX + sizeof(uint32_t)];
     pc_timer_t   retrace_timer;
     pc_timer_t   blit_timer;
-    uint32_t     fb_hash;
+    uint8_t     *fb_shadow;
+    uint32_t     fb_shadow_size;
     int          fb_valid;
     int          fb_idle;
     mem_mapping_t mmio_mapping;
