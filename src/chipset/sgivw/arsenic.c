@@ -275,11 +275,6 @@ arsenic_blit_frame(ars_t *dev)
                 changed = 1;
         }
 
-        /* Present nothing when nothing changed: the renderer keeps the
-           last frame on screen, so a still picture costs no work at all. */
-        if (!changed && dev->fb_valid)
-            return;
-
         dev->fb_valid = 1;
     }
 
