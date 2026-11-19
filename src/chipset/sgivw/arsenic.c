@@ -181,6 +181,78 @@ arsenic_mmio_read32(uint32_t addr, void* priv)
 #define ARS_FB_WIDTH   1024
 #define ARS_FB_HEIGHT  768
 
+/* The cursor is a 32x32 glyph of two-bit pixels (64 words of storage, as the
+   Linux visws header describes) drawn over the frame buffer with the three
+   colours in CRS_CMAP.  A pixel value of 3 has no colour and leaves the
+   picture alone. */
+#define ARS_CURSOR_W 32
+#define ARS_CURSOR_H 32
+
+static void
+arsenic_cursor_rect(ars_t *dev, uint32_t *line[], int width, int height, int restore)
+{
+    int row, col;
+
+    for (row = 0; row < ARS_CURSOR_H; row++) {
+        int py = dev->cursor_y + row;
+
+        if ((py < 0) || (py >= height))
+            continue;
+
+        for (col = 0; col < ARS_CURSOR_W; col++) {
+            int      px = dev->cursor_x + col;
+            uint32_t bit, word, value, c;
+
+            if ((px < 0) || (px >= width))
+                continue;
+
+            if (restore) {
+                uint32_t src = dev->regs[VW_ARS_REG_FB_CTRL] & 0xfffffe00;
+
+                c = dev->regs[VW_ARS_REG_COLOR_MAP_START +
+                              mem_readb_phys(src + (uint32_t) py * ARS_FB_WIDTH + (uint32_t) px)];
+                line[py][px] = 0xff000000 | (c >> 8);
+                continue;
+            }
+
+            bit   = (uint32_t) (row * ARS_CURSOR_W + col) * 2;
+            word  = dev->regs[VW_ARS_REG_CURSOR_DATA_START + (bit >> 5)];
+            value = (word >> (30 - (bit & 31))) & 0x03;
+
+            /* 0 is transparent; 1..3 pick one of the three colours. */
+            if (value == 0)
+                continue;
+
+            c = dev->regs[VW_ARS_REG_CURSOR_MAP_START + (value - 1)];
+
+            line[py][px] = 0xff000000 | (c >> 8);
+        }
+    }
+}
+
+static void
+arsenic_draw_cursor(ars_t *dev, uint32_t *line[], int width, int height)
+{
+    uint32_t ctl = dev->regs[VW_ARS_REG_CURSOR_CTRL];
+    uint32_t pos = dev->regs[VW_ARS_REG_CURSOR_POS];
+
+    /* Erase whatever the last frame left behind. */
+    if (dev->cursor_on)
+        arsenic_cursor_rect(dev, line, width, height, 1);
+
+    dev->cursor_on = 0;
+
+    if (!(ctl & 0x00000001))
+        return;
+
+    dev->cursor_x = (int) (pos & 0x0fff);
+    dev->cursor_y = (int) ((pos >> 12) & 0x0fff);
+
+    arsenic_cursor_rect(dev, line, width, height, 0);
+    dev->cursor_on = 1;
+
+}
+
 static void
 arsenic_blit_frame(ars_t *dev)
 {
@@ -279,6 +351,8 @@ arsenic_blit_frame(ars_t *dev)
         video_force_resize_set_monitor(0, monitor_index_global);
     }
 
+    arsenic_draw_cursor(dev, buffer32->line, width, height);
+
     video_blit_memtoscreen(0, 0, width, height);
 }
 /* Field rates the DBE can be programmed for, from the dot clock PLL and the
@@ -311,6 +385,7 @@ arsenic_refresh_hz(const ars_t *dev)
 
     return hz;
 }
+
 
 static void
 arsenic_blit_tick(void *priv)
