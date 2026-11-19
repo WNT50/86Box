@@ -184,8 +184,11 @@ arsenic_mmio_read32(uint32_t addr, void* priv)
 static void
 arsenic_blit_frame(ars_t *dev)
 {
-    uint32_t  fb  = dev->regs[VW_ARS_REG_FB_CTRL];
+    uint32_t  fb    = dev->regs[VW_ARS_REG_FB_CTRL];
     uint32_t  base;
+    uint32_t  tile;
+    int       tiles;
+    int       depth;
     int       width  = ARS_FB_WIDTH;
     int       height;
     int       x, y;
@@ -195,7 +198,23 @@ arsenic_blit_frame(ars_t *dev)
     if (!(fb & 0x00000003))
         return;
 
-    base = fb & 0xfffff000;
+    /* Bit fields as defined by the Linux visws frame buffer driver
+       (FRM_CONTROL/FRM_SIZE_TILE/FRM_SIZE_PIXEL): the tile pointer is held
+       in bits 31..9, so masking it off gives the physical address back. */
+    base = fb & 0xfffffe00;
+
+    /* FRM_SIZE_TILE: width in 512-byte tiles, depth in bits 14..13. */
+    tile   = dev->regs[VW_ARS_REG_FB_PARAMS];
+    tiles  = (int) ((tile >> 5) & 0xff);
+    depth  = (int) ((tile >> 13) & 0x03);
+
+    /* Only the 8 bpp path is modelled for now. */
+    if (depth != 0)
+        return;
+
+    width = tiles * 512;
+    if ((width <= 0) || (width > 2048))
+        width = ARS_FB_WIDTH;
 
     /* FB_HEIGHT carries the panel height in its upper half. */
     height = (int) ((dev->regs[VW_ARS_REG_FB_HEIGHT] >> 16) & 0xffff);
