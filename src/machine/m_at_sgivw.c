@@ -95,8 +95,11 @@ machine_at_sgivw_common_init(const machine_t *model, int is_320)
         i8255x_set_bia(nic, sgivw_mac);
     }
 
-    /* The board has no PS/2 ports: its keyboard is a USB one. */
-    device_add(&keyboard_usb_device);
+    /* The board has no PS/2 ports: its keyboard is a USB one.  An explicit
+       keyboard_type = usb_keyboard is added by pc_reset() instead, so only
+       add one here when the config asks for anything else. */
+    if (keyboard_type != KEYBOARD_TYPE_USB)
+        device_add(&keyboard_usb_device);
 
     return ret;
 }
