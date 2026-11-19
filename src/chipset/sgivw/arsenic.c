@@ -277,8 +277,11 @@ arsenic_draw_cursor(ars_t *dev, uint32_t *line[], int width, int height)
     if (!(ctl & 0x00000001))
         return;
 
+    /* The PROM packs the position as (y << 16) | x: its cursor move routine
+       at 0xF4E090 shifts the row by 16, and the value it writes back
+       (0x01200280 for (640, 288)) only decodes that way. */
     dev->cursor_x = (int) (pos & 0x0fff);
-    dev->cursor_y = (int) ((pos >> 12) & 0x0fff);
+    dev->cursor_y = (int) ((pos >> 16) & 0x0fff);
 
     arsenic_cursor_rect(dev, line, width, height, 0);
     dev->cursor_on = 1;
