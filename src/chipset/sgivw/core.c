@@ -79,7 +79,7 @@ cobalt_core_init(UNUSED(const device_t *info))
     device_add(&lithium_device);
     device_add(&arsenic_device);
 
-    ioapic = device_add(&ioapic_device);
+    ioapic = device_add_params(&ioapic_device, (void *) (uintptr_t) IOAPIC_TOPOLOGY_UP_APIC_DEFAULT);
     if (ioapic != NULL)
         ioapic_set_mmio_base(ioapic, VW_CO_APIC_IO_BASE);
 
