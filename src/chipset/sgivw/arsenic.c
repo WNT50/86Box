@@ -191,7 +191,6 @@ arsenic_blit_frame(ars_t *dev)
     int       depth;
     int       width  = ARS_FB_WIDTH;
     int       height;
-    int       x, y;
 
     /* Nothing is on screen until the firmware has enabled the linear
        frame buffer and told us where it is. */
@@ -227,47 +226,66 @@ arsenic_blit_frame(ars_t *dev)
     if (height > buffer32->h)
         height = buffer32->h;
 
-    /* The PROM redraws the same picture over and over; a cheap sample of the
-       frame buffer tells us whether there is anything new to present. */
+    /* Only the parts of the frame buffer that actually changed are converted.
+       The frame buffer is plain system memory, so it has no write handlers of
+       its own; a shadow copy plus a per-4K compare gives the same effect
+       without converting a million pixels on every field. */
     {
-        uint32_t hash = 0x811c9dc5;
-        uint32_t i;
+        uint32_t total   = (uint32_t) height * ARS_FB_WIDTH;
+        int      changed = 0;
+        uint32_t off;
 
-        for (i = 0; i < (uint32_t) (height * ARS_FB_WIDTH); i += 256)
-            hash = (hash ^ mem_readb_phys(base + i)) * 16777619;
+        for (off = 0; off < total; off += 4096) {
+            uint32_t       len = (total - off > 4096) ? 4096 : (total - off);
+            const uint8_t *p   = mem_phys_ptr(base + off, len);
+            uint32_t       i;
 
-        if (dev->fb_valid && (hash == dev->fb_hash)) {
+            {
+                static int n;
+                if ((off == 0) && (n++ < 3))
+                    pclog("ARS chunk0 ptr=%p len=%u base=%08X\n", (void *) p, len, base);
+            }
+
+            if ((p == NULL) || (memcmp(p, dev->fb_shadow + off, len) != 0)) {
+                changed = 1;
+
+                if (p != NULL)
+                    memcpy(dev->fb_shadow + off, p, len);
+
+                for (i = 0; i < len; i++) {
+                    uint32_t pos = off + i;
+                    int      py  = (int) (pos / ARS_FB_WIDTH);
+                    int      px  = (int) (pos % ARS_FB_WIDTH);
+                    uint8_t  idx;
+                    uint32_t c;
+
+                    if ((py >= height) || (px >= width))
+                        continue;
+
+                    idx = (p != NULL) ? p[i] : mem_readb_phys(base + pos);
+                    c   = dev->regs[VW_ARS_REG_COLOR_MAP_START + idx];
+
+                    buffer32->line[py][px] = 0xff000000 | (c >> 8);
+                }
+
+                continue;
+            }
+
+            if (!dev->fb_valid)
+                changed = 1;
+        }
+
+        if (!changed) {
             /* Nothing new: keep the picture on screen with an occasional
                refresh instead of redrawing it on every field. */
-            if (++dev->fb_idle < 8)
+            if (++dev->fb_idle < 8) {
+                dev->fb_valid = 1;
                 return;
+            }
         }
 
         dev->fb_idle  = 0;
-        dev->fb_hash  = hash;
         dev->fb_valid = 1;
-    }
-
-    for (y = 0; y < height; y++) {
-        uint32_t  src = base + (uint32_t) (y * ARS_FB_WIDTH);
-        uint32_t *row = buffer32->line[y];
-
-        /* Four pixels per bus read: the frame buffer is plain system RAM,
-           and at the field rate this loop runs at the cost of the mapping
-           lookups, not the pixel work. */
-        for (x = 0; (x + 4) <= width; x += 4) {
-            uint32_t px = mem_readl_phys(src + x);
-
-            row[x    ] = 0xff000000 | (dev->regs[VW_ARS_REG_COLOR_MAP_START + (px & 0xff)] >> 8);
-            row[x + 1] = 0xff000000 | (dev->regs[VW_ARS_REG_COLOR_MAP_START + ((px >> 8) & 0xff)] >> 8);
-            row[x + 2] = 0xff000000 | (dev->regs[VW_ARS_REG_COLOR_MAP_START + ((px >> 16) & 0xff)] >> 8);
-            row[x + 3] = 0xff000000 | (dev->regs[VW_ARS_REG_COLOR_MAP_START + (px >> 24)] >> 8);
-        }
-        for (; x < width; x++) {
-            uint32_t c = dev->regs[VW_ARS_REG_COLOR_MAP_START + mem_readb_phys(src + x)];
-
-            row[x] = 0xff000000 | (c >> 8);
-        }
     }
 
     video_blit_memtoscreen(0, 0, width, height);
@@ -531,6 +549,7 @@ arsenic_close(void *priv)
     i2c_gpio_close(dev->crt_i2c);
     i2c_gpio_close(dev->lcd_i2c);
 
+    free(dev->fb_shadow);
     free(dev);
 }
 
@@ -575,6 +594,9 @@ arsenic_init(const device_t *info)
 
     timer_add(&dev->retrace_timer, arsenic_retrace, dev, 1);
     timer_add(&dev->blit_timer, arsenic_blit_tick, dev, 1);
+
+    dev->fb_shadow_size = 1024 * 1024;
+    dev->fb_shadow      = calloc(1, dev->fb_shadow_size);
 
     arsenic_reset_hard(dev);
 
