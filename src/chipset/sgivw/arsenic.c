@@ -231,8 +231,7 @@ arsenic_blit_frame(ars_t *dev)
        its own; a shadow copy plus a per-4K compare gives the same effect
        without converting a million pixels on every field. */
     {
-        uint32_t total   = (uint32_t) height * ARS_FB_WIDTH;
-        int      changed = 0;
+        uint32_t total = (uint32_t) height * ARS_FB_WIDTH;
         uint32_t off;
 
         for (off = 0; off < total; off += 4096) {
@@ -240,42 +239,44 @@ arsenic_blit_frame(ars_t *dev)
             const uint8_t *p   = mem_phys_ptr(base + off, len);
             uint32_t       i;
 
-            {
-                static int n;
-                if ((off == 0) && (n++ < 3))
-                    pclog("ARS chunk0 ptr=%p len=%u base=%08X\n", (void *) p, len, base);
-            }
-
-            if ((p == NULL) || (memcmp(p, dev->fb_shadow + off, len) != 0)) {
-                changed = 1;
-
-                if (p != NULL)
-                    memcpy(dev->fb_shadow + off, p, len);
-
-                for (i = 0; i < len; i++) {
-                    uint32_t pos = off + i;
-                    int      py  = (int) (pos / ARS_FB_WIDTH);
-                    int      px  = (int) (pos % ARS_FB_WIDTH);
-                    uint8_t  idx;
-                    uint32_t c;
-
-                    if ((py >= height) || (px >= width))
-                        continue;
-
-                    idx = (p != NULL) ? p[i] : mem_readb_phys(base + pos);
-                    c   = dev->regs[VW_ARS_REG_COLOR_MAP_START + idx];
-
-                    buffer32->line[py][px] = 0xff000000 | (c >> 8);
-                }
-
+            if ((p != NULL) && (memcmp(p, dev->fb_shadow + off, len) == 0))
                 continue;
-            }
 
-            if (!dev->fb_valid)
-                changed = 1;
+            if (p != NULL)
+                memcpy(dev->fb_shadow + off, p, len);
+
+            for (i = 0; i < len; i++) {
+                uint32_t pos = off + i;
+                int      py  = (int) (pos / ARS_FB_WIDTH);
+                int      px  = (int) (pos % ARS_FB_WIDTH);
+                uint8_t  idx;
+                uint32_t c;
+
+                if ((py >= height) || (px >= width))
+                    continue;
+
+                idx = (p != NULL) ? p[i] : mem_readb_phys(base + pos);
+                c   = dev->regs[VW_ARS_REG_COLOR_MAP_START + idx];
+
+                buffer32->line[py][px] = 0xff000000 | (c >> 8);
+            }
         }
 
         dev->fb_valid = 1;
+    }
+
+    /* The OSD can reset the window size behind our back (the Force 4:3
+       toggle and a settings restart both call reset_screen_size(), which
+       drops it to the unscaled default), so re-assert the mode every time
+       the OSD asks for a resize, not only when the mode itself changed. */
+    if ((monitors[monitor_index_global].mon_xsize != width) ||
+        (monitors[monitor_index_global].mon_ysize != height) ||
+        video_force_resize_get_monitor(monitor_index_global)) {
+        monitors[monitor_index_global].mon_xsize = width;
+        monitors[monitor_index_global].mon_ysize = height;
+
+        set_screen_size_monitor(width, height, monitor_index_global);
+        video_force_resize_set_monitor(0, monitor_index_global);
     }
 
     video_blit_memtoscreen(0, 0, width, height);
