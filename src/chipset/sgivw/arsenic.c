@@ -275,16 +275,11 @@ arsenic_blit_frame(ars_t *dev)
                 changed = 1;
         }
 
-        if (!changed) {
-            /* Nothing new: keep the picture on screen with an occasional
-               refresh instead of redrawing it on every field. */
-            if (++dev->fb_idle < 8) {
-                dev->fb_valid = 1;
-                return;
-            }
-        }
+        /* Present nothing when nothing changed: the renderer keeps the
+           last frame on screen, so a still picture costs no work at all. */
+        if (!changed && dev->fb_valid)
+            return;
 
-        dev->fb_idle  = 0;
         dev->fb_valid = 1;
     }
 

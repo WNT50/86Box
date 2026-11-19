@@ -48,7 +48,6 @@ typedef struct ars_t
     uint8_t     *fb_shadow;
     uint32_t     fb_shadow_size;
     int          fb_valid;
-    int          fb_idle;
     mem_mapping_t mmio_mapping;
     mem_mapping_t mmio_alt_mapping;
     void *crt_i2c;
