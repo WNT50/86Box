@@ -186,6 +186,8 @@ arsenic_blit_frame(ars_t *dev)
 {
     uint32_t  fb  = dev->regs[VW_ARS_REG_FB_CTRL];
     uint32_t  base;
+    int       width  = ARS_FB_WIDTH;
+    int       height;
     int       x, y;
 
     /* Nothing is on screen until the firmware has enabled the linear
@@ -195,11 +197,22 @@ arsenic_blit_frame(ars_t *dev)
 
     base = fb & 0xfffff000;
 
-    for (y = 0; y < ARS_FB_HEIGHT; y++) {
+    /* FB_HEIGHT carries the panel height in its upper half. */
+    height = (int) ((dev->regs[VW_ARS_REG_FB_HEIGHT] >> 16) & 0xffff);
+    if (height <= 0)
+        height = ARS_FB_HEIGHT;
+
+    /* Never write outside the frame buffer the renderer gave us. */
+    if (width > buffer32->w)
+        width = buffer32->w;
+    if (height > buffer32->h)
+        height = buffer32->h;
+
+    for (y = 0; y < height; y++) {
         uint32_t  src = base + (uint32_t) (y * ARS_FB_WIDTH);
         uint32_t *row = buffer32->line[y];
 
-        for (x = 0; x < ARS_FB_WIDTH; x++) {
+        for (x = 0; x < width; x++) {
             /* Colour map entries are RRGGBB00; the screen wants XXRRGGBB. */
             uint32_t c = dev->regs[VW_ARS_REG_COLOR_MAP_START + mem_readb_phys(src + x)];
 
@@ -207,7 +220,7 @@ arsenic_blit_frame(ars_t *dev)
         }
     }
 
-    video_blit_memtoscreen(0, 0, ARS_FB_WIDTH, ARS_FB_HEIGHT);
+    video_blit_memtoscreen(0, 0, width, height);
 }
 static void
 arsenic_blit_tick(void *priv)
