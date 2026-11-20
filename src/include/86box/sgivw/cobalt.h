@@ -51,9 +51,6 @@
 #define VW_CO_APIC_IO_BASE                   0xC4000000
 #define VW_CO_APIC_IO_SIZE                   0x02000000
 #define VW_CO_APIC_IO_DECODE_MASK            0x00000FFF // TODO
-#define VW_CO_APIC_REGS_SIZE                 0x00001000
-
-#define VW_CO_APIC_IRQ_DISABLED              0x00010000
 
 /* The input the 8259's INTR reaches the APIC on, the serial/floppy/
    parallel IRQs with it (Linux mach-visws/cobalt.h, CO_APIC_8259). */
@@ -107,7 +104,6 @@
 typedef struct co_t
 {
     mem_mapping_t cpu_mapping;
-    mem_mapping_t apic_mapping;
     mem_mapping_t mem_mapping;
     mem_mapping_t gfx_mapping;
     mem_mapping_t gfx_mapping_interrupt_status;
@@ -118,9 +114,6 @@ typedef struct co_t
         pc_timer_t countdown_timer;
     } cpu;
     struct {
-        uint32_t regs[VW_CO_APIC_REGS_SIZE / sizeof(uint32_t)];
-    } apic;
-    struct {
         uint32_t regs[VW_CO_MEM_REGS_SIZE / sizeof(uint32_t)];
         pc_timer_t countdown_timer;
     } mem;
@@ -130,9 +123,6 @@ typedef struct co_t
 } co_t;
 
 extern const device_t cobalt_device;
-
-void
-cobalt_apic_init(co_t *dev);
 
 void
 cobalt_cpu_init(co_t *dev);
