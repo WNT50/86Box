@@ -76,6 +76,7 @@ typedef struct ioapic_t {
        VIA 686A/B's Rx58, ioapic_chip_irq). */
     uint32_t      wire_chip;
     uint8_t       pic_intr; /* the 8259's INTR output */
+    uint8_t       pic_intin; /* the input it is wired to (INTIN0 unless the board says otherwise) */
     uint8_t       pin0_smi; /* ESC PAC SMIRC: INTIN0 carries SMI, not INTR */
     uint8_t       legacy_routes_set;
     uint8_t       legacy_routes_wired; /* the board's wiring, which a table cannot change */
@@ -881,11 +882,13 @@ ioapic_legacy_irq(uint16_t mask, int level, int set)
 static void
 ioapic_wire_intr_update(ioapic_t *dev)
 {
-    int active = dev->pic_intr && !dev->pin0_smi;
+    uint32_t bit    = ioapic_82093aa_pin_bit(dev->pic_intin);
+    int      active = dev->pic_intr && !(dev->pin0_smi && !dev->pic_intin);
 
-    if (dev->pins && (!!(dev->wire_intr & 1) != active)) {
-        dev->wire_intr = active ? 1 : 0;
-        ioapic_wire_drive(dev, 0);
+    if (dev->pins && (dev->pic_intin < dev->pins)
+        && (!!(dev->wire_intr & bit) != active)) {
+        dev->wire_intr = active ? bit : 0;
+        ioapic_wire_drive(dev, dev->pic_intin);
     }
 }
 
@@ -942,6 +945,20 @@ ioapic_set_pin0_smi(void *ioapic, int smi)
         return;
 
     dev->pin0_smi = !!smi;
+    ioapic_wire_intr_update(dev);
+}
+
+/* The input the 8259's INTR is wired to; INTIN0 on the 82093AA boards, and
+   wherever the board routes it on the others. */
+void
+ioapic_set_pic_intin(void *ioapic, uint8_t pin)
+{
+    ioapic_t *dev = (ioapic_t *) ioapic;
+
+    if ((dev == NULL) || (pin >= IOAPIC_REDIR_ENTRIES))
+        return;
+
+    dev->pic_intin = pin;
     ioapic_wire_intr_update(dev);
 }
 
