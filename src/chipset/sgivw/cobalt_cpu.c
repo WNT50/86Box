@@ -72,10 +72,12 @@ cobalt_cpu_update_timer_interrupt(co_t *dev)
 static void
 cobalt_cpu_reload_timer(co_t *dev)
 {
-    uint32_t count = dev->cpu.regs[VW_CO_CPU_REG_TIMER_VALUE];
+    /* The period the handler wrote; TIMER_VALUE is the countdown itself,
+       and holds the last period for a guest that only ever wrote there. */
+    uint32_t count = dev->cpu.regs[VW_CO_CPU_REG_TIMER_AUTO_RELOAD];
 
     if (count == 0)
-        count = dev->cpu.regs[VW_CO_CPU_REG_TIMER_AUTO_RELOAD];
+        count = dev->cpu.regs[VW_CO_CPU_REG_TIMER_VALUE];
     dev->cpu.regs[VW_CO_CPU_REG_TIMER_VALUE] = count;
 
     if (count == 0)
@@ -106,11 +108,14 @@ cobalt_cpu_mmio_write32(uint32_t addr, uint32_t val, void* priv)
 
     cobalt_cpu_log("CO: CPU [W32] [%02X] <-- %X\n", addr, val);
 
+    const uint32_t written = val;
+
     addr /= sizeof(uint32_t);
     switch (addr) {
         case VW_CO_CPU_REG_00:
         case VW_CO_CPU_REG_04:
         case VW_CO_CPU_REG_TIMER_AUTO_RELOAD:
+        case VW_CO_CPU_REG_TIMER_VALUE:
             write_bits_mask = 0xFFFFFFFF;
             break;
         case VW_CO_CPU_REG_CTRL:
@@ -120,7 +125,9 @@ cobalt_cpu_mmio_write32(uint32_t addr, uint32_t val, void* priv)
             write_bits_mask = 0xD0496BA0;
             break;
         case VW_CO_CPU_REG_STAT:
-            write_bits_mask = 0x00000003;
+            /* Status only: a zero written to TIMEINTR clears it, a one
+               leaves it as it is -- the handler cannot set it back. */
+            write_bits_mask = 0x00000000;
             break;
         case VW_CO_CPU_REG_28:
             write_bits_mask = 0x00000003;
@@ -147,7 +154,18 @@ cobalt_cpu_mmio_write32(uint32_t addr, uint32_t val, void* priv)
             break;
 
         case VW_CO_CPU_REG_STAT:
+            if (!(written & VW_CO_CPU_STAT_TIMEINTR))
+                dev->cpu.regs[VW_CO_CPU_REG_STAT] &= ~VW_CO_CPU_STAT_TIMEINTR;
             cobalt_cpu_update_timer_interrupt(dev);
+            break;
+
+        case VW_CO_CPU_REG_TIMER_AUTO_RELOAD:
+        case VW_CO_CPU_REG_TIMER_VALUE:
+            /* A period written while the timer runs starts it over: the
+               handler may set either order, and Linux writes the value
+               before starting the countdown. */
+            if (dev->cpu.regs[VW_CO_CPU_REG_CTRL] & VW_CO_CPU_TIMERUN)
+                cobalt_cpu_reload_timer(dev);
             break;
 
         default:
