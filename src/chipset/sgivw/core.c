@@ -83,15 +83,16 @@ cobalt_core_init(UNUSED(const device_t *info))
     ioapic = device_add_params(&ioapic_device, (void *) (uintptr_t) IOAPIC_TOPOLOGY_UP_APIC_DEFAULT);
     if (ioapic != NULL) {
         /* The Cobalt APIC takes the PCI interrupts on inputs of their own:
-           slot group A lines 0 and 1 on INTIN0/1 and 5/6 (cobalt.h,
-           CO_APIC_PCIA_BASE0 and CO_APIC_PCIA_BASE123).  The 8259's INTR
-           stays on INTIN0 as the 82093AA's ISA table expects. */
+           slot group A lines 0 and 1 on INTIN0/1 and 5/6, and the 8259 on
+           INTIN12 rather than the 82093AA's INTIN0 (mach-visws/cobalt.h,
+           CO_APIC_PCIA_BASE0, CO_APIC_PCIA_BASE123 and CO_APIC_8259). */
         static const ioapic_legacy_irq_routing_t cobalt_irq_routing = {
             .irq_to_intin  = IOAPIC_LEGACY_IRQ_ROUTE_ISA,
             .pirq_to_intin = { 0, 1, 5, 6 }
         };
 
         ioapic_set_mmio_base(ioapic, VW_CO_APIC_IO_BASE);
+        ioapic_set_pic_intin(ioapic, VW_CO_APIC_8259_INPUT);
         ioapic_set_legacy_irq_routing(ioapic, &cobalt_irq_routing);
     }
 

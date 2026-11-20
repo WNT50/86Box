@@ -291,6 +291,7 @@ extern int            ioapic_pci_intin_own_wire(uint8_t intin, uint8_t irq_line)
 extern uint8_t        ioapic_pirq_intin(uint8_t pirq);
 extern int            ioapic_pirq_steered_isa(void);
 extern void           ioapic_set_pin0_smi(void *ioapic, int smi);
+extern void           ioapic_set_pic_intin(void *ioapic, uint8_t pin);
 extern void           ioapic_intin_irq(uint8_t pin, int level, int set);
 extern void           ioapic_legacy_irq(uint16_t mask, int level, int set);
 extern int            ioapic_legacy_irq_enabled(void);
