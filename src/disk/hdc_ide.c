@@ -52,7 +52,7 @@ ide_dbg(const char *fmt, ...)
     va_list ap;
     FILE   *f;
 
-    if (ide_dbg_lines >= 1500)
+    if (ide_dbg_lines >= 4000)
         return;
     ide_dbg_lines++;
 
@@ -706,11 +706,10 @@ ide_irq_update(ide_board_t *dev, UNUSED(int log))
     ide = dev->ide[dev->cur_dev & 1];
     set = !(dev->devctl & 2) && ide->irqstat;
     {
-        static uint8_t last[4];
-        uint8_t        now = (uint8_t) ((dev->devctl << 1) | !!ide->irqstat);
+        static int last_set[4] = { -1, -1, -1, -1 };
 
-        if (last[dev->cur_dev & 3] != now) {
-            last[dev->cur_dev & 3] = now;
+        if (last_set[dev->cur_dev & 3] != set) {
+            last_set[dev->cur_dev & 3] = set;
             ide_dbg("IQ ch=%u devctl=%02X irqstat=%u set=%d irqline=%d\n",
                     dev->cur_dev, dev->devctl, ide->irqstat, set, dev->irq);
         }
