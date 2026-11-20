@@ -1321,14 +1321,20 @@ ioapic_mmio_readl(uint32_t addr, void *priv)
         if (reg == 0xffc)
             return ((uint32_t) dev->ioapic_id << 24) | IOAPIC_SGI_ID_ENABLE;
 
-        if ((reg < (uint32_t) dev->pins * 16) && !(reg & 3)) {
-            uint8_t  saved = dev->ioapic_index;
-            uint32_t val;
+        if (!(reg & 3)) {
+            /* Sixteen bytes an input, its two words in the first eight. */
+            uint8_t pin  = reg >> 4;
+            uint8_t word = (reg >> 2) & 3;
 
-            dev->ioapic_index = 0x10 + (reg >> 2);
-            val               = ioapic_window_read(dev);
-            dev->ioapic_index = saved;
-            return val;
+            if ((pin < dev->pins) && (word < 2)) {
+                uint8_t  saved = dev->ioapic_index;
+                uint32_t val;
+
+                dev->ioapic_index = 0x10 + (pin * 2) + word;
+                val               = ioapic_window_read(dev);
+                dev->ioapic_index = saved;
+                return val;
+            }
         }
 
         return 0;
@@ -1379,12 +1385,18 @@ ioapic_mmio_writel(uint32_t addr, uint32_t val, void *priv)
             return;
         }
 
-        if ((reg < (uint32_t) dev->pins * 16) && !(reg & 3)) {
-            uint8_t saved = dev->ioapic_index;
+        if (!(reg & 3)) {
+            /* Sixteen bytes an input, its two words in the first eight. */
+            uint8_t pin  = reg >> 4;
+            uint8_t word = (reg >> 2) & 3;
 
-            dev->ioapic_index = 0x10 + (reg >> 2);
-            ioapic_window_write(dev, val);
-            dev->ioapic_index = saved;
+            if ((pin < dev->pins) && (word < 2)) {
+                uint8_t saved = dev->ioapic_index;
+
+                dev->ioapic_index = 0x10 + (pin * 2) + word;
+                ioapic_window_write(dev, val);
+                dev->ioapic_index = saved;
+            }
         }
         return;
     }
