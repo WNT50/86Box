@@ -36,6 +36,28 @@
 #include <86box/acpi.h>
 #include <86box/ddma.h>
 #include <86box/pci.h>
+
+/* Probe: what the guest writes into the IDE function's control registers. */
+static unsigned piix_dbg_lines;
+static void
+piix_dbg(const char *fmt, ...)
+{
+    va_list ap;
+    FILE   *f;
+
+    if (piix_dbg_lines >= 400)
+        return;
+    piix_dbg_lines++;
+
+    f = fopen("piixdbg.log", "a");
+    if (f == NULL)
+        return;
+    va_start(ap, fmt);
+    vfprintf(f, fmt, ap);
+    va_end(ap);
+    fclose(f);
+}
+
 #include <86box/pic.h>
 #include <86box/pit.h>
 #include <86box/plat.h>
@@ -159,6 +181,11 @@ piix_ide_handlers(piix_t *dev, int bus)
 {
     uint16_t main;
     uint16_t side;
+
+    if (bus & 3)
+        piix_dbg("IDEH bus=%d cmd=%02X 41=%02X 43=%02X 09=%02X\n",
+                 bus, dev->regs[1][0x04], dev->regs[1][0x41], dev->regs[1][0x43],
+                 dev->regs[1][0x09]);
 
     if (bus & 0x01) {
         piix_log("Disabling primary IDE...\n");
@@ -1041,6 +1068,7 @@ piix_write(int func, int addr, UNUSED(int len), uint8_t val, void *priv)
                 fregs[0x07] &= ~(val & 0x38);
                 break;
             case 0x09:
+                piix_dbg("IF09 val=%02X type=%u\n", val, dev->type);
                 if (dev->type == 5) {
                     fregs[0x09] = (fregs[0x09] & 0xfa) | (val & 0x05);
                     piix_ide_handlers(dev, 0x03);
@@ -1120,6 +1148,8 @@ piix_write(int func, int addr, UNUSED(int len), uint8_t val, void *priv)
                 break;
             case 0x41:
             case 0x43:
+                piix_dbg("SECCFG addr=%02X val=%02X cmd=%02X 41=%02X 43=%02X\n",
+                         addr, val, fregs[0x04], fregs[0x41], fregs[0x43]);
                 fregs[addr] = val & ((dev->type > 1) ? 0xf3 : 0xb3);
                 piix_ide_handlers(dev, 1 << !!(addr & 0x02));
                 break;

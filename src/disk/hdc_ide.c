@@ -44,6 +44,27 @@
 #include <86box/ui.h>
 #include <86box/hdc.h>
 #include <86box/hdc_ide.h>
+/* Probe: log the IDE channel's command, device control and interrupt state. */
+static unsigned ide_dbg_lines;
+static void
+ide_dbg(const char *fmt, ...)
+{
+    va_list ap;
+    FILE   *f;
+
+    if (ide_dbg_lines >= 1500)
+        return;
+    ide_dbg_lines++;
+
+    f = fopen("idedbg.log", "a");
+    if (f == NULL)
+        return;
+    va_start(ap, fmt);
+    vfprintf(f, fmt, ap);
+    va_end(ap);
+    fclose(f);
+}
+
 #include <86box/hdd.h>
 #include <86box/lpt.h>
 #include <86box/sound.h>
@@ -684,6 +705,8 @@ ide_irq_update(ide_board_t *dev, UNUSED(int log))
 
     ide = dev->ide[dev->cur_dev & 1];
     set = !(dev->devctl & 2) && ide->irqstat;
+    ide_dbg("IQ ch=%u devctl=%02X irqstat=%u set=%d irqline=%d\n",
+            dev->cur_dev, dev->devctl, ide->irqstat, set, dev->irq);
 
     if (ide->cf)
         ide->cf->irq(set, ide->cf->priv);
@@ -2068,6 +2091,7 @@ ide_write_devctl(UNUSED(uint16_t addr), uint8_t val, void *priv)
     uint8_t old;
 
     ch        = dev->cur_dev;
+    ide_dbg("DC ch=%u val=%02X\n", ch, val);
     ide       = dev->ide[ch & 1];
     ide_other = dev->ide[(ch ^ 1) & 1];
 
@@ -2256,6 +2280,10 @@ ide_ata_removable_command(ide_t *ide, const uint8_t val)
 void
 ide_writeb(uint16_t addr, uint8_t val, void *priv)
 {
+    if ((addr & 7) == 7) {
+        ide_board_t *b = (ide_board_t *) priv;
+        ide_dbg("CMD ch=%u base=%04X val=%02X\n", b->cur_dev, b->base[0], val);
+    }
     ide_board_t *dev = (ide_board_t *) priv;
     ide_t *ide;
     ide_t *ide_other;
@@ -3566,6 +3594,8 @@ void
 ide_handlers(uint8_t board, int set)
 {
     if (ide_boards[board] != NULL) {
+        ide_dbg("IH board=%u set=%d base0=%04X base1=%04X\n", board, set,
+                ide_boards[board]->base[0], ide_boards[board]->base[1]);
         if (ide_boards[board]->base[0]) {
             io_handler(set, ide_boards[board]->base[0], 8,
                        ide_readb, ide_readw, ide_readl,
