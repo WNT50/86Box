@@ -50,20 +50,14 @@ cobalt_mem_log(const char *fmt, ...)
 #    define cobalt_mem_log(fmt, ...)
 #endif
 
+/* The handler clears the error by writing zero to ERROR_STATUS.  Nothing
+   raises one here: the controller has no error source in the model (no ECC
+   checking), and the Cobalt header names no APIC input for it, so there is
+   nothing to raise and nowhere to raise it to. */
 static void
 cobalt_mem_clear_memory_error(co_t *dev)
 {
     dev->mem.regs[VW_CO_MEM_REG_ERROR_STATUS] = 0;
-
-    // TODO: clear interrupt
-}
-
-static void
-cobalt_mem_dispatch_memory_error(co_t *dev)
-{
-    dev->mem.regs[VW_CO_MEM_REG_ERROR_STATUS] = 0x00804000;
-
-    // TODO: raise interrupt
 }
 
 static void
