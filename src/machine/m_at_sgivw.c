@@ -97,6 +97,24 @@ machine_at_sgivw_common_init(const machine_t *model, int is_320)
     return ret;
 }
 
+/* Lithium B's slots take inputs of their own on the Cobalt APIC, five for
+   the first interrupt line and three for the second (mach-visws/cobalt.h,
+   CO_APIC_PCIB_BASE0 and CO_APIC_PCIB_BASE123); their third and fourth
+   lines have no input there and stay on the 8259. */
+static void
+machine_at_sgivw_busb_apic_routes(int slots)
+{
+    static const uint8_t inta[] = { 8, 9, 10, 11, 12 };
+    static const uint8_t intb[] = { 13, 14, 15 };
+
+    for (int i = 0; i < slots; i++) {
+        if (i < (int) (sizeof(inta) / sizeof(inta[0])))
+            pci_apic_set_intin_route(0, i, 0, inta[i]);
+        if (i < (int) (sizeof(intb) / sizeof(intb[0])))
+            pci_apic_set_intin_route(0, i, 1, intb[i]);
+    }
+}
+
 int
 machine_at_sgivw320_init(const machine_t *model)
 {
@@ -107,6 +125,7 @@ machine_at_sgivw320_init(const machine_t *model)
 
     /* Lithium B bus #0 */
     pci_register_bus_slot(0, 0x00, PCI_CARD_NORMAL, 1, 2, 3, 4);
+    machine_at_sgivw_busb_apic_routes(1);
 
     /* Lithium A bus #1 */
     pci_register_bus_slot(1, 0x00, PCI_CARD_NORMAL, 4, 1, 2, 3);
@@ -128,6 +147,7 @@ machine_at_sgivw540_init(const machine_t *model)
     pci_register_bus_slot(0, 0x01, PCI_CARD_NORMAL, 4, 1, 2, 3);
     pci_register_bus_slot(0, 0x02, PCI_CARD_NORMAL, 3, 4, 1, 2);
     pci_register_bus_slot(0, 0x03, PCI_CARD_NORMAL, 2, 3, 4, 1);
+    machine_at_sgivw_busb_apic_routes(4);
 
     /* Lithium A bus #1 */
     pci_register_bus_slot(1, 0x00, PCI_CARD_NORMAL, 4, 1, 2, 3);
