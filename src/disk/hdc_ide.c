@@ -705,8 +705,16 @@ ide_irq_update(ide_board_t *dev, UNUSED(int log))
 
     ide = dev->ide[dev->cur_dev & 1];
     set = !(dev->devctl & 2) && ide->irqstat;
-    ide_dbg("IQ ch=%u devctl=%02X irqstat=%u set=%d irqline=%d\n",
-            dev->cur_dev, dev->devctl, ide->irqstat, set, dev->irq);
+    {
+        static uint8_t last[4];
+        uint8_t        now = (uint8_t) ((dev->devctl << 1) | !!ide->irqstat);
+
+        if (last[dev->cur_dev & 3] != now) {
+            last[dev->cur_dev & 3] = now;
+            ide_dbg("IQ ch=%u devctl=%02X irqstat=%u set=%d irqline=%d\n",
+                    dev->cur_dev, dev->devctl, ide->irqstat, set, dev->irq);
+        }
+    }
 
     if (ide->cf)
         ide->cf->irq(set, ide->cf->priv);
@@ -2934,8 +2942,16 @@ ide_readb(uint16_t addr, void *priv)
 
     ide_log("[%04X:%08X] ide_readb(%04X, %08X) = %02X\n", CS, cpu_state.pc, addr, priv, ret);
 
-    if ((addr & 7) == 7)
-        ide_dbg("ST ch=%u base=%04X val=%02X\n", ch, dev->base[0], ret);
+    if ((addr & 7) == 7) {
+        static uint8_t last_st[4] = { 0xff, 0xff, 0xff, 0xff };
+        static uint8_t st_seen[4];
+
+        if (!st_seen[ch & 3] || (last_st[ch & 3] != ret)) {
+            st_seen[ch & 3]      = 1;
+            last_st[ch & 3]      = ret;
+            ide_dbg("ST ch=%u base=%04X val=%02X\n", ch, dev->base[0], ret);
+        }
+    }
 
     return ret;
 }
