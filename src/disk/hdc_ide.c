@@ -2934,6 +2934,9 @@ ide_readb(uint16_t addr, void *priv)
 
     ide_log("[%04X:%08X] ide_readb(%04X, %08X) = %02X\n", CS, cpu_state.pc, addr, priv, ret);
 
+    if ((addr & 7) == 7)
+        ide_dbg("ST ch=%u base=%04X val=%02X\n", ch, dev->base[0], ret);
+
     return ret;
 }
 
