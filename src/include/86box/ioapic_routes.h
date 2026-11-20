@@ -13,6 +13,17 @@
 /* An IRQ with no pin on this I/O APIC. */
 #define IOAPIC_LEGACY_IRQ_NC 0xff
 
+/* A board whose legacy interrupts all reach the I/O APIC on one input of
+   its own (the Cobalt APIC takes the 8259's output on INTIN12): none of
+   them on a pin of its own. */
+#define IOAPIC_LEGACY_IRQ_ROUTE_NONE \
+    { IOAPIC_LEGACY_IRQ_NC, IOAPIC_LEGACY_IRQ_NC, IOAPIC_LEGACY_IRQ_NC, \
+      IOAPIC_LEGACY_IRQ_NC, IOAPIC_LEGACY_IRQ_NC, IOAPIC_LEGACY_IRQ_NC, \
+      IOAPIC_LEGACY_IRQ_NC, IOAPIC_LEGACY_IRQ_NC, IOAPIC_LEGACY_IRQ_NC, \
+      IOAPIC_LEGACY_IRQ_NC, IOAPIC_LEGACY_IRQ_NC, IOAPIC_LEGACY_IRQ_NC, \
+      IOAPIC_LEGACY_IRQ_NC, IOAPIC_LEGACY_IRQ_NC, IOAPIC_LEGACY_IRQ_NC, \
+      IOAPIC_LEGACY_IRQ_NC }
+
 /* The 82093AA's ISA inputs: IRQ n on INTIN n, but IRQ0 on INTIN2 and
    IRQ2, the cascade, on none -- "INTIN[3:11,14,15] ... Typically, these
    signals are connected to the ISA interrupts IRQ[3:7,8#,9:11,14:15]
