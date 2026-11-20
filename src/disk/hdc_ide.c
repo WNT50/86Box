@@ -1577,6 +1577,17 @@ ide_atapi_callback(ide_t *ide)
     ide_log("Phase: %02X (%s)\n", ide->sc->packet_status, phase);
 #endif
 
+    {
+        static int last_phase = -1;
+        if (ide->sc->packet_status != last_phase) {
+            last_phase = ide->sc->packet_status;
+            ide_dbg("AP phase=%d cdb=%02X %02X %02X %02X %02X %02X\n",
+                    ide->sc->packet_status,
+                    ide->sc->atapi_cdb[0], ide->sc->atapi_cdb[1], ide->sc->atapi_cdb[2],
+                    ide->sc->atapi_cdb[3], ide->sc->atapi_cdb[4], ide->sc->atapi_cdb[5]);
+        }
+    }
+
     switch (ide->sc->packet_status) {
         default:
             ret              = 0;
@@ -1643,6 +1654,8 @@ ide_atapi_callback(ide_t *ide)
                 default:
                     break;
                 case 0:
+                    ide_dbg("AP dma-stall status=%d phase=%d\n",
+                            ide->tf->atastat, ide->sc->packet_status);
                     if (ide->bus_master_error)
                         ide->bus_master_error(ide->sc);
                     break;
