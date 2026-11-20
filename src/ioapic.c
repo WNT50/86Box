@@ -34,6 +34,10 @@
 #include "ioapic_82093aa.h"
 #include "lapic.h"
 
+/* The largest input count any board's I/O APIC has here: the Cobalt APIC
+   takes thirty inputs, 0 to 29 (Linux mach-visws/cobalt.h, CO_APIC_LAST). */
+#define IOAPIC_REDIR_ENTRIES_MAX 30
+
 typedef struct ioapic_t {
     /* Config/state gates stay here; apic_platform owns LAPIC topology effects. */
     uint8_t expose_mp_tables;
@@ -62,7 +66,7 @@ typedef struct ioapic_t {
     uint8_t       ioapic_id;
     uint8_t       ioapic_index;
     mem_mapping_t ioapic_mapping;
-    uint32_t      ioapic_redir[24 * 2];
+    uint32_t      ioapic_redir[IOAPIC_REDIR_ENTRIES_MAX * 2];
     uint32_t      ioapic_pin_raw_lines;
     uint32_t      ioapic_pin_lines;
     uint32_t      ioapic_pin_level;
@@ -91,14 +95,14 @@ typedef struct ioapic_t {
     uint8_t       legacy_irq_default_to_pin[IOAPIC_LEGACY_IRQ_COUNT];
     uint8_t       legacy_irq_to_pin[IOAPIC_LEGACY_IRQ_COUNT];
     uint8_t       pirq_to_intin[4]; /* the board's PIRQ wiring, 0xff for none */
-    uint8_t       ioapic_masked_irq_log_count[24];
-    uint8_t       ioapic_irq_log_count[24];
-    uint8_t       ioapic_deliver_log_count[24];
-    uint8_t       ioapic_dest_mismatch_log_count[24];
-    uint8_t       ioapic_extint_deliver_log_count[24];
-    uint8_t       ioapic_smi_vector_log_count[24];
-    uint8_t       ioapic_eoi_log_count[24];
-    uint8_t       ioapic_redir_log_count[24];
+    uint8_t       ioapic_masked_irq_log_count[IOAPIC_REDIR_ENTRIES_MAX];
+    uint8_t       ioapic_irq_log_count[IOAPIC_REDIR_ENTRIES_MAX];
+    uint8_t       ioapic_deliver_log_count[IOAPIC_REDIR_ENTRIES_MAX];
+    uint8_t       ioapic_dest_mismatch_log_count[IOAPIC_REDIR_ENTRIES_MAX];
+    uint8_t       ioapic_extint_deliver_log_count[IOAPIC_REDIR_ENTRIES_MAX];
+    uint8_t       ioapic_smi_vector_log_count[IOAPIC_REDIR_ENTRIES_MAX];
+    uint8_t       ioapic_eoi_log_count[IOAPIC_REDIR_ENTRIES_MAX];
+    uint8_t       ioapic_redir_log_count[IOAPIC_REDIR_ENTRIES_MAX];
     uint8_t       ioapic_mmio_read_log_count[0x40];
     uint8_t       ioapic_mmio_write_log_count[0x40];
 } ioapic_t;
@@ -955,7 +959,7 @@ ioapic_set_pic_intin(void *ioapic, uint8_t pin)
 {
     ioapic_t *dev = (ioapic_t *) ioapic;
 
-    if ((dev == NULL) || (pin >= IOAPIC_REDIR_ENTRIES))
+    if ((dev == NULL) || (pin >= IOAPIC_REDIR_ENTRIES_MAX))
         return;
 
     dev->pic_intin = pin;
@@ -1171,7 +1175,7 @@ ioapic_reset_redir(ioapic_t *dev)
 {
     dev->ioapic_send_pending = 0;
     dev->ioapic_intin_poll_next = 0;
-    for (uint8_t i = 0; i < IOAPIC_REDIR_ENTRIES; i++) {
+    for (uint8_t i = 0; i < IOAPIC_REDIR_ENTRIES_MAX; i++) {
         dev->ioapic_redir[(i * 2) + 0] = IOAPIC_REDIR_LOW_RESET;
         dev->ioapic_redir[(i * 2) + 1] = IOAPIC_REDIR_HIGH_RESET;
     }
@@ -1623,6 +1627,14 @@ ioapic_init(UNUSED(const device_t *info))
         dev->smi_pin     = 0xff;
         dev->version_reg = 0x000f0011;
         dev->mmio_size   = 0x400;
+    } else if (local & IOAPIC_VARIANT_SGI) {
+        /* The Cobalt APIC: thirty inputs (0 to 29, CO_APIC_LAST), version
+           001D0011h so the maximum redirection entry reads 1Dh, and no SMI#
+           input (the top inputs are AS and RE). */
+        dev->pins        = IOAPIC_REDIR_ENTRIES_MAX;
+        dev->smi_pin     = 0xff;
+        dev->version_reg = 0x001d0011;
+        dev->mmio_size   = IOAPIC_MMIO_SIZE;
     } else if (dev->is_via) {
         /* Twenty-four inputs, IRQ0-IRQ23 all of them interrupts, and
            version 00170011h (VT82C686B data sheet 1.8, p. 116). */
