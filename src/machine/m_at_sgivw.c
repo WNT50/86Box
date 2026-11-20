@@ -97,22 +97,30 @@ machine_at_sgivw_common_init(const machine_t *model, int is_320)
     return ret;
 }
 
-/* Lithium B carries one slot on the 320 and four on the 540 (both Owner's
-   Guides), so its first interrupt line takes inputs 8 to 11 and the second
-   13 to 15 (mach-visws/cobalt.h, CO_APIC_PCIB_BASE0 and
-   CO_APIC_PCIB_BASE123); their third and fourth lines have no input there
-   and stay on the 8259.  INTIN12 is the 8259's own. */
+/* The slots' interrupt lines on the Cobalt APIC, as Linux's
+   visws_map_irq() has them (arch/x86/pci/visws.c, v3.13): each slot's
+   first line takes an input of its own, and the three others rotate over
+   a set the bus shares -- five and six on Lithium A, thirteen to fifteen
+   on Lithium B.  The kernel's Lithium B expression runs past those three
+   inputs from the second slot on, so the rotation its comment describes
+   is what is used here. */
 static void
-machine_at_sgivw_busb_apic_routes(int slots)
+machine_at_sgivw_pci_apic_routes(int busb_slots)
 {
-    static const uint8_t inta[] = { 8, 9, 10, 11 };
-    static const uint8_t intb[] = { 13, 14, 15 };
+    for (int slot = 0; slot < busb_slots; slot++) {
+        pci_apic_set_intin_route(0, slot, 0, 8 + slot);
 
-    for (int i = 0; i < slots; i++) {
-        if (i < (int) (sizeof(inta) / sizeof(inta[0])))
-            pci_apic_set_intin_route(0, i, 0, inta[i]);
-        if (i < (int) (sizeof(intb) / sizeof(intb[0])))
-            pci_apic_set_intin_route(0, i, 1, intb[i]);
+        for (int pin = 1; pin < 4; pin++)
+            pci_apic_set_intin_route(0, slot, pin,
+                                     13 + (((3 - slot) + (pin - 1)) % 3));
+    }
+
+    for (int slot = 0; slot < 2; slot++) {
+        pci_apic_set_intin_route(1, slot, 0, slot);
+
+        for (int pin = 1; pin < 4; pin++)
+            pci_apic_set_intin_route(1, slot, pin,
+                                     5 + ((slot + (pin - 1)) % 2));
     }
 }
 
@@ -126,7 +134,7 @@ machine_at_sgivw320_init(const machine_t *model)
 
     /* Lithium B bus #0 */
     pci_register_bus_slot(0, 0x00, PCI_CARD_NORMAL, 1, 2, 3, 4);
-    machine_at_sgivw_busb_apic_routes(1);
+    machine_at_sgivw_pci_apic_routes(1);
 
     /* Lithium A bus #1 */
     pci_register_bus_slot(1, 0x00, PCI_CARD_NORMAL, 4, 1, 2, 3);
@@ -148,7 +156,7 @@ machine_at_sgivw540_init(const machine_t *model)
     pci_register_bus_slot(0, 0x01, PCI_CARD_NORMAL, 4, 1, 2, 3);
     pci_register_bus_slot(0, 0x02, PCI_CARD_NORMAL, 3, 4, 1, 2);
     pci_register_bus_slot(0, 0x03, PCI_CARD_NORMAL, 2, 3, 4, 1);
-    machine_at_sgivw_busb_apic_routes(4);
+    machine_at_sgivw_pci_apic_routes(4);
 
     /* Lithium A bus #1 */
     pci_register_bus_slot(1, 0x00, PCI_CARD_NORMAL, 4, 1, 2, 3);
