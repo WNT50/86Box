@@ -428,6 +428,11 @@ lithium_pci_init(const device_t *devinfo)
       /* Register the second PCI bus (bus numbers in 86Box start with 1) */
       bus_number = pci_register_bus();
       assert(bus_number == 1);
+      /* Unlike a PCI-to-PCI bridge this one cannot be enumerated, so no
+         guest ever programs a secondary bus number on it: map the guest's
+         bus 1 to the bus its slots sit on here, or every access to them
+         lands on PCI_BUS_INVALID and reads back FFh. */
+      pci_remap_bus(bus_number, bus_number);
     }
     dev->bus_number = devinfo->local;
 
