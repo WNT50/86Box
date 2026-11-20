@@ -47,6 +47,10 @@
 
 #define VW_CO_APIC_IRQ_DISABLED              0x00010000
 
+/* The input the 8259's INTR reaches the APIC on, the serial/floppy/
+   parallel IRQs with it (Linux mach-visws/cobalt.h, CO_APIC_8259). */
+#define VW_CO_APIC_8259_INPUT                12
+
 /* ****************************************************************************/
 
 #define VW_CO_MEM_IO_BASE                   0xC6000000
