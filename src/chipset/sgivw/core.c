@@ -80,7 +80,7 @@ cobalt_core_init(UNUSED(const device_t *info))
     device_add(&lithium_device);
     device_add(&arsenic_device);
 
-    ioapic = device_add_params(&ioapic_device, (void *) (uintptr_t) IOAPIC_TOPOLOGY_UP_APIC_DEFAULT);
+    ioapic = device_add_params(&ioapic_device, (void *) (uintptr_t) (IOAPIC_TOPOLOGY_UP_APIC_DEFAULT | IOAPIC_VARIANT_SGI));
     if (ioapic != NULL) {
         /* The Cobalt APIC takes the PCI interrupts on inputs of their own:
            slot group A lines 0 and 1 on INTIN0/1 and 5/6, and the 8259 on

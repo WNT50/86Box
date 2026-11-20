@@ -177,12 +177,17 @@ typedef struct ioapic_legacy_irq_routing_t {
    p. 116). Its window is decoded while the southbridge's Internal APIC
    Enable says so (ioapic_set_window_enabled). */
 #define IOAPIC_VARIANT_VIA                0x00004000
+/* The Cobalt APIC on the Visual Workstations: thirty inputs, 0 to 29, with
+   no SMI# input and version 001D0011h (Linux mach-visws/cobalt.h: IDE, the
+   8259, the two Lithium bridges, the video in and out, the audio, AS, RE,
+   the processor's timer and cache interrupt, and NMI). */
+#define IOAPIC_VARIANT_SGI                0x00008000
 
 /* Append-only save ABI: loaders gate each later field by version. */
-#define IOAPIC_STATE_VERSION          13
+#define IOAPIC_STATE_VERSION          14
 #define IOAPIC_STATE_VERSION_MIN      1
 #define IOAPIC_STATE_MAX_LAPICS       16
-#define IOAPIC_STATE_REDIR_ENTRIES    24
+#define IOAPIC_STATE_REDIR_ENTRIES    30
 #define IOAPIC_STATE_LAPIC_REG_COUNT  (0x400 >> 4)
 #define IOAPIC_STATE_LAPIC_BIT_WORDS  8
 #define IOAPIC_STATE_PCI_INTIN_ROUTES 256
