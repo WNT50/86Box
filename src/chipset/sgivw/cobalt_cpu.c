@@ -51,11 +51,38 @@ cobalt_cpu_log(const char *fmt, ...)
 #    define cobalt_cpu_log(fmt, ...)
 #endif
 
+/* The timer's interrupt, on its own input of the APIC: pending while STAT
+   says so and unmasked while CTRL says so. */
+static void
+cobalt_cpu_update_timer_interrupt(co_t *dev)
+{
+    int pending = !!(dev->cpu.regs[VW_CO_CPU_REG_STAT] & VW_CO_CPU_STAT_TIMEINTR);
+    int masked  = !!(dev->cpu.regs[VW_CO_CPU_REG_CTRL] & VW_CO_CPU_TIMEMASK);
+    int level   = pending && !masked;
+
+    if (level == dev->cpu.timer_irq_level)
+        return;
+
+    dev->cpu.timer_irq_level = level;
+    ioapic_intin_irq(VW_CO_APIC_CPU_INPUT, 0, level);
+}
+
+/* One period of the countdown, in microseconds: the Cobalt core runs at
+   100 MHz and the period is a count of its ticks (CO_TIME_HZ). */
 static void
 cobalt_cpu_reload_timer(co_t *dev)
 {
-    // TODO: Not accurate at all, actually this timer runs at 100 MHz (VW_COBALT_CLOCK_FREQ)
-    timer_on_auto(&dev->cpu.countdown_timer, 244.0);
+    uint32_t count = dev->cpu.regs[VW_CO_CPU_REG_TIMER_VALUE];
+
+    if (count == 0)
+        count = dev->cpu.regs[VW_CO_CPU_REG_TIMER_AUTO_RELOAD];
+    dev->cpu.regs[VW_CO_CPU_REG_TIMER_VALUE] = count;
+
+    if (count == 0)
+        timer_stop(&dev->cpu.countdown_timer);
+    else
+        timer_on_auto(&dev->cpu.countdown_timer,
+                      (double) count * 1000000.0 / (double) VW_COBALT_CLOCK_FREQ);
 }
 
 static void
@@ -92,6 +119,9 @@ cobalt_cpu_mmio_write32(uint32_t addr, uint32_t val, void* priv)
         case VW_CO_CPU_REG_18:
             write_bits_mask = 0xD0496BA0;
             break;
+        case VW_CO_CPU_REG_STAT:
+            write_bits_mask = 0x00000003;
+            break;
         case VW_CO_CPU_REG_28:
             write_bits_mask = 0x00000003;
             break;
@@ -112,7 +142,12 @@ cobalt_cpu_mmio_write32(uint32_t addr, uint32_t val, void* priv)
 
     switch (addr) {
         case VW_CO_CPU_REG_CTRL:
-            cobalt_cpu_timer_control(dev, !!(val & VW_CO_CPU_START_TIMER));
+            cobalt_cpu_timer_control(dev, !!(dev->cpu.regs[addr] & VW_CO_CPU_TIMERUN));
+            cobalt_cpu_update_timer_interrupt(dev);
+            break;
+
+        case VW_CO_CPU_REG_STAT:
+            cobalt_cpu_update_timer_interrupt(dev);
             break;
 
         default:
@@ -176,21 +211,11 @@ static void
 cobalt_cpu_timer_tick(void *priv)
 {
     co_t *dev = (co_t *) priv;
-    uint32_t val;
 
-    /* Count down timer */
-    val = dev->cpu.regs[VW_CO_CPU_REG_TIMER_VALUE];
-    if (val == 0)
-    {
-        val = dev->cpu.regs[VW_CO_CPU_REG_TIMER_AUTO_RELOAD];
-
-        // TODO: raise interrupt
-    }
-    else
-    {
-        val -= 1;
-    }
-    dev->cpu.regs[VW_CO_CPU_REG_TIMER_VALUE] = val;
+    /* The period ran out: the interrupt stays pending until the handler
+       clears STAT, and the countdown starts over. */
+    dev->cpu.regs[VW_CO_CPU_REG_STAT] |= VW_CO_CPU_STAT_TIMEINTR;
+    cobalt_cpu_update_timer_interrupt(dev);
 
     cobalt_cpu_reload_timer(dev);
 }
@@ -206,6 +231,9 @@ cobalt_cpu_reset_hard(co_t *dev)
         dev->cpu.regs[VW_CO_CPU_REG_REVISION] = VW_CO_CPU_REV_A4;
 
     dev->cpu.regs[VW_CO_CPU_REG_CTRL] = 0x00000019;
+
+    dev->cpu.timer_irq_level = 0;
+    timer_stop(&dev->cpu.countdown_timer);
 }
 
 void
