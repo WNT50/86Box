@@ -70,7 +70,13 @@ cobalt_core_init(UNUSED(const device_t *info))
            fourth carries a device with no slot of its own, the PIIX4's USB
            controller, on INTIN7 (CO_APIC_PIIX4_USB). */
         static const ioapic_legacy_irq_routing_t cobalt_irq_routing = {
-            .irq_to_intin  = IOAPIC_LEGACY_IRQ_ROUTE_NONE,
+            /* The 8259 only carries the serial, floppy and parallel lines
+               (CO_APIC_8259's comment in mach-visws/cobalt.h), so the two
+               IDE channels do not reach the APIC through it: they are wired
+               to inputs of their own, CO_APIC_IDE0 (5 on a 320 rev 5) and
+               CO_APIC_IDE1 (2).  Everything else still arrives on INTIN12
+               with the 8259's output. */
+            .irq_to_intin  = IOAPIC_LEGACY_IRQ_ROUTE_SGI,
             .pirq_to_intin = { 0, 1, 5, 7 }
         };
 

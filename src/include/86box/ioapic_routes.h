@@ -33,6 +33,17 @@
 #define IOAPIC_LEGACY_IRQ_ROUTE_ISA \
     { 2, 1, IOAPIC_LEGACY_IRQ_NC, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 }
 
+/* The Visual Workstations: the 8259 keeps the serial, floppy and parallel
+   lines (CO_APIC_8259 is described as "serial, floppy, par-l-l"), while the
+   IDE channels have inputs of their own -- CO_APIC_IDE0, which is 5 on a
+   320 rev 5 and 4 otherwise, and CO_APIC_IDE1 (2). */
+#define IOAPIC_LEGACY_IRQ_ROUTE_SGI \
+    { IOAPIC_LEGACY_IRQ_NC, IOAPIC_LEGACY_IRQ_NC, IOAPIC_LEGACY_IRQ_NC, \
+      IOAPIC_LEGACY_IRQ_NC, IOAPIC_LEGACY_IRQ_NC, IOAPIC_LEGACY_IRQ_NC, \
+      IOAPIC_LEGACY_IRQ_NC, IOAPIC_LEGACY_IRQ_NC, IOAPIC_LEGACY_IRQ_NC, \
+      IOAPIC_LEGACY_IRQ_NC, IOAPIC_LEGACY_IRQ_NC, IOAPIC_LEGACY_IRQ_NC, \
+      IOAPIC_LEGACY_IRQ_NC, IOAPIC_LEGACY_IRQ_NC, 5, 2 }
+
 /* The PCI interrupts on inputs of their own: "INTIN[16:19] ... Typically,
    these signals are connected to the PCI interrupts (PIRQ[0:3])"
    (82093AA 2.0). "The steering of the PCI IRQs to the ISA IRQs is

@@ -1451,6 +1451,11 @@ ioapic_mp_legacy_irq_route(void *priv, uint8_t irq, uint8_t intin)
     if ((dev == NULL) || (irq >= IOAPIC_LEGACY_IRQ_COUNT) || (intin >= dev->pins))
         return;
 
+    { static int seen[16]; 
+      if (!seen[irq & 15]) { seen[irq & 15] = 1;
+          FILE *f = fopen("mproute.log", "a");
+          if (f) { fprintf(f, "MP irq=%u -> intin=%u\n", irq, intin); fclose(f); } } }
+
     /* Where the inputs are the board's wiring, a table cannot re-wire
        them: the software is told, the model keeps the wires. */
     if (dev->legacy_routes_wired)
