@@ -85,9 +85,12 @@ cobalt_core_init(UNUSED(const device_t *info))
         /* The Cobalt APIC takes the PCI interrupts on inputs of their own:
            slot group A lines 0 and 1 on INTIN0/1 and 5/6, and the 8259 on
            INTIN12 rather than the 82093AA's INTIN0 (mach-visws/cobalt.h,
-           CO_APIC_PCIA_BASE0, CO_APIC_PCIA_BASE123 and CO_APIC_8259). */
+           CO_APIC_PCIA_BASE0, CO_APIC_PCIA_BASE123 and CO_APIC_8259).
+           No legacy IRQ has a pin of its own: they all reach the APIC
+           through the 8259 on that one input, which leaves INTIN8 to 15
+           for slot group B. */
         static const ioapic_legacy_irq_routing_t cobalt_irq_routing = {
-            .irq_to_intin  = IOAPIC_LEGACY_IRQ_ROUTE_ISA,
+            .irq_to_intin  = IOAPIC_LEGACY_IRQ_ROUTE_NONE,
             .pirq_to_intin = { 0, 1, 5, 6 }
         };
 
