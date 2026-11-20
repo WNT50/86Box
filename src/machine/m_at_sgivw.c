@@ -106,11 +106,11 @@ machine_at_sgivw320_init(const machine_t *model)
         return ret;
 
     /* Lithium B bus #0 */
-    pci_register_bus_slot(0, 0x00, PCI_CARD_NORMAL, 8, 5, 6, 7);
+    pci_register_bus_slot(0, 0x00, PCI_CARD_NORMAL, 1, 2, 3, 4);
 
     /* Lithium A bus #1 */
-    pci_register_bus_slot(1, 0x00, PCI_CARD_NORMAL, 0, 5, 6, 5);
-    pci_register_bus_slot(1, 0x01, PCI_CARD_NORMAL, 1, 6, 5, 6);
+    pci_register_bus_slot(1, 0x00, PCI_CARD_NORMAL, 4, 1, 2, 3);
+    pci_register_bus_slot(1, 0x01, PCI_CARD_NORMAL, 3, 4, 1, 2);
 
     return ret;
 }
@@ -124,15 +124,15 @@ machine_at_sgivw540_init(const machine_t *model)
         return ret;
 
     /* Lithium B bus #0 */
-    pci_register_bus_slot(0, 0x00, PCI_CARD_NORMAL, 8, 5, 6, 7);
-    pci_register_bus_slot(0, 0x01, PCI_CARD_NORMAL, 9, 7, 8, 9);
-    pci_register_bus_slot(0, 0x02, PCI_CARD_NORMAL, 10, 6, 7, 8);
-    pci_register_bus_slot(0, 0x03, PCI_CARD_NORMAL, 11, 5, 6, 7);
+    pci_register_bus_slot(0, 0x00, PCI_CARD_NORMAL, 1, 2, 3, 4);
+    pci_register_bus_slot(0, 0x01, PCI_CARD_NORMAL, 4, 1, 2, 3);
+    pci_register_bus_slot(0, 0x02, PCI_CARD_NORMAL, 3, 4, 1, 2);
+    pci_register_bus_slot(0, 0x03, PCI_CARD_NORMAL, 2, 3, 4, 1);
 
     /* Lithium A bus #1 */
-    pci_register_bus_slot(1, 0x00, PCI_CARD_NORMAL, 0, 5, 6, 5);
-    pci_register_bus_slot(1, 0x01, PCI_CARD_NORMAL, 1, 6, 5, 6);
-    pci_register_bus_slot(1, 0x02, PCI_CARD_SCSI, 2, 5, 6, 5);
+    pci_register_bus_slot(1, 0x00, PCI_CARD_NORMAL, 4, 1, 2, 3);
+    pci_register_bus_slot(1, 0x01, PCI_CARD_NORMAL, 3, 4, 1, 2);
+    pci_register_bus_slot(1, 0x02, PCI_CARD_SCSI, 2, 3, 4, 1);
 
     return ret;
 }
