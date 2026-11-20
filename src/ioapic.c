@@ -57,6 +57,7 @@ typedef struct ioapic_t {
     uint8_t  is_esc;
     uint8_t  lapic_only; /* no I/O APIC: the local APIC's path alone */
     uint8_t  is_via;     /* the VT82C686A/B's own (IOAPIC_VARIANT_VIA) */
+    uint8_t  is_sgi;     /* entries mapped where they are, not by index */
     uint8_t  window_off; /* the chipset decodes no window (ioapic_set_window_enabled) */
     uint8_t  intr_masked; /* the ESC's INTRC: the 8259's INTR held inactive */
     uint32_t version_reg;
@@ -114,6 +115,9 @@ typedef struct ioapic_t {
 #define IOAPIC_MMIO_BASE       0xfec00000
 #define IOAPIC_MMIO_SIZE       0x00001000
 #define IOAPIC_REDIR_ENTRIES   IOAPIC_82093AA_REDIR_ENTRIES
+/* The Cobalt APIC's ID register: the ID in bits 27:24, ENABLE (CO_APIC_ENABLE)
+   in bit 8. */
+#define IOAPIC_SGI_ID_ENABLE   0x00000100
 #define IOAPIC_SMI_PIN         23
 #define IOAPIC_ID_RESET        0
 #define IOAPIC_VERSION_REG     IOAPIC_82093AA_VERSION_REG
@@ -1307,17 +1311,37 @@ static uint32_t
 ioapic_mmio_readl(uint32_t addr, void *priv)
 {
     ioapic_t *dev = (ioapic_t *) priv;
-    uint32_t  reg = (addr - dev->mmio_base) & 0xff;
+    uint32_t  reg = (addr - dev->mmio_base) & (dev->is_sgi ? 0xfff : 0xff);
     uint32_t  ret = 0;
+
+    /* The Cobalt APIC maps its entries where they are: input n's low word
+       at n * 16, its high word at n * 16 + 4, the ID register at 0xFFC
+       (Linux mach-visws/cobalt.h, CO_APIC_LO/HI/ID). */
+    if (dev->is_sgi) {
+        if (reg == 0xffc)
+            return ((uint32_t) dev->ioapic_id << 24) | IOAPIC_SGI_ID_ENABLE;
+
+        if ((reg < (uint32_t) dev->pins * 16) && !(reg & 3)) {
+            uint8_t  saved = dev->ioapic_index;
+            uint32_t val;
+
+            dev->ioapic_index = 0x10 + (reg >> 2);
+            val               = ioapic_window_read(dev);
+            dev->ioapic_index = saved;
+            return val;
+        }
+
+        return 0;
+    }
 
     if (reg == 0x00)
         ret = dev->ioapic_index;
     else if (reg == 0x10)
         ret = ioapic_window_read(dev);
 
-    if (ioapic_log_first(&dev->ioapic_mmio_read_log_count[reg >> 2], 8))
+    if (ioapic_log_first(&dev->ioapic_mmio_read_log_count[(reg >> 2) & 0x3f], 8))
         ioapic_log("IOAPIC: read mmio=%02x index=%02x val=%08x count=%u\n",
-                   reg, dev->ioapic_index, ret, dev->ioapic_mmio_read_log_count[reg >> 2]);
+                   reg, dev->ioapic_index, ret, dev->ioapic_mmio_read_log_count[(reg >> 2) & 0x3f]);
 
     return ret;
 }
@@ -1342,11 +1366,28 @@ static void
 ioapic_mmio_writel(uint32_t addr, uint32_t val, void *priv)
 {
     ioapic_t *dev = (ioapic_t *) priv;
-    uint32_t  reg = (addr - dev->mmio_base) & 0xff;
+    uint32_t  reg = (addr - dev->mmio_base) & (dev->is_sgi ? 0xfff : 0xff);
 
-    if (ioapic_log_first(&dev->ioapic_mmio_write_log_count[reg >> 2], 8))
+    if (ioapic_log_first(&dev->ioapic_mmio_write_log_count[(reg >> 2) & 0x3f], 8))
         ioapic_log("IOAPIC: write mmio=%02x index=%02x val=%08x count=%u\n",
-                   reg, dev->ioapic_index, val, dev->ioapic_mmio_write_log_count[reg >> 2]);
+                   reg, dev->ioapic_index, val, dev->ioapic_mmio_write_log_count[(reg >> 2) & 0x3f]);
+
+    if (dev->is_sgi) {
+        if (reg == 0xffc) {
+            dev->ioapic_id    = (val >> 24) & 0x0f;
+            dev->ioapic_arb_id = dev->ioapic_id;
+            return;
+        }
+
+        if ((reg < (uint32_t) dev->pins * 16) && !(reg & 3)) {
+            uint8_t saved = dev->ioapic_index;
+
+            dev->ioapic_index = 0x10 + (reg >> 2);
+            ioapic_window_write(dev, val);
+            dev->ioapic_index = saved;
+        }
+        return;
+    }
 
     if (reg == 0x00)
         dev->ioapic_index = val & 0xff;
@@ -1668,6 +1709,7 @@ ioapic_init(UNUSED(const device_t *info))
     dev->is_esc       = !!(local & IOAPIC_VARIANT_ESC);
     dev->lapic_only   = !!(local & IOAPIC_VARIANT_NONE);
     dev->is_via       = !!(local & IOAPIC_VARIANT_VIA);
+    dev->is_sgi       = !!(local & IOAPIC_VARIANT_SGI);
     if (dev->lapic_only) {
         dev->pins        = 0;
         dev->smi_pin     = 0xff;
