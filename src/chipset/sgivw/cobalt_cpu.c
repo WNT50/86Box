@@ -80,11 +80,35 @@ cobalt_cpu_reload_timer(co_t *dev)
         count = dev->cpu.regs[VW_CO_CPU_REG_TIMER_VALUE];
     dev->cpu.regs[VW_CO_CPU_REG_TIMER_VALUE] = count;
 
+    dev->cpu.last_timer_tsc = tsc;
+
     if (count == 0)
         timer_stop(&dev->cpu.countdown_timer);
     else
         timer_on_auto(&dev->cpu.countdown_timer,
                       (double) count * 1000000.0 / (double) VW_COBALT_CLOCK_FREQ);
+}
+
+/* The countdown as the handler sees it: the Cobalt core ticks at 100 MHz
+   while the timer runs, so what is left of the period is the tick's
+   remaining time scaled to that rate.  The NT HAL polls it to measure how
+   long a stretch of code takes (0x8002d2bb in halborg.dll), which a value
+   that only changes when the period runs out cannot serve. */
+static uint32_t
+cobalt_cpu_timer_read(co_t *dev)
+{
+    uint32_t period = dev->cpu.regs[VW_CO_CPU_REG_TIMER_VALUE];
+    double   ticks;
+
+    if (!period || !(dev->cpu.regs[VW_CO_CPU_REG_CTRL] & VW_CO_CPU_TIMERUN))
+        return period;
+
+    /* Time since the period started, in the core's 100 MHz ticks: the
+       emulated clock is the same one the timers keep. */
+    ticks = ((double) (tsc - dev->cpu.last_timer_tsc) / (double) (TIMER_USEC >> 32))
+            * ((double) VW_COBALT_CLOCK_FREQ / 1000000.0);
+
+    return (ticks >= (double) period) ? 0 : (uint32_t) ((double) period - ticks);
 }
 
 static void
@@ -184,10 +208,13 @@ cobalt_cpu_mmio_read32(uint32_t addr, void* priv)
     addr &= VW_CO_CPU_IO_DECODE_MASK;
     addr /= sizeof(uint32_t);
 
+    if (addr == VW_CO_CPU_REG_TIMER_VALUE) {
+        ret = cobalt_cpu_timer_read(dev);
+        cobalt_cpu_log("CO: CPU [R32] [%02X] --> %X\n", addr * sizeof(uint32_t), ret);
+        return ret;
+    }
+
     switch (addr) {
-        case VW_CO_CPU_REG_TIMER_VALUE:
-            /* TODO */
-            break;
 
         default:
             break;
@@ -271,6 +298,7 @@ cobalt_cpu_init(co_t *dev)
                     dev);
 
     timer_add(&dev->cpu.countdown_timer, cobalt_cpu_timer_tick, dev, 0);
+
 
     cobalt_cpu_reset_hard(dev);
 }
