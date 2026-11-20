@@ -97,14 +97,15 @@ machine_at_sgivw_common_init(const machine_t *model, int is_320)
     return ret;
 }
 
-/* Lithium B's slots take inputs of their own on the Cobalt APIC, five for
-   the first interrupt line and three for the second (mach-visws/cobalt.h,
-   CO_APIC_PCIB_BASE0 and CO_APIC_PCIB_BASE123); their third and fourth
-   lines have no input there and stay on the 8259. */
+/* Lithium B carries one slot on the 320 and four on the 540 (both Owner's
+   Guides), so its first interrupt line takes inputs 8 to 11 and the second
+   13 to 15 (mach-visws/cobalt.h, CO_APIC_PCIB_BASE0 and
+   CO_APIC_PCIB_BASE123); their third and fourth lines have no input there
+   and stay on the 8259.  INTIN12 is the 8259's own. */
 static void
 machine_at_sgivw_busb_apic_routes(int slots)
 {
-    static const uint8_t inta[] = { 8, 9, 10, 11, 12 };
+    static const uint8_t inta[] = { 8, 9, 10, 11 };
     static const uint8_t intb[] = { 13, 14, 15 };
 
     for (int i = 0; i < slots; i++) {
