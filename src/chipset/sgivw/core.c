@@ -88,10 +88,13 @@ cobalt_core_init(UNUSED(const device_t *info))
            CO_APIC_PCIA_BASE0, CO_APIC_PCIA_BASE123 and CO_APIC_8259).
            No legacy IRQ has a pin of its own: they all reach the APIC
            through the 8259 on that one input, which leaves INTIN8 to 15
-           for slot group B. */
+           for slot group B.  The slots take their own inputs through the
+           per-slot routes the machine sets up; of the PIRQ lines only the
+           fourth carries a device with no slot of its own, the PIIX4's USB
+           controller, on INTIN7 (CO_APIC_PIIX4_USB). */
         static const ioapic_legacy_irq_routing_t cobalt_irq_routing = {
             .irq_to_intin  = IOAPIC_LEGACY_IRQ_ROUTE_NONE,
-            .pirq_to_intin = { 0, 1, 5, 6 }
+            .pirq_to_intin = { 0, 1, 5, 7 }
         };
 
         ioapic_set_mmio_base(ioapic, VW_CO_APIC_IO_BASE);

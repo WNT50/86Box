@@ -467,8 +467,13 @@ pci_irq(uint8_t slot, uint8_t pci_int, int level, int set, uint8_t *irq_state)
                         irq_routing = (irq_routing - PCI_INTA) & PCI_IRQ_MAX;
 
                         /* A PIRQ line the board wires to an I/O APIC input
-                           reaches it there, whatever it is steered to. */
-                        if (ioapic_pirq_intin(irq_routing) != PCI_APIC_INTIN_INVALID) {
+                           reaches it there, whatever it is steered to,
+                           unless the slot's own line has an input of its
+                           own: that is the more specific wiring (the Cobalt
+                           APIC's slots have one input each, the PIRQs only
+                           steer them to the 8259). */
+                        if (!direct_intin_route &&
+                            (ioapic_pirq_intin(irq_routing) != PCI_APIC_INTIN_INVALID)) {
                             intin              = ioapic_pirq_intin(irq_routing);
                             direct_intin_route = 1;
                             pirq_wired         = 1;
