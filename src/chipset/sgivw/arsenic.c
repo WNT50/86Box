@@ -164,6 +164,14 @@ arsenic_mmio_read32(uint32_t addr, void* priv)
             break;
         }
 
+        case VW_ARS_REG_COLOR_MAP_FIFO_STATUS:
+            /* Free room in the colour map FIFO.  A handler writes an entry
+               only once this reads non-zero (Linux sgivwfb's cmap write is
+               a `while (cmap_fifo == 0)' on it), so a constant zero is a
+               FIFO that never drains. */
+            ret = 0x00000010;
+            break;
+
         default:
             break;
     }
