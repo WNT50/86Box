@@ -27,6 +27,7 @@
 #define VW_CO_CPU_REG_REVISION              (0x08 / 4)
 #define VW_CO_CPU_REG_CTRL                  (0x10 / 4)
 #define VW_CO_CPU_REG_18                    (0x18 / 4)
+#define VW_CO_CPU_REG_STAT                  (0x20 / 4)
 #define VW_CO_CPU_REG_28                    (0x28 / 4)
 #define VW_CO_CPU_REG_TIMER_AUTO_RELOAD     (0x30 / 4)
 #define VW_CO_CPU_REG_TIMER_VALUE           (0x38 / 4)
@@ -36,7 +37,14 @@
 #define VW_CO_CPU_REV_A4   0xA4
 #define VW_CO_CPU_REV_A5   0xA5
 
-#define VW_CO_CPU_START_TIMER   0x8
+/* CO_CPU_CTRL bits (Linux mach-visws/cobalt.h, CO_CTRL_*): the timer runs
+   while TIMERUN is set and its interrupt is masked while TIMEMASK is. */
+#define VW_CO_CPU_TIMERUN       0x04
+#define VW_CO_CPU_TIMEMASK      0x08
+
+/* CO_CPU_STAT bits: the timer's interrupt is pending; writing a zero to the
+   bit clears it (CO_STAT_TIMEINTR). */
+#define VW_CO_CPU_STAT_TIMEINTR 0x02
 
 /* ****************************************************************************/
 
@@ -50,6 +58,9 @@
 /* The input the 8259's INTR reaches the APIC on, the serial/floppy/
    parallel IRQs with it (Linux mach-visws/cobalt.h, CO_APIC_8259). */
 #define VW_CO_APIC_8259_INPUT                12
+
+/* The Cobalt timer and cache interrupt (CO_APIC_CPU). */
+#define VW_CO_APIC_CPU_INPUT                 28
 
 /* ****************************************************************************/
 
@@ -103,6 +114,7 @@ typedef struct co_t
     struct {
         uint32_t regs[VW_CO_CPU_REGS_SIZE / sizeof(uint32_t)];
         uint64_t last_timer_tsc;
+        uint8_t  timer_irq_level;
         pc_timer_t countdown_timer;
     } cpu;
     struct {
