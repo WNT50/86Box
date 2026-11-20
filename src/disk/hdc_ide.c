@@ -52,7 +52,7 @@ ide_dbg(const char *fmt, ...)
     va_list ap;
     FILE   *f;
 
-    if (ide_dbg_lines >= 4000)
+    if (ide_dbg_lines >= 6000)
         return;
     ide_dbg_lines++;
 
@@ -706,13 +706,7 @@ ide_irq_update(ide_board_t *dev, UNUSED(int log))
     ide = dev->ide[dev->cur_dev & 1];
     set = !(dev->devctl & 2) && ide->irqstat;
     {
-        static int last_set[4] = { -1, -1, -1, -1 };
-
-        if (last_set[dev->cur_dev & 3] != set) {
-            last_set[dev->cur_dev & 3] = set;
-            ide_dbg("IQ ch=%u devctl=%02X irqstat=%u set=%d irqline=%d\n",
-                    dev->cur_dev, dev->devctl, ide->irqstat, set, dev->irq);
-        }
+        /* Interrupt transitions are understood; keep the log for commands. */
     }
 
     if (ide->cf)
@@ -2111,7 +2105,6 @@ ide_write_devctl(UNUSED(uint16_t addr), uint8_t val, void *priv)
     uint8_t old;
 
     ch        = dev->cur_dev;
-    ide_dbg("DC ch=%u val=%02X\n", ch, val);
     ide       = dev->ide[ch & 1];
     ide_other = dev->ide[(ch ^ 1) & 1];
 
@@ -2954,16 +2947,7 @@ ide_readb(uint16_t addr, void *priv)
 
     ide_log("[%04X:%08X] ide_readb(%04X, %08X) = %02X\n", CS, cpu_state.pc, addr, priv, ret);
 
-    if ((addr & 7) == 7) {
-        static uint8_t last_st[4] = { 0xff, 0xff, 0xff, 0xff };
-        static uint8_t st_seen[4];
 
-        if (!st_seen[ch & 3] || (last_st[ch & 3] != ret)) {
-            st_seen[ch & 3]      = 1;
-            last_st[ch & 3]      = ret;
-            ide_dbg("ST ch=%u base=%04X val=%02X\n", ch, dev->base[0], ret);
-        }
-    }
 
     return ret;
 }
