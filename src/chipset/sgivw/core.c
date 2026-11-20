@@ -27,6 +27,7 @@
 #include <86box/mem.h>
 #include <86box/plat_unused.h>
 #include <86box/chipset.h>
+#include <86box/ioapic_routes.h>
 
 #include <86box/sgivw/cobalt.h>
 #include <86box/sgivw/lithium.h>
@@ -80,8 +81,19 @@ cobalt_core_init(UNUSED(const device_t *info))
     device_add(&arsenic_device);
 
     ioapic = device_add_params(&ioapic_device, (void *) (uintptr_t) IOAPIC_TOPOLOGY_UP_APIC_DEFAULT);
-    if (ioapic != NULL)
+    if (ioapic != NULL) {
+        /* The Cobalt APIC takes the PCI interrupts on inputs of their own:
+           slot group A lines 0 and 1 on INTIN0/1 and 5/6 (cobalt.h,
+           CO_APIC_PCIA_BASE0 and CO_APIC_PCIA_BASE123).  The 8259's INTR
+           stays on INTIN0 as the 82093AA's ISA table expects. */
+        static const ioapic_legacy_irq_routing_t cobalt_irq_routing = {
+            .irq_to_intin  = IOAPIC_LEGACY_IRQ_ROUTE_ISA,
+            .pirq_to_intin = { 0, 1, 5, 6 }
+        };
+
         ioapic_set_mmio_base(ioapic, VW_CO_APIC_IO_BASE);
+        ioapic_set_legacy_irq_routing(ioapic, &cobalt_irq_routing);
+    }
 
     mem_mapping_add(&cobalt_apic_id_mapping, VW_CO_APIC_IO_BASE + 0x00000ffc, 4,
                     cobalt_apic_id_readb, cobalt_apic_id_readw, cobalt_apic_id_readl,
