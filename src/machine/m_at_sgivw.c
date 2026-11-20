@@ -66,7 +66,7 @@ machine_at_sgivw_common_init(const machine_t *model, int is_320)
 {
     int ret;
 
-    ret = bios_load_linear("roms/machines/sgivw/prom0006.bin",
+    ret = bios_load_linear("roms/machines/sgivw/prom1004.bin",
                            0x00080000, 512 * 1024, 0x200);
     if (bios_only || !ret)
         return ret;
