@@ -122,13 +122,13 @@ add_library(chipset OBJECT
     vl82c59x.c
     wd76c10.c
     sgivw/vid_sgi_arsenic.c
-    sgivw/cobalt.c
-    sgivw/cobalt_cpu.c
+    sgivw/sgi_cobalt.c
+    sgivw/sgi_cobalt_cpu.c
     sgivw/vid_sgi_cobalt.c
-    sgivw/cobalt_mem.c
+    sgivw/sgi_cobalt_mem.c
     sgivw/core.c
-    sgivw/lithium.c
-    sgivw/lithium_1394.c
-    sgivw/lithium_dma.c
-    sgivw/lithium_hostbridge.c
+    sgivw/sgi_lithium.c
+    sgivw/sgi_lithium_1394.c
+    sgivw/sgi_lithium_dma.c
+    sgivw/sgi_lithium_hostbridge.c
 )
