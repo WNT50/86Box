@@ -12,7 +12,7 @@
  *
  *          Copyright 2024 Dmitry Borisov
  */
-#include <86box/sgivw/arsenic_priv.h>
+#include <86box/sgivw/vid_sgi_arsenic.h>
 
 #ifdef ENABLE_ARSENIC_LOG
 int ars_do_log = ENABLE_ARSENIC_LOG;
