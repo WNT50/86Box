@@ -49,22 +49,51 @@ cobalt_gfx_log(const char *fmt, ...)
 #    define cobalt_gfx_log(fmt, ...)
 #endif
 
+/* Temporary trace for the Cobalt command protocol: the driver's writes and
+   reads are the only description of the engine we have.  The counters keep a
+   long install run from filling the disk. */
+#define CO_TRACE_WRITES 6000
+#define CO_TRACE_READS  2000
+
+static int co_trace_writes, co_trace_reads;
+
+static void
+co_trace_write(const char *what, uint32_t addr, uint32_t val)
+{
+    if (co_trace_writes++ >= CO_TRACE_WRITES)
+        return;
+
+    pclog("CO+%06X <- %08X  (%s)\n", addr - 0xC8000000, val, what);
+}
+
+static void
+co_trace_read(const char *what, uint32_t addr, uint32_t val)
+{
+    if (co_trace_reads++ >= CO_TRACE_READS)
+        return;
+
+    pclog("CO+%06X -> %08X  (%s)\n", addr - 0xC8000000, val, what);
+}
+
 static void
 cobalt_gfx_mmio_write8(uint32_t addr, uint8_t val, void* priv)
 {
     cobalt_gfx_log("CO: GFX [W08] [%X] <-- %X\n", addr, val);
+    co_trace_write("w8", addr, val);
 }
 
 static void
 cobalt_gfx_mmio_write16(uint32_t addr, uint16_t val, void* priv)
 {
     cobalt_gfx_log("CO: GFX [W16] [%X] <-- %X\n", addr, val);
+    co_trace_write("w16", addr, val);
 }
 
 static void
 cobalt_gfx_mmio_write32(uint32_t addr, uint32_t val, void* priv)
 {
     cobalt_gfx_log("CO: GFX [W32] [%X] <-- %X\n", addr, val);
+    co_trace_write("w32", addr, val);
 }
 
 static uint8_t
@@ -75,6 +104,7 @@ cobalt_gfx_mmio_read8(uint32_t addr, void* priv)
     ret = 0;
 
     cobalt_gfx_log("CO: GFX [R8] [%X] --> %X\n", addr, ret);
+    co_trace_read("r8", addr, ret);
     return ret;
 }
 
@@ -86,6 +116,7 @@ cobalt_gfx_mmio_read16(uint32_t addr, void* priv)
     ret = 0;
 
     cobalt_gfx_log("CO: GFX [R16] [%X] --> %X\n", addr, ret);
+    co_trace_read("r16", addr, ret);
     return ret;
 }
 
@@ -97,6 +128,7 @@ cobalt_gfx_mmio_read32(uint32_t addr, void* priv)
     ret = 0;
 
     cobalt_gfx_log("CO: GFX [R32] [%X] --> %X\n", addr, ret);
+    co_trace_read("r32", addr, ret);
     return ret;
 }
 
