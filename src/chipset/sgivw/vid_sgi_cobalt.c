@@ -200,7 +200,9 @@ cobalt_gfx_int_status_mmio_write32(uint32_t addr, uint32_t val, void* priv)
     cobalt_gfx_log("CO: GFX [W32] [%X] <-- %X\n", addr, val);
     co_trace_write("wi32", VW_CO_GFX_INT_STATUS_IO_BASE, addr, val);
 
-    dev->gfx.interrupt_status = val & 0x0000000F;
+    /* The driver reads the register and writes back the complement, so the
+       bits are write-one-to-clear, not a plain latch. */
+    dev->gfx.interrupt_status &= ~val;
 }
 
 static uint32_t
@@ -272,6 +274,7 @@ co_vblank(void *priv)
 {
     co_t *dev = priv;
 
+    dev->gfx.interrupt_status |= 0x02;
     *(uint32_t *) &co_window[0x10018] = 0x40000000;
     ioapic_intin_irq(VW_CO_APIC_AS, 0, 1);
 
