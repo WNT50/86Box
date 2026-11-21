@@ -182,62 +182,27 @@ cobalt_gfx_int_status_mmio_read32(uint32_t addr, void* priv)
     return ret;
 }
 
-/* Temporary: does anything write the frame buffer at all?  The driver may draw
-   through the engine, which we do not have, or straight into the pooled
-   memory; counting the traffic tells the two apart. */
-#define CO_FB_BASE 0x02000000
-#define CO_FB_SIZE 0x02000000
+/* Temporary: is anything being drawn?  Mapping the two frame buffer regions
+   costs too much, so sample a spread of words once a second and report when
+   the sum changes. */
+#define CO_FB_BASE  0x02000000
+#define CO_FB_SIZE  0x02000000
+#define CO_POOL_BASE 0x00A00000
+#define CO_POOL_SIZE 0x01600000
+#define CO_SAMPLES  64
 
-static uint64_t co_fb_writes;
-
-static void
-co_fb_note(uint32_t addr, uint32_t val, int width)
-{
-    if (co_fb_writes < 64)
-        pclog("CO: FB %08X <- %0*X (%d)\n", addr, width * 2, val, width);
-    else if ((co_fb_writes & 0xFFFF) == 0)
-        pclog("CO: FB writes %llu\n", (unsigned long long) co_fb_writes);
-
-    co_fb_writes++;
-}
-
-static uint8_t
-co_fb_read8(uint32_t addr, void *priv)
-{
-    return mem_readb_phys(addr);
-}
-
-static uint16_t
-co_fb_read16(uint32_t addr, void *priv)
-{
-    return mem_readw_phys(addr);
-}
+static uint32_t co_fb_sum, co_pool_sum;
 
 static uint32_t
-co_fb_read32(uint32_t addr, void *priv)
+co_sample(uint32_t base, uint32_t size)
 {
-    return mem_readl_phys(addr);
-}
+    uint32_t sum = 0;
+    uint32_t i;
 
-static void
-co_fb_write8(uint32_t addr, uint8_t val, void *priv)
-{
-    co_fb_note(addr, val, 1);
-    mem_writeb_phys(addr, val);
-}
+    for (i = 0; i < CO_SAMPLES; i++)
+        sum ^= mem_readl_phys(base + (i * (size / 4 / CO_SAMPLES)));
 
-static void
-co_fb_write16(uint32_t addr, uint16_t val, void *priv)
-{
-    co_fb_note(addr, val, 2);
-    mem_writew_phys(addr, val);
-}
-
-static void
-co_fb_write32(uint32_t addr, uint32_t val, void *priv)
-{
-    co_fb_note(addr, val, 4);
-    mem_writel_phys(addr, val);
+    return sum;
 }
 
 /* The display's vertical retrace reaches the driver as an interrupt on the
@@ -253,7 +218,24 @@ co_vblank_drop(void *priv)
 static void
 co_vblank(void *priv)
 {
-    co_t *dev = priv;
+    co_t     *dev = priv;
+    static unsigned frame;
+
+    /* Once a second, look at a spread of words in both frame buffer regions:
+       a change means somebody drew something. */
+    if ((++frame % 60) == 0) {
+        uint32_t f = co_sample(CO_FB_BASE, CO_FB_SIZE);
+        uint32_t p = co_sample(CO_POOL_BASE, CO_POOL_SIZE);
+
+        if (f != co_fb_sum) {
+            pclog("CO: FB changed %08X -> %08X\n", co_fb_sum, f);
+            co_fb_sum = f;
+        }
+        if (p != co_pool_sum) {
+            pclog("CO: POOL changed %08X -> %08X\n", co_pool_sum, p);
+            co_pool_sum = p;
+        }
+    }
 
     dev->gfx.interrupt_status |= 0x02;
     *(uint32_t *) &co_window[0x10018] = 0x40000000;
@@ -278,21 +260,6 @@ cobalt_gfx_init(co_t *dev)
                     NULL,
                     MEM_MAPPING_EXTERNAL,
                     dev);
-
-    if ((CO_FB_BASE + CO_FB_SIZE) <= mem_size) {
-        mem_mapping_add(&dev->fb_mapping,
-                        CO_FB_BASE,
-                        CO_FB_SIZE,
-                        co_fb_read8,
-                        co_fb_read16,
-                        co_fb_read32,
-                        co_fb_write8,
-                        co_fb_write16,
-                        co_fb_write32,
-                        NULL,
-                        MEM_MAPPING_EXTERNAL,
-                        dev);
-    }
 
     timer_add(&dev->vblank_timer, co_vblank, dev, 1);
     timer_add(&dev->vblank_low_timer, co_vblank_drop, dev, 1);
