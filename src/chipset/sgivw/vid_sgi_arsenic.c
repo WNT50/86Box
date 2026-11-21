@@ -202,6 +202,10 @@ arsenic_mmio_read32(uint32_t addr, void* priv)
    pixel height in FB_HEIGHT and then draws 1024x768 in 8 bpp, so this first
    cut of the output path copies that rectangle straight into 86Box's 32-bit
    frame buffer, one colour map entry per pixel. */
+/* Debug build: scan out the frame buffer the firmware set up, regardless of
+   what a driver writes into FB_CTRL later. */
+#define ARS_FORCE_FB_BASE 0x00A00000
+
 #define ARS_FB_WIDTH   1024
 #define ARS_FB_HEIGHT  768
 
@@ -330,7 +334,13 @@ arsenic_blit_frame(ars_t *dev)
     /* Bit fields as defined by the Linux visws frame buffer driver
        (FRM_CONTROL/FRM_SIZE_TILE/FRM_SIZE_PIXEL): the tile pointer is held
        in bits 31..9, so masking it off gives the physical address back. */
+#ifdef ARS_FORCE_FB_BASE
+    /* Debug: keep scanning the PROM's pool even after the driver moves
+       FB_CTRL, to see whether the boot video still draws there. */
+    base = ARS_FORCE_FB_BASE;
+#else
     base = fb & 0xfffffe00;
+#endif
 
     /* FRM_SIZE_TILE: width in 512-byte tiles, depth in bits 14..13. */
     tile   = dev->regs[VW_ARS_REG_FB_PARAMS];
