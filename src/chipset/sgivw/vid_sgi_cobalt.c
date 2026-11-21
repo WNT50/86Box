@@ -282,6 +282,23 @@ co_vblank(void *priv)
             pclog("CO: POOL changed %08X -> %08X\n", co_pool_sum, p);
             co_pool_sum = p;
         }
+
+        /* VGA text and graphics apertures: if NT 4 draws its setup screen the
+           ordinary way, it writes here and nowhere else. */
+        {
+            static uint32_t text_sum, gfx_sum;
+            uint32_t t = co_sample(0x000B8000, 0x00008000);
+            uint32_t g = co_sample(0x000A0000, 0x00010000);
+
+            if (t != text_sum) {
+                pclog("CO: TEXT changed %08X -> %08X\n", text_sum, t);
+                text_sum = t;
+            }
+            if (g != gfx_sum) {
+                pclog("CO: VGA changed %08X -> %08X\n", gfx_sum, g);
+                gfx_sum = g;
+            }
+        }
     }
 
     dev->gfx.interrupt_status |= 0x02;
