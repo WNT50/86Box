@@ -30,7 +30,23 @@ arsenic_log(const char *fmt, ...)
     }
 }
 #else
-#    define arsenic_log(fmt, ...)
+/* Temporary: the trace is capped so one firmware POST plus one NT 4 mode set
+   still fit in a log, and the mode the driver asks for stays visible. */
+#define ARS_TRACE_MAX 40000
+
+static void
+arsenic_log(const char *fmt, ...)
+{
+    static int lines;
+    va_list    ap;
+
+    if (lines++ >= ARS_TRACE_MAX)
+        return;
+
+    va_start(ap, fmt);
+    pclog_ex(fmt, ap);
+    va_end(ap);
+}
 #endif
 
 static uint32_t arsenic_mmio_decode_address(uint32_t addr);
