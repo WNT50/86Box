@@ -62,8 +62,12 @@ static int co_trace_writes, co_trace_reads;
    nothing to read. */
 #define CO_LMEM_BASE 0x60000000
 #define CO_LMEM_SIZE 0x02000000
+#define CO_LMEM_PHYS 0x00A00000         /* where the PROM puts the 32 MB pool */
 
-static uint8_t *co_lmem;
+/* The engine addresses the frame buffer through its own window; the same
+   bytes are ordinary system memory at the physical base the PROM wrote into
+   FB_CTRL, so the window is an alias rather than a second copy. */
+#define CO_LMEM(idx) (CO_LMEM_PHYS + (idx))
 
 /* The engine's aperture is not just registers: the driver builds command
    tables in it and reads them back.  Keep what is written so a read returns
@@ -131,10 +135,10 @@ cobalt_gfx_mmio_write32(uint32_t addr, uint32_t val, void* priv)
         if (off == 0x10020) {
             pclog("CO: KICK ring=%08X\n", val);
 
-            if ((val >= CO_LMEM_BASE) && (val < (CO_LMEM_BASE + CO_LMEM_SIZE)) && co_lmem) {
+            if ((val >= CO_LMEM_BASE) && (val < (CO_LMEM_BASE + CO_LMEM_SIZE))) {
                 for (int i = 0; i < 64; i++)
                     pclog("CO:   RING[%02X] = %08X\n", i,
-                          *(uint32_t *) &co_lmem[val - CO_LMEM_BASE + i * 4]);
+                          mem_readl_phys(CO_LMEM(val - CO_LMEM_BASE + i * 4)));
             } else if (val < (uint32_t) mem_size) {
                 for (int i = 0; i < 64; i++)
                     pclog("CO:   RING[%02X] = %08X\n", i, mem_readl_phys(val + i * 4));
@@ -217,40 +221,40 @@ cobalt_gfx_int_status_mmio_read32(uint32_t addr, void* priv)
 static uint8_t
 co_lmem_read8(uint32_t addr, void *priv)
 {
-    return co_lmem[addr - CO_LMEM_BASE];
+    return mem_readb_phys(CO_LMEM(addr - CO_LMEM_BASE));
 }
 
 static uint16_t
 co_lmem_read16(uint32_t addr, void *priv)
 {
-    return *(uint16_t *) &co_lmem[addr - CO_LMEM_BASE];
+    return mem_readw_phys(CO_LMEM(addr - CO_LMEM_BASE));
 }
 
 static uint32_t
 co_lmem_read32(uint32_t addr, void *priv)
 {
-    return *(uint32_t *) &co_lmem[addr - CO_LMEM_BASE];
+    return mem_readl_phys(CO_LMEM(addr - CO_LMEM_BASE));
 }
 
 static void
 co_lmem_write8(uint32_t addr, uint8_t val, void *priv)
 {
     co_trace_write("lw8", CO_LMEM_BASE, addr, val);
-    co_lmem[addr - CO_LMEM_BASE] = val;
+    mem_writeb_phys(CO_LMEM(addr - CO_LMEM_BASE), val);
 }
 
 static void
 co_lmem_write16(uint32_t addr, uint16_t val, void *priv)
 {
     co_trace_write("lw16", CO_LMEM_BASE, addr, val);
-    *(uint16_t *) &co_lmem[addr - CO_LMEM_BASE] = val;
+    mem_writew_phys(CO_LMEM(addr - CO_LMEM_BASE), val);
 }
 
 static void
 co_lmem_write32(uint32_t addr, uint32_t val, void *priv)
 {
     co_trace_write("lw32", CO_LMEM_BASE, addr, val);
-    *(uint32_t *) &co_lmem[addr - CO_LMEM_BASE] = val;
+    mem_writel_phys(CO_LMEM(addr - CO_LMEM_BASE), val);
 }
 
 void
@@ -269,10 +273,7 @@ cobalt_gfx_init(co_t *dev)
                     MEM_MAPPING_EXTERNAL,
                     dev);
 
-    if (co_lmem == NULL)
-        co_lmem = calloc(1, CO_LMEM_SIZE);
-
-    if (co_lmem != NULL) {
+    if ((CO_LMEM_PHYS + CO_LMEM_SIZE) <= mem_size) {
         mem_mapping_add(&dev->lmem_mapping,
                         CO_LMEM_BASE,
                         CO_LMEM_SIZE,
