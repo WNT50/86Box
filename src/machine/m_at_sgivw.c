@@ -86,9 +86,10 @@ machine_at_sgivw_common_init(const machine_t *model, int is_320)
     device_add(&st_flash_29f400t_device);
     {
         static const uint8_t sgivw_mac[6] = { 0x08, 0x00, 0x69, 0x12, 0x34, 0x56 };
-        /* No slot of its own: the firmware reads the window the controller
-           programs, and only does so when it sits in the Lithium B slot, so
-           the device is added without the on-board flag and takes that slot. */
+        /* No slot of its own: the firmware's inventory looks for the
+           controller at bus 0, device 0 only, and reports "Network: Not
+           Found" for the bus 1 slot the guide gives it, so the device is
+           added without the on-board flag and takes the Lithium B slot. */
         void *nic = device_add(&i82557_device);
 
         i8255x_set_bia(nic, sgivw_mac);
