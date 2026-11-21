@@ -112,8 +112,27 @@ cobalt_gfx_mmio_write32(uint32_t addr, uint32_t val, void* priv)
     cobalt_gfx_log("CO: GFX [W32] [%X] <-- %X\n", addr, val);
     co_trace_write("w32", 0xC8000000, addr, val);
 
-    if ((addr - 0xC8000000) < CO_WINDOW_SIZE)
-        *(uint32_t *) &co_window[addr - 0xC8000000] = val;
+    if ((addr - 0xC8000000) < CO_WINDOW_SIZE) {
+        uint32_t off = addr - 0xC8000000;
+
+        *(uint32_t *) &co_window[off] = val;
+
+        /* The driver starts the engine by pointing it at a command ring.  Show
+           what the ring looks like from the guest's side, and claim the work
+           finished so the driver moves on to the next stage. */
+        if (off == 0x10020) {
+            pclog("CO: KICK ring=%08X\n", val);
+
+            if (val < (uint32_t) mem_size) {
+                for (int i = 0; i < 64; i++)
+                    pclog("CO:   RING[%02X] = %08X\n", i, mem_readl_phys(val + i * 4));
+            } else {
+                pclog("CO: KICK ring outside RAM\n");
+            }
+
+            co_window[0x1001C] = 0x01;
+        }
+    }
 }
 
 static uint8_t
@@ -146,6 +165,9 @@ cobalt_gfx_mmio_read32(uint32_t addr, void* priv)
     uint32_t ret;
 
     ret = ((addr - 0xC8000000) < CO_WINDOW_SIZE) ? *(uint32_t *) &co_window[addr - 0xC8000000] : 0;
+
+    if ((addr - 0xC8000000) == 0x1001C)
+        ret |= 0x01;
 
     cobalt_gfx_log("CO: GFX [R32] [%X] --> %X\n", addr, ret);
     co_trace_read("r32", 0xC8000000, addr, ret);
