@@ -80,17 +80,20 @@ machine_at_sgivw_common_init(const machine_t *model, int is_320)
     /* Lithium B bus #0 */
     pci_register_bus_slot(0, 0x04, PCI_CARD_SOUTHBRIDGE, 0, 0, 0, 0); /* PIIX4E */
 
+    /* Lithium A bus #1 */
+    pci_register_bus_slot(1, 0x03, PCI_CARD_NETWORK, 3, 6, 5, 6); /* On-board 82557 */
+
     device_add(&piix4e_device);
     device_add(&pc87307_device);
     device_add(&cobalt_chipset_device);
     device_add(&st_flash_29f400t_device);
     {
         static const uint8_t sgivw_mac[6] = { 0x08, 0x00, 0x69, 0x12, 0x34, 0x56 };
-        /* No slot of its own: the firmware's inventory looks for the
-           controller at bus 0, device 0 only, and reports "Network: Not
-           Found" for the bus 1 slot the guide gives it, so the device is
-           added without the on-board flag and takes the Lithium B slot. */
-        void *nic = device_add(&i82557_device);
+        /* The on-board variant, not i82557_device with the flag ORed in:
+           that one carries 0xff to say "take the model from the BIOS
+           configuration", and 0xff | 0x0100 leaves the variant index at
+           0xff, which reads back 8086:0000 instead of 8086:1229. */
+        void *nic = device_add(&i82557b_onboard_device);
 
         i8255x_set_bia(nic, sgivw_mac);
     }
@@ -123,6 +126,10 @@ machine_at_sgivw_pci_apic_routes(int busb_slots)
             pci_apic_set_intin_route(1, slot, pin,
                                      5 + ((slot + (pin - 1)) % 2));
     }
+
+    /* The on-board 82557 sits at device 3, past the two slots, and takes
+       the next input after them (CO_APIC_PCIA_BASE0 + 3). */
+    pci_apic_set_intin_route(1, 3, 0, 3);
 }
 
 int
