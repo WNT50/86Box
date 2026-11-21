@@ -111,6 +111,7 @@ typedef struct co_t
     mem_mapping_t mem_mapping;
     mem_mapping_t gfx_mapping;
     mem_mapping_t gfx_mapping_interrupt_status;
+    mem_mapping_t fb_mapping;
     pc_timer_t    vblank_timer;
     pc_timer_t    vblank_low_timer;
     struct {

@@ -182,6 +182,64 @@ cobalt_gfx_int_status_mmio_read32(uint32_t addr, void* priv)
     return ret;
 }
 
+/* Temporary: does anything write the frame buffer at all?  The driver may draw
+   through the engine, which we do not have, or straight into the pooled
+   memory; counting the traffic tells the two apart. */
+#define CO_FB_BASE 0x02000000
+#define CO_FB_SIZE 0x02000000
+
+static uint64_t co_fb_writes;
+
+static void
+co_fb_note(uint32_t addr, uint32_t val, int width)
+{
+    if (co_fb_writes < 64)
+        pclog("CO: FB %08X <- %0*X (%d)\n", addr, width * 2, val, width);
+    else if ((co_fb_writes & 0xFFFF) == 0)
+        pclog("CO: FB writes %llu\n", (unsigned long long) co_fb_writes);
+
+    co_fb_writes++;
+}
+
+static uint8_t
+co_fb_read8(uint32_t addr, void *priv)
+{
+    return mem_readb_phys(addr);
+}
+
+static uint16_t
+co_fb_read16(uint32_t addr, void *priv)
+{
+    return mem_readw_phys(addr);
+}
+
+static uint32_t
+co_fb_read32(uint32_t addr, void *priv)
+{
+    return mem_readl_phys(addr);
+}
+
+static void
+co_fb_write8(uint32_t addr, uint8_t val, void *priv)
+{
+    co_fb_note(addr, val, 1);
+    mem_writeb_phys(addr, val);
+}
+
+static void
+co_fb_write16(uint32_t addr, uint16_t val, void *priv)
+{
+    co_fb_note(addr, val, 2);
+    mem_writew_phys(addr, val);
+}
+
+static void
+co_fb_write32(uint32_t addr, uint32_t val, void *priv)
+{
+    co_fb_note(addr, val, 4);
+    mem_writel_phys(addr, val);
+}
+
 /* The display's vertical retrace reaches the driver as an interrupt on the
    APIC's AS input (CO_APIC_AS).  The driver connects it in SGCOMP's start
    routine and uses it to pace its event loop, so without it the engine
@@ -220,6 +278,21 @@ cobalt_gfx_init(co_t *dev)
                     NULL,
                     MEM_MAPPING_EXTERNAL,
                     dev);
+
+    if ((CO_FB_BASE + CO_FB_SIZE) <= mem_size) {
+        mem_mapping_add(&dev->fb_mapping,
+                        CO_FB_BASE,
+                        CO_FB_SIZE,
+                        co_fb_read8,
+                        co_fb_read16,
+                        co_fb_read32,
+                        co_fb_write8,
+                        co_fb_write16,
+                        co_fb_write32,
+                        NULL,
+                        MEM_MAPPING_EXTERNAL,
+                        dev);
+    }
 
     timer_add(&dev->vblank_timer, co_vblank, dev, 1);
     timer_add(&dev->vblank_low_timer, co_vblank_drop, dev, 1);
