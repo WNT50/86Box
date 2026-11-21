@@ -80,15 +80,15 @@ machine_at_sgivw_common_init(const machine_t *model, int is_320)
     /* Lithium B bus #0 */
     pci_register_bus_slot(0, 0x04, PCI_CARD_SOUTHBRIDGE, 0, 0, 0, 0); /* PIIX4E */
 
-    /* Lithium A bus #1 */
-    pci_register_bus_slot(1, 0x03, PCI_CARD_NETWORK, 3, 6, 5, 6); /* On-board 82557 */
-
     device_add(&piix4e_device);
     device_add(&pc87307_device);
     device_add(&cobalt_chipset_device);
     device_add(&st_flash_29f400t_device);
     {
         static const uint8_t sgivw_mac[6] = { 0x08, 0x00, 0x69, 0x12, 0x34, 0x56 };
+        /* No slot of its own: the firmware reads the window the controller
+           programs, and only does so when it sits in the Lithium B slot, so
+           the device is added without the on-board flag and takes that slot. */
         void *nic = device_add(&i82557_device);
 
         i8255x_set_bia(nic, sgivw_mac);
@@ -132,11 +132,11 @@ machine_at_sgivw320_init(const machine_t *model)
     if (bios_only || !ret)
         return ret;
 
-    /* Lithium B bus #0 */
+    /* Lithium B bus #0: one half-length 32-bit slot. */
     pci_register_bus_slot(0, 0x00, PCI_CARD_NORMAL, 1, 2, 3, 4);
     machine_at_sgivw_pci_apic_routes(1);
 
-    /* Lithium A bus #1 */
+    /* Lithium A bus #1: two full-length 64-bit slots. */
     pci_register_bus_slot(1, 0x00, PCI_CARD_NORMAL, 4, 1, 2, 3);
     pci_register_bus_slot(1, 0x01, PCI_CARD_NORMAL, 3, 4, 1, 2);
 
@@ -151,17 +151,17 @@ machine_at_sgivw540_init(const machine_t *model)
     if (bios_only || !ret)
         return ret;
 
-    /* Lithium B bus #0 */
+    /* Lithium B bus #0: four 64-bit slots. */
     pci_register_bus_slot(0, 0x00, PCI_CARD_NORMAL, 1, 2, 3, 4);
     pci_register_bus_slot(0, 0x01, PCI_CARD_NORMAL, 4, 1, 2, 3);
     pci_register_bus_slot(0, 0x02, PCI_CARD_NORMAL, 3, 4, 1, 2);
     pci_register_bus_slot(0, 0x03, PCI_CARD_NORMAL, 2, 3, 4, 1);
     machine_at_sgivw_pci_apic_routes(4);
 
-    /* Lithium A bus #1 */
+    /* Lithium A bus #1: two 64-bit slots.  The on-board Ultra2 SCSI the
+       guide lists beside them (slot 6) has no controller here. */
     pci_register_bus_slot(1, 0x00, PCI_CARD_NORMAL, 4, 1, 2, 3);
     pci_register_bus_slot(1, 0x01, PCI_CARD_NORMAL, 3, 4, 1, 2);
-    pci_register_bus_slot(1, 0x02, PCI_CARD_SCSI, 2, 3, 4, 1);
 
     return ret;
 }
