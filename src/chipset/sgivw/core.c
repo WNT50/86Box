@@ -30,7 +30,7 @@
 #include <86box/ioapic_routes.h>
 
 #include <86box/sgivw/sgi_cobalt.h>
-#include <86box/sgivw/lithium.h>
+#include <86box/sgivw/sgi_lithium.h>
 
 extern const device_t arsenic_device;
 
