@@ -57,18 +57,6 @@ cobalt_gfx_log(const char *fmt, ...)
 
 static int co_trace_writes, co_trace_reads;
 
-/* The engine keeps its command ring in its own memory, which the driver maps
-   at 0x60000000.  Without it the ring address means nothing and the kick has
-   nothing to read. */
-#define CO_LMEM_BASE 0x60000000
-#define CO_LMEM_SIZE 0x02000000
-#define CO_LMEM_PHYS 0x00A00000         /* where the PROM puts the 32 MB pool */
-
-/* The engine addresses the frame buffer through its own window; the same
-   bytes are ordinary system memory at the physical base the PROM wrote into
-   FB_CTRL, so the window is an alias rather than a second copy. */
-#define CO_LMEM(idx) (CO_LMEM_PHYS + (idx))
-
 /* The engine's aperture is not just registers: the driver builds command
    tables in it and reads them back.  Keep what is written so a read returns
    the driver's own data instead of zeroes. */
@@ -83,7 +71,7 @@ co_trace_write(const char *what, uint32_t base, uint32_t addr, uint32_t val)
         return;
 
     pclog("CO%c+%06X <- %08X  (%s pc=%08X)\n",
-          (base == VW_CO_GFX_INT_STATUS_IO_BASE) ? 'I' : ((base == 0x60000000) ? 'L' : 'G'),
+          (base == VW_CO_GFX_INT_STATUS_IO_BASE) ? 'I' : 'G',
           addr - base, val, what, (uint32_t) cpu_state.pc);
 }
 
@@ -94,7 +82,7 @@ co_trace_read(const char *what, uint32_t base, uint32_t addr, uint32_t val)
         return;
 
     pclog("CO%c+%06X -> %08X  (%s pc=%08X)\n",
-          (base == VW_CO_GFX_INT_STATUS_IO_BASE) ? 'I' : ((base == 0x60000000) ? 'L' : 'G'),
+          (base == VW_CO_GFX_INT_STATUS_IO_BASE) ? 'I' : 'G',
           addr - base, val, what, (uint32_t) cpu_state.pc);
 }
 
@@ -124,31 +112,8 @@ cobalt_gfx_mmio_write32(uint32_t addr, uint32_t val, void* priv)
     cobalt_gfx_log("CO: GFX [W32] [%X] <-- %X\n", addr, val);
     co_trace_write("w32", 0xC8000000, addr, val);
 
-    if ((addr - 0xC8000000) < CO_WINDOW_SIZE) {
-        uint32_t off = addr - 0xC8000000;
-
-        *(uint32_t *) &co_window[off] = val;
-
-        /* The driver starts the engine by pointing it at a command ring.  Show
-           what the ring looks like from the guest's side, and claim the work
-           finished so the driver moves on to the next stage. */
-        if (off == 0x10020) {
-            pclog("CO: KICK ring=%08X\n", val);
-
-            if ((val >= CO_LMEM_BASE) && (val < (CO_LMEM_BASE + CO_LMEM_SIZE))) {
-                for (int i = 0; i < 64; i++)
-                    pclog("CO:   RING[%02X] = %08X\n", i,
-                          mem_readl_phys(CO_LMEM(val - CO_LMEM_BASE + i * 4)));
-            } else if (val < (uint32_t) mem_size) {
-                for (int i = 0; i < 64; i++)
-                    pclog("CO:   RING[%02X] = %08X\n", i, mem_readl_phys(val + i * 4));
-            } else {
-                pclog("CO: KICK ring outside RAM\n");
-            }
-
-            co_window[0x1001C] = 0x01;
-        }
-    }
+    if ((addr - 0xC8000000) < CO_WINDOW_SIZE)
+        *(uint32_t *) &co_window[addr - 0xC8000000] = val;
 }
 
 static uint8_t
@@ -181,9 +146,6 @@ cobalt_gfx_mmio_read32(uint32_t addr, void* priv)
     uint32_t ret;
 
     ret = ((addr - 0xC8000000) < CO_WINDOW_SIZE) ? *(uint32_t *) &co_window[addr - 0xC8000000] : 0;
-
-    if ((addr - 0xC8000000) == 0x1001C)
-        ret |= 0x01;
 
     cobalt_gfx_log("CO: GFX [R32] [%X] --> %X\n", addr, ret);
     co_trace_read("r32", 0xC8000000, addr, ret);
@@ -218,45 +180,6 @@ cobalt_gfx_int_status_mmio_read32(uint32_t addr, void* priv)
     cobalt_gfx_log("CO: GFX [R32] [%X] --> %X\n", addr, ret);
     co_trace_read("ri32", VW_CO_GFX_INT_STATUS_IO_BASE, addr, ret);
     return ret;
-}
-
-static uint8_t
-co_lmem_read8(uint32_t addr, void *priv)
-{
-    return mem_readb_phys(CO_LMEM(addr - CO_LMEM_BASE));
-}
-
-static uint16_t
-co_lmem_read16(uint32_t addr, void *priv)
-{
-    return mem_readw_phys(CO_LMEM(addr - CO_LMEM_BASE));
-}
-
-static uint32_t
-co_lmem_read32(uint32_t addr, void *priv)
-{
-    return mem_readl_phys(CO_LMEM(addr - CO_LMEM_BASE));
-}
-
-static void
-co_lmem_write8(uint32_t addr, uint8_t val, void *priv)
-{
-    co_trace_write("lw8", CO_LMEM_BASE, addr, val);
-    mem_writeb_phys(CO_LMEM(addr - CO_LMEM_BASE), val);
-}
-
-static void
-co_lmem_write16(uint32_t addr, uint16_t val, void *priv)
-{
-    co_trace_write("lw16", CO_LMEM_BASE, addr, val);
-    mem_writew_phys(CO_LMEM(addr - CO_LMEM_BASE), val);
-}
-
-static void
-co_lmem_write32(uint32_t addr, uint32_t val, void *priv)
-{
-    co_trace_write("lw32", CO_LMEM_BASE, addr, val);
-    mem_writel_phys(CO_LMEM(addr - CO_LMEM_BASE), val);
 }
 
 /* The display's vertical retrace reaches the driver as an interrupt on the
@@ -297,21 +220,6 @@ cobalt_gfx_init(co_t *dev)
                     NULL,
                     MEM_MAPPING_EXTERNAL,
                     dev);
-
-    if ((CO_LMEM_PHYS + CO_LMEM_SIZE) <= mem_size) {
-        mem_mapping_add(&dev->lmem_mapping,
-                        CO_LMEM_BASE,
-                        CO_LMEM_SIZE,
-                        co_lmem_read8,
-                        co_lmem_read16,
-                        co_lmem_read32,
-                        co_lmem_write8,
-                        co_lmem_write16,
-                        co_lmem_write32,
-                        NULL,
-                        MEM_MAPPING_EXTERNAL,
-                        dev);
-    }
 
     timer_add(&dev->vblank_timer, co_vblank, dev, 1);
     timer_add(&dev->vblank_low_timer, co_vblank_drop, dev, 1);
