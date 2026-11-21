@@ -181,11 +181,11 @@ arsenic_mmio_read32(uint32_t addr, void* priv)
         }
 
         case VW_ARS_REG_COLOR_MAP_FIFO_STATUS:
-            /* Free room in the colour map FIFO.  A handler writes an entry
-               only once this reads non-zero (Linux sgivwfb's cmap write is
-               a `while (cmap_fifo == 0)' on it), so a constant zero is a
-               FIFO that never drains. */
-            ret = 0x00000010;
+            /* Free room in the colour map FIFO.  Linux waits for non-zero,
+               but SGCOMP spins until `(value & 0x3F) == 0' or `value >= 0x30'
+               (see its palette loader at 0x1C3CB), so 0x40 satisfies every
+               reader: the FIFO is empty and has room for a full palette. */
+            ret = 0x00000040;
             break;
 
         default:
