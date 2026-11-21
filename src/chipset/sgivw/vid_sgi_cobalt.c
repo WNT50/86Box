@@ -192,7 +192,9 @@ cobalt_gfx_int_status_mmio_read32(uint32_t addr, void* priv)
 
 /* Temporary: is anything being drawn?  Mapping the two frame buffer regions
    costs too much, so sample a spread of words once a second and report when
-   the sum changes. */
+   the sum changes.  The span passed in is the window that matters (text and
+   the top of a desktop live at the start of the buffer), not the whole
+   region. */
 #define CO_FB_BASE  0x02000000
 #define CO_FB_SIZE  0x02000000
 #define CO_POOL_BASE 0x00A00000
@@ -202,13 +204,13 @@ cobalt_gfx_int_status_mmio_read32(uint32_t addr, void* priv)
 static uint32_t co_fb_sum, co_pool_sum;
 
 static uint32_t
-co_sample(uint32_t base, uint32_t size)
+co_sample(uint32_t base, uint32_t span)
 {
     uint32_t sum = 0;
     uint32_t i;
 
     for (i = 0; i < CO_SAMPLES; i++)
-        sum ^= mem_readl_phys(base + (i * (size / 4 / CO_SAMPLES)));
+        sum ^= mem_readl_phys(base + (i * (span / 4 / CO_SAMPLES)));
 
     return sum;
 }
@@ -271,8 +273,8 @@ co_vblank(void *priv)
     /* Once a second, look at a spread of words in both frame buffer regions:
        a change means somebody drew something. */
     if ((++frame % 60) == 0) {
-        uint32_t f = co_sample(CO_FB_BASE, CO_FB_SIZE);
-        uint32_t p = co_sample(CO_POOL_BASE, CO_POOL_SIZE);
+        uint32_t f = co_sample(CO_FB_BASE, 0x10000);
+        uint32_t p = co_sample(CO_POOL_BASE, 0x10000);
 
         if (f != co_fb_sum) {
             pclog("CO: FB changed %08X -> %08X\n", co_fb_sum, f);
@@ -287,8 +289,8 @@ co_vblank(void *priv)
            ordinary way, it writes here and nowhere else. */
         {
             static uint32_t text_sum, gfx_sum;
-            uint32_t t = co_sample(0x000B8000, 0x00008000);
-            uint32_t g = co_sample(0x000A0000, 0x00010000);
+            uint32_t t = co_sample(0x000B8000, 0x00001000);
+            uint32_t g = co_sample(0x000A0000, 0x00004000);
 
             if (t != text_sum) {
                 pclog("CO: TEXT changed %08X -> %08X\n", text_sum, t);

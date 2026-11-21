@@ -202,10 +202,6 @@ arsenic_mmio_read32(uint32_t addr, void* priv)
    pixel height in FB_HEIGHT and then draws 1024x768 in 8 bpp, so this first
    cut of the output path copies that rectangle straight into 86Box's 32-bit
    frame buffer, one colour map entry per pixel. */
-/* Debug build: scan out the frame buffer the firmware set up, regardless of
-   what a driver writes into FB_CTRL later. */
-#define ARS_FORCE_FB_BASE 0x00A00000
-
 #define ARS_FB_WIDTH   1024
 #define ARS_FB_HEIGHT  768
 
@@ -334,13 +330,7 @@ arsenic_blit_frame(ars_t *dev)
     /* Bit fields as defined by the Linux visws frame buffer driver
        (FRM_CONTROL/FRM_SIZE_TILE/FRM_SIZE_PIXEL): the tile pointer is held
        in bits 31..9, so masking it off gives the physical address back. */
-#ifdef ARS_FORCE_FB_BASE
-    /* Debug: keep scanning the PROM's pool even after the driver moves
-       FB_CTRL, to see whether the boot video still draws there. */
-    base = ARS_FORCE_FB_BASE;
-#else
     base = fb & 0xfffffe00;
-#endif
 
     /* FRM_SIZE_TILE: width in 512-byte tiles, depth in bits 14..13. */
     tile   = dev->regs[VW_ARS_REG_FB_PARAMS];
@@ -372,6 +362,24 @@ arsenic_blit_frame(ars_t *dev)
         width = buffer32->w;
     if (height > buffer32->h)
         height = buffer32->h;
+
+    /* Temporary: say which frame buffer the display is actually reading, so
+       the PROM's base and the driver's base can be told apart in one run. */
+    {
+        static uint32_t last_fb, last_base;
+        static int      last_bpp, last_w, last_h;
+
+        if ((fb != last_fb) || (base != last_base) || (dev->fb_bpp != last_bpp) ||
+            (width != last_w) || (height != last_h)) {
+            pclog("ARS: BLIT base=%08X fb=%08X bpp=%d w=%d h=%d stride=%d\n",
+                  base, fb, dev->fb_bpp, width, height, dev->fb_stride);
+            last_fb   = fb;
+            last_base = base;
+            last_bpp  = dev->fb_bpp;
+            last_w    = width;
+            last_h    = height;
+        }
+    }
 
     /* Only the parts of the frame buffer that actually changed are converted.
        The frame buffer is plain system memory, so it has no write handlers of
