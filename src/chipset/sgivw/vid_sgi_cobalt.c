@@ -57,43 +57,63 @@ cobalt_gfx_log(const char *fmt, ...)
 
 static int co_trace_writes, co_trace_reads;
 
+/* The engine's aperture is not just registers: the driver builds command
+   tables in it and reads them back.  Keep what is written so a read returns
+   the driver's own data instead of zeroes. */
+#define CO_WINDOW_SIZE 0x20000
+
+static uint8_t co_window[CO_WINDOW_SIZE];
+
 static void
-co_trace_write(const char *what, uint32_t addr, uint32_t val)
+co_trace_write(const char *what, uint32_t base, uint32_t addr, uint32_t val)
 {
     if (co_trace_writes++ >= CO_TRACE_WRITES)
         return;
 
-    pclog("CO+%06X <- %08X  (%s)\n", addr - 0xC8000000, val, what);
+    pclog("CO%c+%06X <- %08X  (%s pc=%08X)\n",
+          (base == VW_CO_GFX_INT_STATUS_IO_BASE) ? 'I' : 'G',
+          addr - base, val, what, (uint32_t) cpu_state.pc);
 }
 
 static void
-co_trace_read(const char *what, uint32_t addr, uint32_t val)
+co_trace_read(const char *what, uint32_t base, uint32_t addr, uint32_t val)
 {
     if (co_trace_reads++ >= CO_TRACE_READS)
         return;
 
-    pclog("CO+%06X -> %08X  (%s)\n", addr - 0xC8000000, val, what);
+    pclog("CO%c+%06X -> %08X  (%s pc=%08X)\n",
+          (base == VW_CO_GFX_INT_STATUS_IO_BASE) ? 'I' : 'G',
+          addr - base, val, what, (uint32_t) cpu_state.pc);
 }
 
 static void
 cobalt_gfx_mmio_write8(uint32_t addr, uint8_t val, void* priv)
 {
     cobalt_gfx_log("CO: GFX [W08] [%X] <-- %X\n", addr, val);
-    co_trace_write("w8", addr, val);
+    co_trace_write("w8", 0xC8000000, addr, val);
+
+    if ((addr - 0xC8000000) < CO_WINDOW_SIZE)
+        co_window[addr - 0xC8000000] = val;
 }
 
 static void
 cobalt_gfx_mmio_write16(uint32_t addr, uint16_t val, void* priv)
 {
     cobalt_gfx_log("CO: GFX [W16] [%X] <-- %X\n", addr, val);
-    co_trace_write("w16", addr, val);
+    co_trace_write("w16", 0xC8000000, addr, val);
+
+    if ((addr - 0xC8000000) < CO_WINDOW_SIZE)
+        *(uint16_t *) &co_window[addr - 0xC8000000] = val;
 }
 
 static void
 cobalt_gfx_mmio_write32(uint32_t addr, uint32_t val, void* priv)
 {
     cobalt_gfx_log("CO: GFX [W32] [%X] <-- %X\n", addr, val);
-    co_trace_write("w32", addr, val);
+    co_trace_write("w32", 0xC8000000, addr, val);
+
+    if ((addr - 0xC8000000) < CO_WINDOW_SIZE)
+        *(uint32_t *) &co_window[addr - 0xC8000000] = val;
 }
 
 static uint8_t
@@ -101,10 +121,10 @@ cobalt_gfx_mmio_read8(uint32_t addr, void* priv)
 {
     uint8_t ret;
 
-    ret = 0;
+    ret = ((addr - 0xC8000000) < CO_WINDOW_SIZE) ? co_window[addr - 0xC8000000] : 0;
 
     cobalt_gfx_log("CO: GFX [R8] [%X] --> %X\n", addr, ret);
-    co_trace_read("r8", addr, ret);
+    co_trace_read("r8", 0xC8000000, addr, ret);
     return ret;
 }
 
@@ -113,10 +133,10 @@ cobalt_gfx_mmio_read16(uint32_t addr, void* priv)
 {
     uint16_t ret;
 
-    ret = 0;
+    ret = ((addr - 0xC8000000) < CO_WINDOW_SIZE) ? *(uint16_t *) &co_window[addr - 0xC8000000] : 0;
 
     cobalt_gfx_log("CO: GFX [R16] [%X] --> %X\n", addr, ret);
-    co_trace_read("r16", addr, ret);
+    co_trace_read("r16", 0xC8000000, addr, ret);
     return ret;
 }
 
@@ -125,10 +145,10 @@ cobalt_gfx_mmio_read32(uint32_t addr, void* priv)
 {
     uint32_t ret;
 
-    ret = 0;
+    ret = ((addr - 0xC8000000) < CO_WINDOW_SIZE) ? *(uint32_t *) &co_window[addr - 0xC8000000] : 0;
 
     cobalt_gfx_log("CO: GFX [R32] [%X] --> %X\n", addr, ret);
-    co_trace_read("r32", addr, ret);
+    co_trace_read("r32", 0xC8000000, addr, ret);
     return ret;
 }
 
@@ -140,6 +160,7 @@ cobalt_gfx_int_status_mmio_write32(uint32_t addr, uint32_t val, void* priv)
     assert((addr & 0x3) == 0);
 
     cobalt_gfx_log("CO: GFX [W32] [%X] <-- %X\n", addr, val);
+    co_trace_write("wi32", VW_CO_GFX_INT_STATUS_IO_BASE, addr, val);
 
     dev->gfx.interrupt_status = val & 0x0000000F;
 }
@@ -155,6 +176,7 @@ cobalt_gfx_int_status_mmio_read32(uint32_t addr, void* priv)
     ret = dev->gfx.interrupt_status;
 
     cobalt_gfx_log("CO: GFX [R32] [%X] --> %X\n", addr, ret);
+    co_trace_read("ri32", VW_CO_GFX_INT_STATUS_IO_BASE, addr, ret);
     return ret;
 }
 
