@@ -126,7 +126,7 @@ add_library(chipset OBJECT
     sgivw/sgi_cobalt_cpu.c
     sgivw/vid_sgi_cobalt.c
     sgivw/sgi_cobalt_mem.c
-    sgivw/core.c
+    sgivw/sgi_cobalt_core.c
     sgivw/sgi_lithium.c
     sgivw/sgi_lithium_1394.c
     sgivw/sgi_lithium_dma.c
