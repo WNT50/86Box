@@ -38,7 +38,6 @@ static uint8_t
 arsenic_mmio_read8(uint32_t addr, void* priv)
 {
     const ars_t *dev   = priv;
-    uint32_t     off   = addr & VW_ARS_IO_DECODE_MASK;
     uint32_t     idx   = arsenic_mmio_decode_address(addr);
     uint8_t      ret   = (uint8_t) (dev->regs[idx] >> ((addr & 3) * 8));
 
@@ -46,7 +45,7 @@ arsenic_mmio_read8(uint32_t addr, void* priv)
      * The Linux dbe driver states that all I/O access for Arsenic must be 32-bit size.
      * However, the PROM attempts a byte access to 0x10003, 0x30008, 0x20004, and 0x40002.
      */
-    arsenic_log("ARS: [R08] [%X] --> %X\n", off, ret);
+    arsenic_log("ARS: [R08] [%X] --> %X\n", addr & VW_ARS_IO_DECODE_MASK, ret);
 
     return ret;
 }
