@@ -6,7 +6,7 @@
  *
  *          This file is part of the 86Box distribution.
  *
- *          Hardware definitions for the Arsenic Display ASIC device.
+ *          Register and private definitions for the Arsenic Display ASIC.
  *
  * Authors: Jeffrey Newquist, <newquist@engr.sgi.som>
  *          Dmitry Borisov, <di.sean@protonmail.com>
@@ -15,6 +15,29 @@
  *          Copyright 2024 Dmitry Borisov
  */
 #pragma once
+
+#include <stdarg.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <wchar.h>
+#include <assert.h>
+#define HAVE_STDARG_H
+#include <86box/86box.h>
+#include "cpu.h"
+#include <86box/machine.h>
+#include <86box/device.h>
+#include <86box/io.h>
+#include <86box/mem.h>
+#include <86box/pci.h>
+#include <86box/rom.h>
+#include <86box/timer.h>
+#include <86box/plat.h>
+#include <86box/thread.h>
+#include <86box/video.h>
+#include <86box/i2c.h>
+#include <86box/vid_ddc.h>
 
 #define VW_ARS_IO_BASE                0xD0000000
 #define VW_ARS_IO_SIZE                0x01000000
@@ -92,3 +115,27 @@
 
 #define VW_ARS_I2C_SDA_LOW     0x01
 #define VW_ARS_I2C_SCL_LOW     0x02
+
+typedef struct ars_t
+{
+    uint32_t regs[VW_ARS_IO_DECODE_MAX + sizeof(uint32_t)];
+    pc_timer_t   retrace_timer;
+    pc_timer_t   blit_timer;
+    int          fb_stride;
+    int          fb_bpp;
+    int          fb_cmode;
+    int          cursor_x;
+    int          cursor_y;
+    int          cursor_on;
+    uint8_t     *fb_shadow;
+    uint32_t     fb_shadow_size;
+    int          fb_valid;
+    mem_mapping_t mmio_mapping;
+    mem_mapping_t mmio_alt_mapping;
+    void *crt_i2c;
+    void *lcd_i2c;
+    void *ddc;
+} ars_t;
+
+void
+arsenic_reset_hard(ars_t *dev);

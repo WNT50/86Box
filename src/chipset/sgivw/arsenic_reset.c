@@ -12,7 +12,7 @@
  *
  *          Copyright 2024 Dmitry Borisov
  */
-#include <86box/sgivw/arsenic_priv.h>
+#include <86box/sgivw/vid_sgi_arsenic.h>
 
 static const uint32_t ars_default_mode_regs[VW_ARS_MODE_REGS_SIZE] = {
     0x0000FFFD, 0x00001040, 0x000036FD, 0x00000000, 0x000077DF, 0x00001000, 0x00007F56, 0x00000000,
