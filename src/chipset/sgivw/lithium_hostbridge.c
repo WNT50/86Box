@@ -173,9 +173,9 @@ lithium_pci_mmio_write8(uint32_t addr, uint8_t val, void* priv)
 static void
 lithium_pci_mmio_write16(uint32_t addr, uint16_t val, void* priv)
 {
+#ifdef ENABLE_LITHIUM_PCI_LOG
     li_bridge_t *dev = priv;
 
-#ifdef ENABLE_LITHIUM_PCI_LOG
     if (!li_pci_log_write_size) {
         li_pci_log_write_size = sizeof(val);
         lithium_pci_log("LI: PCI #%u [W16] [%X] <-- %X\n", dev->bus_number, addr, val);
@@ -256,10 +256,11 @@ lithium_pci_mmio_read8(uint32_t addr, void* priv)
 static uint16_t
 lithium_pci_mmio_read16(uint32_t addr, void* priv)
 {
-    li_bridge_t *dev = priv;
     uint16_t ret;
 
 #ifdef ENABLE_LITHIUM_PCI_LOG
+    li_bridge_t *dev = priv;
+
     if (!li_pci_log_read_size)
         li_pci_log_read_size = sizeof(ret);
 #endif
@@ -280,19 +281,19 @@ lithium_pci_mmio_read16(uint32_t addr, void* priv)
 static uint32_t
 lithium_pci_mmio_read32(uint32_t addr, void* priv)
 {
-    li_bridge_t *dev = priv;
     uint32_t ret;
 
 #ifdef ENABLE_LITHIUM_PCI_LOG
+    li_bridge_t *dev = priv;
+
     li_pci_log_read_size = sizeof(ret);
 #endif
 
     ret = lithium_pci_mmio_read16(addr, priv);
     ret |= ((uint32_t)lithium_pci_mmio_read16(addr + 2, priv)) << 16;
 
-    lithium_pci_log("LI: PCI #%u [R32] [%X] --> %X\n", dev->bus_number, addr, ret);
-
 #ifdef ENABLE_LITHIUM_PCI_LOG
+    lithium_pci_log("LI: PCI #%u [R32] [%X] --> %X\n", dev->bus_number, addr, ret);
     li_pci_log_read_size = 0;
 #endif
 
