@@ -107,6 +107,7 @@ typedef struct co_t
     mem_mapping_t mem_mapping;
     mem_mapping_t gfx_mapping;
     mem_mapping_t gfx_mapping_interrupt_status;
+    mem_mapping_t lmem_mapping;
     struct {
         uint32_t regs[VW_CO_CPU_REGS_SIZE / sizeof(uint32_t)];
         uint64_t last_timer_tsc;

@@ -52,10 +52,18 @@ cobalt_gfx_log(const char *fmt, ...)
 /* Temporary trace for the Cobalt command protocol: the driver's writes and
    reads are the only description of the engine we have.  The counters keep a
    long install run from filling the disk. */
-#define CO_TRACE_WRITES 6000
+#define CO_TRACE_WRITES 20000
 #define CO_TRACE_READS  2000
 
 static int co_trace_writes, co_trace_reads;
+
+/* The engine keeps its command ring in its own memory, which the driver maps
+   at 0x60000000.  Without it the ring address means nothing and the kick has
+   nothing to read. */
+#define CO_LMEM_BASE 0x60000000
+#define CO_LMEM_SIZE 0x02000000
+
+static uint8_t *co_lmem;
 
 /* The engine's aperture is not just registers: the driver builds command
    tables in it and reads them back.  Keep what is written so a read returns
@@ -71,7 +79,7 @@ co_trace_write(const char *what, uint32_t base, uint32_t addr, uint32_t val)
         return;
 
     pclog("CO%c+%06X <- %08X  (%s pc=%08X)\n",
-          (base == VW_CO_GFX_INT_STATUS_IO_BASE) ? 'I' : 'G',
+          (base == VW_CO_GFX_INT_STATUS_IO_BASE) ? 'I' : ((base == 0x60000000) ? 'L' : 'G'),
           addr - base, val, what, (uint32_t) cpu_state.pc);
 }
 
@@ -82,7 +90,7 @@ co_trace_read(const char *what, uint32_t base, uint32_t addr, uint32_t val)
         return;
 
     pclog("CO%c+%06X -> %08X  (%s pc=%08X)\n",
-          (base == VW_CO_GFX_INT_STATUS_IO_BASE) ? 'I' : 'G',
+          (base == VW_CO_GFX_INT_STATUS_IO_BASE) ? 'I' : ((base == 0x60000000) ? 'L' : 'G'),
           addr - base, val, what, (uint32_t) cpu_state.pc);
 }
 
@@ -123,7 +131,11 @@ cobalt_gfx_mmio_write32(uint32_t addr, uint32_t val, void* priv)
         if (off == 0x10020) {
             pclog("CO: KICK ring=%08X\n", val);
 
-            if (val < (uint32_t) mem_size) {
+            if ((val >= CO_LMEM_BASE) && (val < (CO_LMEM_BASE + CO_LMEM_SIZE)) && co_lmem) {
+                for (int i = 0; i < 64; i++)
+                    pclog("CO:   RING[%02X] = %08X\n", i,
+                          *(uint32_t *) &co_lmem[val - CO_LMEM_BASE + i * 4]);
+            } else if (val < (uint32_t) mem_size) {
                 for (int i = 0; i < 64; i++)
                     pclog("CO:   RING[%02X] = %08X\n", i, mem_readl_phys(val + i * 4));
             } else {
@@ -202,6 +214,45 @@ cobalt_gfx_int_status_mmio_read32(uint32_t addr, void* priv)
     return ret;
 }
 
+static uint8_t
+co_lmem_read8(uint32_t addr, void *priv)
+{
+    return co_lmem[addr - CO_LMEM_BASE];
+}
+
+static uint16_t
+co_lmem_read16(uint32_t addr, void *priv)
+{
+    return *(uint16_t *) &co_lmem[addr - CO_LMEM_BASE];
+}
+
+static uint32_t
+co_lmem_read32(uint32_t addr, void *priv)
+{
+    return *(uint32_t *) &co_lmem[addr - CO_LMEM_BASE];
+}
+
+static void
+co_lmem_write8(uint32_t addr, uint8_t val, void *priv)
+{
+    co_trace_write("lw8", CO_LMEM_BASE, addr, val);
+    co_lmem[addr - CO_LMEM_BASE] = val;
+}
+
+static void
+co_lmem_write16(uint32_t addr, uint16_t val, void *priv)
+{
+    co_trace_write("lw16", CO_LMEM_BASE, addr, val);
+    *(uint16_t *) &co_lmem[addr - CO_LMEM_BASE] = val;
+}
+
+static void
+co_lmem_write32(uint32_t addr, uint32_t val, void *priv)
+{
+    co_trace_write("lw32", CO_LMEM_BASE, addr, val);
+    *(uint32_t *) &co_lmem[addr - CO_LMEM_BASE] = val;
+}
+
 void
 cobalt_gfx_init(co_t *dev)
 {
@@ -217,6 +268,24 @@ cobalt_gfx_init(co_t *dev)
                     NULL,
                     MEM_MAPPING_EXTERNAL,
                     dev);
+
+    if (co_lmem == NULL)
+        co_lmem = calloc(1, CO_LMEM_SIZE);
+
+    if (co_lmem != NULL) {
+        mem_mapping_add(&dev->lmem_mapping,
+                        CO_LMEM_BASE,
+                        CO_LMEM_SIZE,
+                        co_lmem_read8,
+                        co_lmem_read16,
+                        co_lmem_read32,
+                        co_lmem_write8,
+                        co_lmem_write16,
+                        co_lmem_write32,
+                        NULL,
+                        MEM_MAPPING_EXTERNAL,
+                        dev);
+    }
 
     mem_mapping_add(&dev->gfx_mapping_interrupt_status,
                     VW_CO_GFX_INT_STATUS_IO_BASE,
