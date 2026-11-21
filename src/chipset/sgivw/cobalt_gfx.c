@@ -29,7 +29,7 @@
 #include <86box/plat_unused.h>
 #include <86box/chipset.h>
 
-#include <86box/sgivw/cobalt.h>
+#include <86box/sgivw/sgi_cobalt.h>
 
 #ifdef ENABLE_COBALT_GFX_LOG
 int co_gfx_do_log = ENABLE_COBALT_GFX_LOG;

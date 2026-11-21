@@ -30,7 +30,7 @@
 #include <86box/plat_unused.h>
 #include <86box/chipset.h>
 
-#include <86box/sgivw/cobalt.h>
+#include <86box/sgivw/sgi_cobalt.h>
 
 #ifdef ENABLE_COBALT_MEM_LOG
 int co_mem_do_log = ENABLE_COBALT_MEM_LOG;
