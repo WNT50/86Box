@@ -205,6 +205,21 @@ co_sample(uint32_t base, uint32_t size)
     return sum;
 }
 
+/* Temporary: where is the CPU?  A dead screen can mean an idle kernel, a
+   text-mode setup that has nowhere to draw, or a driver that never gets a
+   call; the sampled program counter tells them apart. */
+static void
+co_sample_pc(void *priv)
+{
+    static int n;
+    co_t      *dev = priv;
+
+    pclog("CO: PC n=%d lin=%08X cs=%04X\n", n++,
+          (uint32_t) cpu_state.pc, (uint16_t) CS);
+
+    timer_set_delay_u64(&dev->pc_timer, TIMER_USEC * 2000000);
+}
+
 /* The display's vertical retrace reaches the driver as an interrupt on the
    APIC's AS input (CO_APIC_AS).  The driver connects it in SGCOMP's start
    routine and uses it to pace its event loop, so without it the engine
@@ -260,6 +275,9 @@ cobalt_gfx_init(co_t *dev)
                     NULL,
                     MEM_MAPPING_EXTERNAL,
                     dev);
+
+    timer_add(&dev->pc_timer, co_sample_pc, dev, 1);
+    timer_set_delay_u64(&dev->pc_timer, TIMER_USEC * 2000000);
 
     timer_add(&dev->vblank_timer, co_vblank, dev, 1);
     timer_add(&dev->vblank_low_timer, co_vblank_drop, dev, 1);
