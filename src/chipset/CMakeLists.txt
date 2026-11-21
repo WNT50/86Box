@@ -121,8 +121,7 @@ add_library(chipset OBJECT
     vl82c480.c
     vl82c59x.c
     wd76c10.c
-    sgivw/arsenic.c
-    sgivw/arsenic_reset.c
+    sgivw/vid_sgi_arsenic.c
     sgivw/cobalt.c
     sgivw/cobalt_cpu.c
     sgivw/cobalt_gfx.c
