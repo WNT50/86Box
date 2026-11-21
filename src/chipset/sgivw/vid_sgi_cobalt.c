@@ -112,8 +112,16 @@ cobalt_gfx_mmio_write32(uint32_t addr, uint32_t val, void* priv)
     cobalt_gfx_log("CO: GFX [W32] [%X] <-- %X\n", addr, val);
     co_trace_write("w32", 0xC8000000, addr, val);
 
-    if ((addr - 0xC8000000) < CO_WINDOW_SIZE)
+    if ((addr - 0xC8000000) < CO_WINDOW_SIZE) {
+        co_t *dev = priv;
+
         *(uint32_t *) &co_window[addr - 0xC8000000] = val;
+
+        /* The driver arms its event mask here; that is the point after which
+           it expects the engine to speak. */
+        if (((addr - 0xC8000000) == 0x10020) && (val != 0))
+            dev->engine_armed = 1;
+    }
 }
 
 static uint8_t
@@ -208,6 +216,30 @@ co_sample(uint32_t base, uint32_t size)
 /* Temporary: where is the CPU?  A dead screen can mean an idle kernel, a
    text-mode setup that has nowhere to draw, or a driver that never gets a
    call; the sampled program counter tells them apart. */
+/* The driver enables the engine's event mask and then waits: the queue stays
+   empty until the engine reports something.  Pulse the RE input with the
+   status bit its handler looks for, so the wait has an answer. */
+static void
+co_re_drop(void *priv)
+{
+    ioapic_intin_irq(VW_CO_APIC_RE, 0, 0);
+}
+
+static void
+co_re_pulse(void *priv)
+{
+    co_t *dev = priv;
+
+    if (!dev->engine_armed)
+        return;
+
+    *(uint32_t *) &co_window[0x10018] = 0x40000000;
+    ioapic_intin_irq(VW_CO_APIC_RE, 0, 1);
+
+    timer_set_delay_u64(&dev->re_low_timer, TIMER_USEC * 30);
+    timer_set_delay_u64(&dev->re_timer, TIMER_USEC * 100000);
+}
+
 static void
 co_sample_pc(void *priv)
 {
@@ -278,6 +310,10 @@ cobalt_gfx_init(co_t *dev)
 
     timer_add(&dev->pc_timer, co_sample_pc, dev, 1);
     timer_set_delay_u64(&dev->pc_timer, TIMER_USEC * 2000000);
+
+    timer_add(&dev->re_timer, co_re_pulse, dev, 1);
+    timer_add(&dev->re_low_timer, co_re_drop, dev, 1);
+    timer_set_delay_u64(&dev->re_timer, TIMER_USEC * 100000);
 
     timer_add(&dev->vblank_timer, co_vblank, dev, 1);
     timer_add(&dev->vblank_low_timer, co_vblank_drop, dev, 1);
