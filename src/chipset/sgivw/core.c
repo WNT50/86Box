@@ -29,7 +29,7 @@
 #include <86box/chipset.h>
 #include <86box/ioapic_routes.h>
 
-#include <86box/sgivw/cobalt.h>
+#include <86box/sgivw/sgi_cobalt.h>
 #include <86box/sgivw/lithium.h>
 
 extern const device_t arsenic_device;

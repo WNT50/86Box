@@ -28,7 +28,7 @@
 #include <86box/plat_unused.h>
 #include <86box/chipset.h>
 
-#include <86box/sgivw/cobalt.h>
+#include <86box/sgivw/sgi_cobalt.h>
 
 static uint8_t cobalt_io_latch[0x1000];
 

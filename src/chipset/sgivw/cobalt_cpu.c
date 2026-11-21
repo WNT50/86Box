@@ -31,7 +31,7 @@
 #include <86box/chipset.h>
 #include <86box/machine.h>
 
-#include <86box/sgivw/cobalt.h>
+#include <86box/sgivw/sgi_cobalt.h>
 
 #ifdef ENABLE_COBALT_CPU_LOG
 int co_cpu_do_log = ENABLE_COBALT_CPU_LOG;
