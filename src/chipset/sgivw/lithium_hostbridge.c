@@ -24,7 +24,7 @@
 #include <86box/pci.h>
 #include <86box/device.h>
 #include <86box/mem.h>
-#include <86box/sgivw/lithium.h>
+#include <86box/sgivw/sgi_lithium.h>
 
 typedef struct li_bridge_t {
     uint8_t regs[256];

@@ -23,8 +23,8 @@
 #include <86box/pci.h>
 #include <86box/device.h>
 #include <86box/mem.h>
-#include <86box/sgivw/lithium.h>
-#include <86box/sgivw/lithium_1394_hw.h>
+#include <86box/sgivw/sgi_lithium.h>
+#include <86box/sgivw/sgi_lithium_1394.h>
 
 typedef struct li_1394_t {
     uint32_t regs[VW_LI_1394_REGS_SIZE / sizeof(uint32_t)];

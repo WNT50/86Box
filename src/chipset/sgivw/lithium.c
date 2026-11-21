@@ -28,7 +28,7 @@
 #include <86box/plat_unused.h>
 #include <86box/chipset.h>
 
-#include <86box/sgivw/lithium.h>
+#include <86box/sgivw/sgi_lithium.h>
 
 static void
 lithium_close(void *priv)
