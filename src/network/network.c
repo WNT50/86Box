@@ -65,7 +65,7 @@
 #include <86box/ui.h>
 #include <86box/timer.h>
 #include <86box/network.h>
-#include <86box/net_dp8393x.h>
+#include <86box/net_ibmlana.h>
 #include <86box/net_ne2000.h>
 #include <86box/net_pcnet.h>
 #include <86box/net_wd8003.h>

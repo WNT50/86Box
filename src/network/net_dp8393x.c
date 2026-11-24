@@ -16,105 +16,24 @@
  */
 
 #include <stdarg.h>
+#include <stdarg.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <wchar.h>
 #define HAVE_STDARG_H
 #include <86box/86box.h>
 #include <86box/device.h>
-#include <86box/io.h>
-#include <86box/machine.h>
-#include <86box/mca.h>
-#include <86box/mem.h>
-#include <86box/random.h>
-#include <86box/rom.h>
 #include <86box/thread.h>
 #include <86box/timer.h>
 #include <86box/network.h>
-#include <86box/pic.h>
+#include <86box/net_dp8393x.h>
 
 /* =========================================================================
- * 区 1：公共定义
+ * Section 1: Common definitions
  * ========================================================================= */
 
-#define SONIC_RAM_SIZE     0x8000 /* 8K x 32-bit shared SRAM */
-#define SONIC_BOOTROM_SIZE 0x4000 /* 16 KB boot ROM */
-#define SONIC_TX_FRAME_MAX (NET_MAX_FRAME + 4) /* 1522 */
-
-#define SONIC_IO_REGS_SIZE 0x80 /* +00h .. +7Fh: internal registers */
-#define SONIC_IO_BYTE_SIZE 0x20 /* +80h .. +9Fh: board and ID registers */
-
-#define BOARD_CTRL_ROM_RAM 0x80 /* 0 = boot ROM, 1 = shared RAM */
-#define BOARD_CTRL_IRQ_PND 0x40 /* interrupt pending (read only) */
-#define BOARD_CTRL_ALWAYS  0x30 /* bits 5 and 4 always read as 1 */
-#define BOARD_CTRL_RESET   0x08 /* hardware reset, write 1 then 0 */
-#define BOARD_CTRL_SLOT16  0x04 /* 0 = 32-bit slot, 1 = 16-bit slot */
-#define BOARD_CTRL_WINDOW  0x02 /* memory window enable */
-#define BOARD_CTRL_IRQ_EN  0x01 /* interrupt enable */
-#define BOARD_CTRL_WRITABLE (BOARD_CTRL_ROM_RAM | BOARD_CTRL_RESET | BOARD_CTRL_WINDOW | BOARD_CTRL_IRQ_EN)
-
-#define ROM_PATH_LONG  "roms/network/ibmlana/60g3315.bin"
-#define ROM_PATH_SHORT "roms/network/ibmlana/25h3518.bin"
-
-typedef enum {
-    IBM_LAN_A_LONG  = 0, /* POS ID FFE0, boot ROM 60G3315 */
-    IBM_LAN_A_SHORT = 1  /* POS ID FEE6, boot ROM 25H3518 */
-} ibm_lan_a_model_t;
-
-typedef struct dp8393x_t {
-    const char *name;
-    int         variant;
-
-    netcard_t *card;
-    uint8_t    mac[6];
-
-    /* 区 2：控制器核心状态 */
-    uint16_t regs[64];
-    uint16_t cam[48]; /* 16 entries x 3 words */
-    uint16_t cam_enable;
-    uint16_t cep;
-    uint16_t cam_valid;
-    uint8_t  rx_enabled;
-    uint8_t  stopped;
-    uint8_t  irq_level;
-    void   (*irq_cb)(void *priv, int level);
-    void    *irq_priv;
-    uint8_t  ram[SONIC_RAM_SIZE];
-    uint8_t  tx_frame[SONIC_TX_FRAME_MAX];
-    uint8_t  tx_active;
-
-    /* 区 2：接收引擎状态（P3） */
-    uint32_t rx_buf;      /* 当前 RBA 在共享 RAM 内的字节偏移 */
-    uint32_t rx_words;    /* 当前 RBA 剩余字数（16 位字） */
-    uint8_t  rx_rba_full; /* LPKT：下一个包之前必须换 RRA */
-    uint8_t  rx_rbe;      /* RRA 耗尽，清 RBE 前停止收包 */
-    uint8_t  rx_rde;      /* RDA 耗尽，清 RDE 前停止收包 */
-    uint8_t  rx_pkt_seq;  /* RSC 低字节：RBA 内的包序号 */
-    uint8_t  rx_rba_seq;  /* RSC 高字节：RBA 序号 */
-
-    /* 通用看门狗定时器（WT0/WT1），Boot ROM POST 会用到 */
-    pc_timer_t wt_timer;
-    uint32_t wt_count;
-    uint8_t  wt_running;
-
-    /* 区 3：MCA 板级状态 */
-    uint8_t       pos_regs[8];
-    uint8_t       board_control;
-    uint8_t       reset_armed;
-    uint8_t       adapter_enabled;
-    uint8_t       link_up;
-    uint8_t       io_set;
-    uint8_t       bootrom_loaded;
-    uint8_t       bootrom[SONIC_BOOTROM_SIZE];
-    uint8_t       id_rom[16];
-    uint16_t      io_base;
-    uint8_t       irq;
-    uint32_t      mem_base;
-    uint32_t      mem_size;
-    mem_mapping_t window;
-} dp8393x_t;
+/* Chip constants and dp8393x_t live in <86box/net_dp8393x.h>; board-level
+ * code lives in net_ibmlana.c, so this file holds no board state. */
 
 #define ENABLE_DP8393X_LOG 1
 #if ENABLE_DP8393X_LOG
@@ -136,10 +55,11 @@ dp8393x_log(const char *fmt, ...)
 #endif
 
 /* =========================================================================
- * 区 2：SONIC/SONIC-T 控制器核心
+ * Section 2: SONIC/SONIC-T controller core
  *
- * P1 实现寄存器阵列、写掩码、复位默认值、CAM 装载与中断聚合。
- * 收发状态机在 P2/P3 接入，这里只保留命令位与状态位的落点。
+ * P1 implements the register array, write masks, reset defaults, CAM load and
+ * interrupt aggregation. The TX/RX state machines arrive in P2/P3; here only
+ * the command and status bit landing points are kept.
  * ========================================================================= */
 
 enum {
@@ -199,7 +119,7 @@ enum {
 #define SONIC_ISR_PINT  0x0800
 #define SONIC_ISR_LCD   0x1000
 
-/* 看门狗按 1/2 TXC = 5 MHz 递减；用 1 ms 定时器每次补扣 5000 个计数。 */
+/* The watchdog decrements at 1/2 TXC = 5 MHz; a 1 ms timer drops 5000 counts each tick. */
 #define SONIC_WT_TICK_US     1000
 #define SONIC_WT_TICK_COUNTS 5000u
 
@@ -263,16 +183,16 @@ enum {
 static uint16_t
 dp8393x_ram_read16(const dp8393x_t *dev, uint16_t off)
 {
-    uint32_t size = dev->mem_size ? dev->mem_size : SONIC_RAM_SIZE;
+    uint32_t size = dev->ram_size ? dev->ram_size : SONIC_RAM_SIZE;
     uint32_t o    = (uint32_t) (off & (size - 1)) & (SONIC_RAM_SIZE - 1);
 
     return (uint16_t) (dev->ram[o] | (dev->ram[(o + 1) & (SONIC_RAM_SIZE - 1)] << 8));
 }
 
-static uint8_t
+uint8_t
 dp8393x_ram_read8(const dp8393x_t *dev, uint16_t off)
 {
-    uint32_t size = dev->mem_size ? dev->mem_size : SONIC_RAM_SIZE;
+    uint32_t size = dev->ram_size ? dev->ram_size : SONIC_RAM_SIZE;
     uint32_t o    = (uint32_t) (off & (size - 1)) & (SONIC_RAM_SIZE - 1);
 
     return dev->ram[o];
@@ -285,10 +205,10 @@ dp8393x_ram_read32(const dp8393x_t *dev, uint16_t off)
          | ((uint32_t) dp8393x_ram_read16(dev, (uint16_t) (off + 2)) << 16);
 }
 
-static void
+void
 dp8393x_ram_write8(dp8393x_t *dev, uint16_t off, uint8_t val)
 {
-    uint32_t size = dev->mem_size ? dev->mem_size : SONIC_RAM_SIZE;
+    uint32_t size = dev->ram_size ? dev->ram_size : SONIC_RAM_SIZE;
     uint32_t o    = (uint32_t) (off & (size - 1)) & (SONIC_RAM_SIZE - 1);
 
     dev->ram[o] = val;
@@ -297,7 +217,7 @@ dp8393x_ram_write8(dp8393x_t *dev, uint16_t off, uint8_t val)
 static void
 dp8393x_ram_write16(dp8393x_t *dev, uint16_t off, uint16_t val)
 {
-    uint32_t size = dev->mem_size ? dev->mem_size : SONIC_RAM_SIZE;
+    uint32_t size = dev->ram_size ? dev->ram_size : SONIC_RAM_SIZE;
     uint32_t o    = (uint32_t) (off & (size - 1)) & (SONIC_RAM_SIZE - 1);
 
     dev->ram[o]                             = (uint8_t) (val & 0xFF);
@@ -331,8 +251,9 @@ dp8393x_raise_isr(dp8393x_t *dev, uint16_t bits)
     dp8393x_update_irq(dev);
 }
 
-/* 通用看门狗：从 WT1/WT0 装载值递减，0 → FFFFFFFF 时置 ISR.TC。
- * 手册 2.7.14：由 1/2 TXC 时钟驱动，ST 启动、STP/RST 停止。 */
+/* Generic watchdog: counts down from the WT1/WT0 load value and sets
+ * ISR.TC on the 0 -> 0xFFFFFFFF wrap.
+ * Manual 2.7.14: clocked by 1/2 TXC, started by ST, stopped by STP/RST. */
 static void
 dp8393x_wt_tick(void *priv)
 {
@@ -371,8 +292,8 @@ dp8393x_wt_stop(dp8393x_t *dev)
     timer_disable(&dev->wt_timer);
 }
 
-static void
-dp8393x_core_reset(dp8393x_t *dev)
+void
+dp8393x_reset(dp8393x_t *dev)
 {
     memset(dev->regs, 0x00, sizeof(dev->regs));
     memset(dev->cam, 0x00, sizeof(dev->cam));
@@ -394,15 +315,16 @@ dp8393x_core_reset(dp8393x_t *dev)
     dp8393x_wt_stop(dev);
     dev->wt_count = 0;
 
-    /* 硬件复位：RST|STP|RXDIS = 0094h。 */
+    /* Hardware reset: RST|STP|RXDIS = 0094h. */
     dev->regs[SONIC_CR >> 1] = SONIC_CR_RST | SONIC_CR_STP | SONIC_CR_RXDIS;
 
     dp8393x_update_irq(dev);
 }
 
-/* 软件复位（CR.RST=1）。手册 2.7.1：只复位内部状态机，CRC 发生器停用、
- * Tally 暂停但不零；CTDA/CRDA/RRP/RWP 等指针、CAM/CE、CDC/CEP、RSC 均
- * 不受软件复位影响（这些只在硬件复位时清空）。 */
+/* Software reset (CR.RST=1). Manual 2.7.1: only the internal state machines
+ * are reset; the CRC generator is disabled and the tallies are paused but not
+ * cleared. Pointers such as CTDA/CRDA/RRP/RWP, CAM/CE, CDC/CEP and RSC are
+ * unaffected by a software reset (they are cleared only by a hardware reset). */
 static void
 dp8393x_sw_reset(dp8393x_t *dev)
 {
@@ -414,11 +336,11 @@ dp8393x_sw_reset(dp8393x_t *dev)
     dev->rx_rde      = 0;
     dev->rx_enabled  = 0;
 
-    /* 手册 2.7.14：复位停止定时器但不清零。 */
+    /* Manual 2.7.14: reset stops the timer but does not clear it. */
     dp8393x_wt_stop(dev);
 
-    /* 软件复位清 bit9/8/1/0（LCAM/RRRA/TXP/HTX），置 bit7/2（RST/RXDIS），
-     * ST、STP 等其余位保持。 */
+    /* Software reset clears bits 9/8/1/0 (LCAM/RRRA/TXP/HTX) and sets bits 7/2
+     * (RST/RXDIS); ST, STP and the other bits are preserved. */
     dev->regs[SONIC_CR >> 1] = (uint16_t) ((dev->regs[SONIC_CR >> 1]
                                            & (uint16_t) ~(SONIC_CR_LCAM | SONIC_CR_RRRA
                                                           | SONIC_CR_TXP | SONIC_CR_HTX
@@ -426,8 +348,9 @@ dp8393x_sw_reset(dp8393x_t *dev)
                                           | SONIC_CR_RST | SONIC_CR_RXDIS);
 }
 
-/* LCAM: CDP 指向窗口内的 CAM 描述符区，CDC 为描述符个数。
- * 每个描述符 16 字节：+0 控制/入口号，+4/+8/+0C 为 6 字节地址。 */
+/* LCAM: CDP points to the CAM descriptor area inside the window and CDC is the
+ * descriptor count. Each descriptor is 16 bytes: +0 control/entry number,
+ * +4/+8/+0C the 6-byte address. */
 static void
 dp8393x_cam_load(dp8393x_t *dev)
 {
@@ -452,11 +375,12 @@ dp8393x_cam_load(dp8393x_t *dev)
         dev->cam_valid |= (uint16_t) (1u << slot);
     }
 
-    /* CAM Enable 字段紧跟在最后一个描述符之后。 */
+    /* The CAM Enable field immediately follows the last descriptor. */
     dev->cam_enable = dp8393x_ram_read16(dev, (uint16_t) (cdp + (cdc << 4)));
 
-    /* 手册：LCAM 完成后 CDP 指向 CE 字段之后，CDC 归零。TX/RX 在模型里
-     * 都是同步完成，因此无需等待传输结束再执行 CAM DMA。 */
+    /* Manual: after LCAM completes, CDP points past the CE field and CDC is
+     * cleared. TX/RX are synchronous in this model, so CAM DMA does not need to
+     * wait for a transfer to finish. */
     dev->regs[SONIC_CDP >> 1] = (uint16_t) (cdp + ((cdc + 1) << 4));
     dev->regs[SONIC_CDC >> 1] = 0x0000;
 
@@ -465,13 +389,15 @@ dp8393x_cam_load(dp8393x_t *dev)
 }
 
 /* -------------------------------------------------------------------------
- * 接收路径（P3）
+ * Receive path (P3)
  *
- * 描述符布局取自 IBMENIIN.SYS：RDA 为 28 字节槽，status/byte_count/包地址是
- * word，link 是 dword 且最低位为 EOL；RRA 为 16 字节槽，缓冲区地址 24 位、
- * 大小以 16 位字计。RDA 的 +0x18 在手册中定义为 RXpkt.seq_no，但驱动把它
- * 当作“描述符占用”标志（初始为 1，只有为 0 时才处理，处理完写回 1）。
- * 已决定以驱动行为为准：交付包时写 0。见 p3/spec.md 的 C6。
+ * Descriptor layout is taken from IBMENIIN.SYS: an RDA is a 28-byte slot where
+ * status/byte_count/packet address are words and the link is a dword whose LSB
+ * is EOL; an RRA is a 16-byte slot with a 24-bit buffer address and a size in
+ * 16-bit words. The manual names RDA +0x18 RXpkt.seq_no, but the driver treats
+ * it as a "descriptor occupied" flag (initialized to 1, processed only when 0,
+ * written back as 1 when done). Driver behaviour is the reference here: the
+ * packet is delivered with 0. See C6 in p3/spec.md.
  * ------------------------------------------------------------------------- */
 
 static uint32_t
@@ -490,7 +416,8 @@ dp8393x_crc32(const uint8_t *buf, int len)
     return ~crc;
 }
 
-/* 48 位 CAM 比较：网络字节序先到的字节是低地址，按小端字拼装。 */
+/* 48-bit CAM compare: the first byte on the wire is the low address byte, so
+ * assemble little-endian words. */
 static int
 dp8393x_cam_match(const dp8393x_t *dev, const uint8_t *addr)
 {
@@ -512,7 +439,7 @@ dp8393x_cam_match(const dp8393x_t *dev, const uint8_t *addr)
     return 0;
 }
 
-/* 手册 2.7.3 / 2.7.12 的过滤顺序：PRO → AMC → BRD → CAM（RJCM 只反转 CAM）。 */
+/* Manual 2.7.3 / 2.7.12 filter order: PRO -> AMC -> BRD -> CAM (RJCM only inverts CAM). */
 static int
 dp8393x_rx_accept(const dp8393x_t *dev, const uint8_t *buf, int len, uint16_t *status)
 {
@@ -524,7 +451,8 @@ dp8393x_rx_accept(const dp8393x_t *dev, const uint8_t *buf, int len, uint16_t *s
 
     *status = 0;
 
-    /* RNT=0 时拒绝短包；线路上不足 64 字节即净帧不足 60 字节。 */
+    /* RNT=0 rejects short frames; fewer than 64 bytes on the wire means fewer
+     * than 60 bytes of payload. */
     if (!(rcr & SONIC_RCR_RNT) && ((len + 4) < 64))
         return 0;
 
@@ -550,7 +478,7 @@ dp8393x_rx_accept(const dp8393x_t *dev, const uint8_t *buf, int len, uint16_t *s
     return 1;
 }
 
-/* RRRA：按 RRP 读取下一个 RRA，装载 CRBA/RBWC。RRP 到 REA 后回卷到 RSA。 */
+/* RRRA: read the next RRA at RRP and load CRBA/RBWC. RRP wraps to RSA after REA. */
 static int
 dp8393x_read_rra(dp8393x_t *dev)
 {
@@ -573,7 +501,7 @@ dp8393x_read_rra(dp8393x_t *dev)
         rrp = rsa;
     dev->regs[SONIC_RRP >> 1] = rrp;
 
-    /* 手册：读完最后一个 RRA 后 RRP 与 RWP 相等即置 RBE。 */
+    /* Manual: after reading the last RRA, RRP == RWP sets RBE. */
     if ((rrp & 0xFFFE) == rwp) {
         dev->rx_rbe = 1;
         dp8393x_raise_isr(dev, SONIC_ISR_RBE);
@@ -582,7 +510,8 @@ dp8393x_read_rra(dp8393x_t *dev)
     return (dev->rx_words != 0) ? 1 : 0;
 }
 
-/* Tally 递增：0000 → FFFF 回卷时置对应的 ISR 位（手册 2.7.11）。 */
+/* Tally increment: sets the matching ISR bit when the counter wraps 0000 -> FFFF
+ * (manual 2.7.11). */
 static void
 dp8393x_tally_inc(dp8393x_t *dev, uint16_t reg, uint16_t isr_bit)
 {
@@ -593,8 +522,8 @@ dp8393x_tally_inc(dp8393x_t *dev, uint16_t reg, uint16_t isr_bit)
         dp8393x_raise_isr(dev, isr_bit);
 }
 
-/* 收包：过滤 → 取 RBA → 写数据 + FCS → 写 RDA → 推进 CRDA / 置中断。 */
-static int
+/* Receive: filter -> take RBA -> write data + FCS -> write RDA -> advance CRDA / raise IRQ. */
+int
 dp8393x_rx(dp8393x_t *dev, const uint8_t *buf, int len, int loopback)
 {
     uint16_t status;
@@ -616,7 +545,7 @@ dp8393x_rx(dp8393x_t *dev, const uint8_t *buf, int len, int loopback)
         return 0;
     }
 
-    /* RDA 耗尽后停止收包，直到软件清 RDE。 */
+    /* Reception stops once the RDA ring is exhausted, until software clears RDE. */
     if (dev->rx_rde) {
         dp8393x_tally_inc(dev, SONIC_MPT, SONIC_ISR_MP);
         return 0;
@@ -629,11 +558,12 @@ dp8393x_rx(dp8393x_t *dev, const uint8_t *buf, int len, int loopback)
         }
     }
 
-    /* 数据 + 4 字节 FCS，按 32 位对齐占用 RBA。 */
+    /* Data + 4-byte FCS, occupying the RBA aligned to 32 bits. */
     used = ((uint32_t) len + 4u + 3u) & ~3u;
 
     if ((used / 2u) > dev->rx_words) {
-        /* 缓冲区放不下：丢弃该包、不写 RDA，换下一个 RRA。 */
+        /* The buffer cannot hold it: drop the packet without writing an RDA and
+         * move to the next RRA. */
         dp8393x_raise_isr(dev, SONIC_ISR_RBAE);
         dp8393x_tally_inc(dev, SONIC_MPT, SONIC_ISR_MP);
         if (!dev->rx_rbe)
@@ -646,7 +576,8 @@ dp8393x_rx(dp8393x_t *dev, const uint8_t *buf, int len, int loopback)
     for (i = 0; i < len; i++)
         dp8393x_ram_write8(dev, (uint16_t) (pkt_addr + (uint32_t) i), buf[i]);
 
-    /* 86Box 后端帧不含 FCS；驱动按“长度含 FCS”处理，因此在 RBA 末尾补 CRC32。 */
+    /* 86Box backend frames carry no FCS; the driver expects the length to include
+     * it, so append CRC32 at the end of the RBA. */
     crc = dp8393x_crc32(buf, len);
     for (i = 0; i < 4; i++)
         dp8393x_ram_write8(dev, (uint16_t) (pkt_addr + (uint32_t) len + (uint32_t) i),
@@ -658,13 +589,15 @@ dp8393x_rx(dp8393x_t *dev, const uint8_t *buf, int len, int loopback)
     if (loopback)
         status |= SONIC_RCR_LBK;
 
-    /* LPKT：剩余字数已不足一个最大帧，标记本包为当前 RBA 的最后一包。 */
+    /* LPKT: the remaining word count is below one maximum frame, so mark this
+     * packet as the last one in the current RBA. */
     if (dev->rx_words <= (uint32_t) (dev->regs[SONIC_EOBC >> 1] & 0xFFFF)) {
         status |= SONIC_RCR_LPKT;
         dev->rx_rba_full = 1;
     }
 
-    /* RCR 低 9 位是最近一个包的接收状态，随后写进 RXpkt.status。 */
+    /* The low 9 bits of RCR are the receive status of the latest packet and are
+     * then written into RXpkt.status. */
     rcr = dev->regs[SONIC_RCR >> 1];
     dev->regs[SONIC_RCR >> 1] = (uint16_t) ((rcr & (uint16_t) ~SONIC_RCR_STATUS_MASK) | status);
 
@@ -674,9 +607,10 @@ dp8393x_rx(dp8393x_t *dev, const uint8_t *buf, int len, int loopback)
     dp8393x_ram_write16(dev, (uint16_t) (rda + SONIC_RDA_ADDR_LO), (uint16_t) (pkt_addr & 0xFFFF));
     dp8393x_ram_write16(dev, (uint16_t) (rda + SONIC_RDA_ADDR_HI), (uint16_t) (pkt_addr >> 16));
 
-    /* 手册把 +0x18 命名为 RXpkt.seq_no，但驱动把它当“描述符占用”标志：
-     * 初始化写 1、只有为 0 才处理（0x12BC0）、处理完写回 1（0x12EAD）。
-     * 以驱动实测行为为准，交付时写 0。见 p3/spec.md 的 C6。 */
+    /* The manual names +0x18 RXpkt.seq_no, but the driver treats it as a
+     * "descriptor occupied" flag: it initializes it to 1, processes only when 0
+     * (0x12BC0), and writes 1 back when done (0x12EAD). Driver behaviour is the
+     * reference here, so 0 is written on delivery. See C6 in p3/spec.md. */
     dp8393x_ram_write32(dev, (uint16_t) (rda + SONIC_RDA_SEQ), 0x00000000);
 
     dev->rx_pkt_seq++;
@@ -713,7 +647,7 @@ dp8393x_tx(dp8393x_t *dev)
 
     if (dev->tx_active) {
         /* TXP must not be set while a transmission is in progress. */
-        dp8393x_log("%s: 发送过程中重复置位 TXP，已忽略\n", dev->name);
+        dp8393x_log("SONIC: TXP set again during transmission, ignored\n");
         return;
     }
 
@@ -774,11 +708,13 @@ dp8393x_tx(dp8393x_t *dev)
             status = SONIC_TSR_PTX;
 
             if (lb != 0) {
-                /* 环回诊断（Boot ROM POST 使用）：数据不外发，直接进接收引擎，
-                 * RDA status 置 LBK。手册要求 CAM/RCR 能接受该目的地址。 */
+                /* Loopback diagnostics (used by the Boot ROM POST): data does not
+                 * go out but enters the receive engine directly with LBK in the
+                 * RDA status. The manual requires CAM/RCR to accept the
+                 * destination address. */
                 dp8393x_rx(dev, dev->tx_frame, (int) size, 1);
             } else if (dev->card != NULL) {
-                /* 86Box 后端帧不含 FCS，描述符数据原样上交。 */
+                /* 86Box backend frames carry no FCS; descriptor data is handed up as-is. */
                 network_tx(dev->card, dev->tx_frame, (int) size);
             }
         }
@@ -822,12 +758,12 @@ dp8393x_tx(dp8393x_t *dev)
     dev->tx_active = 0;
 }
 
-static uint16_t
+uint16_t
 dp8393x_reg_read(dp8393x_t *dev, uint16_t off)
 {
     switch (off) {
         case SONIC_SR:
-            /* 硅版本，手册/QEMU 均为 0004h；Boot ROM POST 可见。 */
+            /* Silicon version; manual/QEMU both use 0004h and the Boot ROM POST can see it. */
             return 0x0004;
 
         case SONIC_CAP2:
@@ -858,7 +794,7 @@ dp8393x_reg_read(dp8393x_t *dev, uint16_t off)
     return dev->regs[off >> 1];
 }
 
-static void
+void
 dp8393x_reg_write(dp8393x_t *dev, uint16_t off, uint16_t val)
 {
     switch (off) {
@@ -867,13 +803,14 @@ dp8393x_reg_write(dp8393x_t *dev, uint16_t off, uint16_t val)
             uint8_t htx;
             uint8_t release = 0;
 
-            /* RST 是电平命令：写 1 进入软件复位，写 0 才释放。 */
+            /* RST is a level command: writing 1 enters software reset, writing 0 releases it. */
             if (val & SONIC_CR_RST) {
                 dp8393x_sw_reset(dev);
                 return;
             }
 
-            /* 释放软件复位的这次写入只落状态位，不执行命令位。 */
+            /* The write that releases software reset only latches status bits and
+             * executes no command bits. */
             if (dev->regs[SONIC_CR >> 1] & SONIC_CR_RST) {
                 release                     = 1;
                 dev->regs[SONIC_CR >> 1]    = 0x0000;
@@ -882,8 +819,9 @@ dp8393x_reg_write(dp8393x_t *dev, uint16_t off, uint16_t val)
             txp = (val & SONIC_CR_TXP) ? 1 : 0;
             htx = (val & SONIC_CR_HTX) ? 1 : 0;
 
-            /* RRRA 同步完成，命令位立即自清；驱动轮询的 CR bit8 读回 0。
-             * 清 RBE 后的恢复路径也复用这里。 */
+            /* RRRA completes synchronously, so the command bit self-clears
+             * immediately and the driver polls CR bit 8 as 0. The recovery path
+             * after clearing RBE reuses this as well. */
             if (!release && (val & SONIC_CR_RRRA)) {
                 dev->rx_rbe = 0;
                 dp8393x_read_rra(dev);
@@ -897,7 +835,7 @@ dp8393x_reg_write(dp8393x_t *dev, uint16_t off, uint16_t val)
             if (!release && (val & SONIC_CR_RXDIS))
                 dev->rx_enabled = 0;
 
-            /* ST/STP 互斥；同时置位时停表（手册 2.7.1）。 */
+            /* ST/STP are mutually exclusive; asserting both stops the timer (manual 2.7.1). */
             if ((val & (SONIC_CR_ST | SONIC_CR_STP)) == (SONIC_CR_ST | SONIC_CR_STP))
                 dev->stopped = 1;
             else if (val & SONIC_CR_ST)
@@ -905,14 +843,16 @@ dp8393x_reg_write(dp8393x_t *dev, uint16_t off, uint16_t val)
             else if (val & SONIC_CR_STP)
                 dev->stopped = 1;
 
-            /* ST/STP 直接控制通用看门狗；复位只停表不清零。 */
+            /* ST/STP directly control the generic watchdog; reset stops the timer
+             * without clearing it. */
             if (dev->stopped)
                 dp8393x_wt_stop(dev);
             else
                 dp8393x_wt_start(dev);
 
-            /* TXP/RRRA/LCAM 为命令位，不保持；STP/RXEN/RXDIS/HTX 保持。
-             * HTX 在发送期间必须可见，发送结束后由 dp8393x_tx() 清除。 */
+            /* TXP/RRRA/LCAM are command bits and are not retained; STP/RXEN/RXDIS/HTX
+             * are. HTX must stay visible during transmission and is cleared by
+             * dp8393x_tx() afterwards. */
             dev->regs[SONIC_CR >> 1] = (uint16_t) ((dev->stopped ? SONIC_CR_STP : SONIC_CR_ST)
                                                  | (dev->rx_enabled ? SONIC_CR_RXEN : SONIC_CR_RXDIS)
                                                  | (htx ? SONIC_CR_HTX : 0x0000));
@@ -923,7 +863,7 @@ dp8393x_reg_write(dp8393x_t *dev, uint16_t off, uint16_t val)
         }
 
         case SONIC_DCR:
-            /* bit9-8、bit6 固定为 1，bit7、bit15-10 固定为 0。 */
+            /* Bits 9-8 and 6 are fixed at 1; bit 7 and bits 15-10 are fixed at 0. */
             dev->regs[SONIC_DCR >> 1] = (uint16_t) ((val & 0x003F) | 0x0360);
             break;
 
@@ -932,13 +872,14 @@ dp8393x_reg_write(dp8393x_t *dev, uint16_t off, uint16_t val)
             break;
 
         case SONIC_TCR:
-            /* 高 4 位配置可写，低 12 位是硬件维护的状态位。 */
+            /* The upper 4 configuration bits are writable; the low 12 bits are
+             * hardware-maintained status. */
             dev->regs[SONIC_TCR >> 1] = (uint16_t) ((dev->regs[SONIC_TCR >> 1] & 0x0FFF)
                                                   | (val & 0xF000));
             break;
 
         case SONIC_IMR:
-            /* POST 会写 0xBCFF 并原样读回，因此不做位裁剪。 */
+            /* POST writes 0xBCFF and reads it back unchanged, so no bit masking. */
             dev->regs[SONIC_IMR >> 1] = val;
             dp8393x_update_irq(dev);
             break;
@@ -954,8 +895,9 @@ dp8393x_reg_write(dp8393x_t *dev, uint16_t off, uint16_t val)
             if (rde)
                 dev->rx_rde = 0;
 
-            /* 手册：清 RBE 后若软件已补充 RRA，适配器会重新读取 RRP 指向的
-             * 资源描述符，效果等同一次 RRRA。 */
+            /* Manual: after RBE is cleared, if software has supplied more RRAs the
+             * adapter re-reads the resource descriptor at RRP, equivalent to an
+             * RRRA. */
             if (rbe && !dev->rx_rbe && dev->rx_rba_full)
                 dp8393x_read_rra(dev);
 
@@ -983,7 +925,7 @@ dp8393x_reg_write(dp8393x_t *dev, uint16_t off, uint16_t val)
         case SONIC_CRCT:
         case SONIC_FAET:
         case SONIC_MPT:
-            /* 手册 2.7.11：写入数据反相后锁存，写 FFFFh 即清零。 */
+            /* Manual 2.7.11: the written value is latched inverted, so writing FFFFh clears it. */
             dev->regs[off >> 1] = (uint16_t) ~val;
             break;
 
@@ -996,8 +938,9 @@ dp8393x_reg_write(dp8393x_t *dev, uint16_t off, uint16_t val)
             break;
 
         case SONIC_DCR2:
-            /* 按实测不建模：驱动从不访问 DCR2。仅保留 bit0（RJCM）供接收
-             * 过滤使用，其余位不参与行为。 */
+            /* Not modelled per measurements: the driver never accesses DCR2. Only
+             * bit 0 (RJCM) is kept for receive filtering; the other bits have no
+             * effect. */
             dev->regs[SONIC_DCR2 >> 1] = val;
             break;
 
@@ -1009,559 +952,63 @@ dp8393x_reg_write(dp8393x_t *dev, uint16_t off, uint16_t val)
 }
 
 /* =========================================================================
- * 区 3：MCA 板级
+ * Section 3: Chip external interface and device registration
  * ========================================================================= */
 
-static uint16_t lan_a_reg_read16(uint16_t port, void *priv);
-static void     lan_a_reg_write16(uint16_t port, uint16_t val, void *priv);
-static uint8_t  lan_a_byte_read(uint16_t port, void *priv);
-static void     lan_a_byte_write(uint16_t port, uint8_t val, void *priv);
-static void     lan_a_apply_pos(dp8393x_t *dev);
-
-static uint16_t
-lan_a_pos_id(int variant)
+void
+dp8393x_set_ram_size(dp8393x_t *dev, uint32_t size)
 {
-    return (variant == IBM_LAN_A_SHORT) ? 0xFEE6 : 0xFFE0;
+    dev->ram_size = size ? size : SONIC_RAM_SIZE;
 }
 
-/* POS 103 bit7-5: shared memory window base address. */
-static uint32_t
-lan_a_mem_base(uint8_t cfg, uint32_t size)
+void
+dp8393x_init(dp8393x_t *dev)
 {
-    uint8_t sel = (cfg >> 5) & 0x07;
-
-    if (size == 0x8000) {
-        switch (sel & 0x06) {
-            case 0x02:
-                return 0x000C8000;
-            case 0x04:
-                return 0x000D0000;
-            case 0x06:
-                return 0x000D8000;
-            default:
-                return 0x00000000;
-        }
-    }
-
-    switch (sel) {
-        case 0x01:
-            return 0x000C4000;
-        case 0x02:
-            return 0x000C8000;
-        case 0x04:
-            return 0x000D0000;
-        case 0x05:
-            return 0x000D4000;
-        case 0x06:
-            return 0x000D8000;
-        default:
-            return 0x00000000;
-    }
+    timer_add(&dev->wt_timer, dp8393x_wt_tick, dev, 0);
+    dp8393x_reset(dev);
 }
-
-static uint8_t
-lan_a_mem_config_read(const dp8393x_t *dev)
-{
-    uint8_t val = dev->pos_regs[3] & (uint8_t) ~0x0C;
-
-    val |= 0x04; /* bit 2 always reads back as 1 */
-    if (!dev->link_up)
-        val |= 0x08; /* GDLNK: 1 = bad link */
-
-    return val;
-}
-
-static void
-lan_a_update_window(dp8393x_t *dev)
-{
-    uint8_t  size_sel = dev->pos_regs[3] & 0x03;
-    uint32_t size;
-    uint32_t base;
-
-    /* POS 103 bit1-0: 10b = 16 KB, 11b = 32 KB. */
-    if (size_sel < 0x02) {
-        mem_mapping_disable(&dev->window);
-        return;
-    }
-
-    size = (size_sel == 0x03) ? 0x8000 : 0x4000;
-    base = lan_a_mem_base(dev->pos_regs[3], size);
-
-    if (!dev->adapter_enabled || (base == 0x00000000)) {
-        mem_mapping_disable(&dev->window);
-        return;
-    }
-
-    if ((base != dev->mem_base) || (size != dev->mem_size)) {
-        dev->mem_base = base;
-        dev->mem_size = size;
-        mem_mapping_set_addr(&dev->window, base, size);
-    }
-
-    if (dev->board_control & BOARD_CTRL_WINDOW)
-        mem_mapping_enable(&dev->window);
-    else
-        mem_mapping_disable(&dev->window);
-}
-
-static void
-lan_a_ioremove(dp8393x_t *dev)
-{
-    if (!dev->io_set)
-        return;
-
-    io_removehandler(dev->io_base, SONIC_IO_REGS_SIZE,
-                     NULL, lan_a_reg_read16, NULL, NULL, lan_a_reg_write16, NULL, dev);
-    io_removehandler(dev->io_base + SONIC_IO_REGS_SIZE, SONIC_IO_BYTE_SIZE,
-                     lan_a_byte_read, NULL, NULL, lan_a_byte_write, NULL, NULL, dev);
-    dev->io_set = 0;
-}
-
-/* 内部控制寄存器：解码后交给区 2 的芯片核心。 */
-static uint16_t
-lan_a_reg_read16(uint16_t port, void *priv)
-{
-    dp8393x_t *dev = (dp8393x_t *) priv;
-
-    return dp8393x_reg_read(dev, (uint16_t) (port - dev->io_base));
-}
-
-static void
-lan_a_reg_write16(uint16_t port, uint16_t val, void *priv)
-{
-    dp8393x_t *dev = (dp8393x_t *) priv;
-
-    dp8393x_reg_write(dev, (uint16_t) (port - dev->io_base), val);
-}
-
-static uint8_t
-lan_a_board_control_read(const dp8393x_t *dev)
-{
-    uint8_t val = dev->board_control & BOARD_CTRL_WRITABLE;
-
-    val |= BOARD_CTRL_ALWAYS;
-
-    if (!machine_has_bus(machine, MACHINE_BUS_MCA32))
-        val |= BOARD_CTRL_SLOT16;
-
-    return val;
-}
-
-static void
-lan_a_irq(void *priv, int level)
-{
-    dp8393x_t *dev = (dp8393x_t *) priv;
-
-    if (dev->irq == 0)
-        return;
-
-    if (level)
-        picint((uint16_t) (1 << dev->irq));
-    else
-        picintc((uint16_t) (1 << dev->irq));
-}
-
-static void
-lan_a_board_reset(dp8393x_t *dev)
-{
-    dev->board_control = 0x00;
-    dev->reset_armed   = 0;
-
-    dp8393x_core_reset(dev);
-    lan_a_update_window(dev);
-
-    dp8393x_log("%s: 板级硬件复位\n", dev->name);
-}
-
-static void
-lan_a_board_control_write(dp8393x_t *dev, uint8_t val)
-{
-    dev->board_control = (dev->board_control & (uint8_t) ~BOARD_CTRL_WRITABLE) | (val & BOARD_CTRL_WRITABLE);
-
-    if (val & BOARD_CTRL_RESET) {
-        dev->reset_armed = 1;
-    } else if (dev->reset_armed) {
-        lan_a_board_reset(dev);
-        return;
-    }
-
-    lan_a_update_window(dev);
-}
-
-static uint8_t
-lan_a_byte_read(uint16_t port, void *priv)
-{
-    const dp8393x_t *dev = (dp8393x_t *) priv;
-    uint16_t         off = (uint16_t) (port - dev->io_base);
-
-    switch (off) {
-        case 0x80:
-            return lan_a_board_control_read(dev);
-        case 0x82:
-            return dev->pos_regs[2];
-        case 0x83:
-            return lan_a_mem_config_read(dev);
-        default:
-            break;
-    }
-
-    if ((off >= 0x90) && (off <= 0x9F))
-        return dev->id_rom[off - 0x90];
-
-    return 0xFF;
-}
-
-static void
-lan_a_byte_write(uint16_t port, uint8_t val, void *priv)
-{
-    dp8393x_t *dev = (dp8393x_t *) priv;
-    uint16_t   off = (uint16_t) (port - dev->io_base);
-
-    switch (off) {
-        case 0x80:
-            lan_a_board_control_write(dev, val);
-            break;
-        case 0x82:
-            dev->pos_regs[2] = val;
-            lan_a_apply_pos(dev);
-            break;
-        case 0x83:
-            dev->pos_regs[3] = (val & (uint8_t) ~0x0C) | 0x04;
-            lan_a_apply_pos(dev);
-            break;
-        default:
-            break;
-    }
-}
-
-static void
-lan_a_ioset(dp8393x_t *dev)
-{
-    io_sethandler(dev->io_base, SONIC_IO_REGS_SIZE,
-                  NULL, lan_a_reg_read16, NULL, NULL, lan_a_reg_write16, NULL, dev);
-    io_sethandler(dev->io_base + SONIC_IO_REGS_SIZE, SONIC_IO_BYTE_SIZE,
-                  lan_a_byte_read, NULL, NULL, lan_a_byte_write, NULL, NULL, dev);
-
-    dev->io_set = 1;
-}
-
-static void
-lan_a_apply_pos(dp8393x_t *dev)
-{
-    static const uint8_t irq_table[4] = { 5, 15, 10, 11 };
-
-    lan_a_ioremove(dev);
-
-    if ((dev->irq != 0) && dev->irq_level)
-        picintc((uint16_t) (1 << dev->irq));
-
-    dev->adapter_enabled = dev->pos_regs[2] & 0x01;
-    dev->io_base         = (uint16_t) (((dev->pos_regs[2] >> 5) & 0x07) << 12);
-    dev->irq             = irq_table[(dev->pos_regs[2] >> 1) & 0x03];
-
-    dev->pos_regs[3] = (dev->pos_regs[3] & (uint8_t) ~0x08) | 0x04;
-
-    if (dev->adapter_enabled && (dev->io_base != 0x0000))
-        lan_a_ioset(dev);
-
-    lan_a_update_window(dev);
-
-    dp8393x_log("%s: POS 102=%02X 103=%02X, I/O=%04X, IRQ=%u, %s\n",
-                dev->name, dev->pos_regs[2], dev->pos_regs[3],
-                dev->io_base, dev->irq,
-                dev->adapter_enabled ? "启用" : "禁用");
-}
-
-static uint8_t
-lan_a_window_byte(const dp8393x_t *dev, uint32_t off)
-{
-    off &= (dev->mem_size - 1);
-
-    if (!(dev->board_control & BOARD_CTRL_ROM_RAM)) {
-        /* Boot ROM is visible in the lower 16 KB only. */
-        if ((off < SONIC_BOOTROM_SIZE) && dev->bootrom_loaded)
-            return dev->bootrom[off];
-
-        return 0xFF;
-    }
-
-    return dev->ram[off & (SONIC_RAM_SIZE - 1)];
-}
-
-static uint8_t
-lan_a_window_read_b(uint32_t addr, void *priv)
-{
-    const dp8393x_t *dev = (dp8393x_t *) priv;
-
-    return lan_a_window_byte(dev, addr - dev->mem_base);
-}
-
-static uint16_t
-lan_a_window_read_w(uint32_t addr, void *priv)
-{
-    const dp8393x_t *dev = (dp8393x_t *) priv;
-    uint32_t         off = addr - dev->mem_base;
-
-    return (uint16_t) (lan_a_window_byte(dev, off) | (lan_a_window_byte(dev, off + 1) << 8));
-}
-
-static uint32_t
-lan_a_window_read_l(uint32_t addr, void *priv)
-{
-    const dp8393x_t *dev = (dp8393x_t *) priv;
-    uint32_t         off = addr - dev->mem_base;
-
-    return (uint32_t) lan_a_window_byte(dev, off)
-         | ((uint32_t) lan_a_window_byte(dev, off + 1) << 8)
-         | ((uint32_t) lan_a_window_byte(dev, off + 2) << 16)
-         | ((uint32_t) lan_a_window_byte(dev, off + 3) << 24);
-}
-
-static void
-lan_a_window_write_b(uint32_t addr, uint8_t val, void *priv)
-{
-    dp8393x_t *dev = (dp8393x_t *) priv;
-    uint32_t   off;
-
-    /* The boot ROM is read only; only shared RAM accepts writes. */
-    if (!(dev->board_control & BOARD_CTRL_ROM_RAM))
-        return;
-
-    off = (addr - dev->mem_base) & (dev->mem_size - 1);
-    dev->ram[off & (SONIC_RAM_SIZE - 1)] = val;
-}
-
-static void
-lan_a_window_write_w(uint32_t addr, uint16_t val, void *priv)
-{
-    lan_a_window_write_b(addr, (uint8_t) val, priv);
-    lan_a_window_write_b(addr + 1, (uint8_t) (val >> 8), priv);
-}
-
-static void
-lan_a_window_write_l(uint32_t addr, uint32_t val, void *priv)
-{
-    lan_a_window_write_w(addr, (uint16_t) val, priv);
-    lan_a_window_write_w(addr + 2, (uint16_t) (val >> 16), priv);
-}
-
-static uint8_t
-lan_a_mca_read(uint16_t port, void *priv)
-{
-    const dp8393x_t *dev = (dp8393x_t *) priv;
-
-    if ((port & 0x07) == 0x03)
-        return lan_a_mem_config_read(dev);
-
-    return dev->pos_regs[port & 0x07];
-}
-
-static void
-lan_a_mca_write(uint16_t port, uint8_t val, void *priv)
-{
-    dp8393x_t *dev = (dp8393x_t *) priv;
-
-    /* POS registers 100h and 101h are read only. */
-    if (port < 0x0102)
-        return;
-
-    dev->pos_regs[port & 0x07] = val;
-    lan_a_apply_pos(dev);
-}
-
-static uint8_t
-lan_a_mca_feedb(void *priv)
-{
-    const dp8393x_t *dev = (dp8393x_t *) priv;
-
-    return dev->pos_regs[2] & 0x01;
-}
-
-static void
-lan_a_build_id_rom(dp8393x_t *dev)
-{
-    uint16_t pos_id = lan_a_pos_id(dev->variant);
-
-    memset(dev->id_rom, 0x00, sizeof(dev->id_rom));
-
-    dev->id_rom[0] = (uint8_t) (pos_id & 0xFF);
-    dev->id_rom[1] = (uint8_t) (pos_id >> 8);
-    memcpy(&dev->id_rom[2], dev->mac, 6);
-}
-
-static int
-lan_a_rx(void *priv, uint8_t *buf, int len)
-{
-    dp8393x_t *dev = (dp8393x_t *) priv;
-
-    if ((dev == NULL) || (buf == NULL) || (len < 14))
-        return 1;
-
-    /* 返回 1 表示本帧已被消费，网络队列可以继续下发。 */
-    dp8393x_rx(dev, buf, len, 0);
-    return 1;
-}
-
-static int
-lan_a_set_link_state(void *priv, uint32_t link_state)
-{
-    dp8393x_t *dev = (dp8393x_t *) priv;
-    uint8_t    link_up;
-
-    link_up = !(link_state & (NET_LINK_DOWN | NET_LINK_TEMP_DOWN));
-
-    if (link_up != dev->link_up) {
-        dev->link_up = link_up;
-        dp8393x_log("%s: 链路%s\n", dev->name, link_up ? "正常" : "断开");
-    }
-
-    return 0;
-}
-
-/* =========================================================================
- * 区 4：设备注册与生命周期
- * ========================================================================= */
 
 static void *
-lan_a_init(const device_t *info)
+dp8393x_device_init(const device_t *info)
 {
     dp8393x_t *dev = (dp8393x_t *) calloc(1, sizeof(dp8393x_t));
-    int        mac;
-    uint16_t   pos_id;
 
-    dev->name    = info->name;
-    dev->variant = (int) info->local;
-
-    /* IBM OUI 00:06:29, as stored in the adapter's ID ROM. */
-    dev->mac[0] = 0x00;
-    dev->mac[1] = 0x06;
-    dev->mac[2] = 0x29;
-
-    mac = device_get_config_mac("mac", -1);
-    if (mac & 0xff000000) {
-        dev->mac[3] = random_generate();
-        dev->mac[4] = random_generate();
-        dev->mac[5] = random_generate();
-        mac         = (dev->mac[3] << 16) | (dev->mac[4] << 8) | dev->mac[5];
-        device_set_config_mac("mac", mac);
-    } else {
-        dev->mac[3] = (mac >> 16) & 0xFF;
-        dev->mac[4] = (mac >> 8) & 0xFF;
-        dev->mac[5] = mac & 0xFF;
-    }
-
-    pos_id          = lan_a_pos_id(dev->variant);
-    dev->pos_regs[0] = (uint8_t) (pos_id & 0xFF);
-    dev->pos_regs[1] = (uint8_t) (pos_id >> 8);
-    dev->pos_regs[2] = 0x20; /* I/O 1000h, 10BASE-T, IRQ 5, adapter disabled */
-    dev->pos_regs[3] = 0x46; /* C800h, 16 KB, bit 2 reads as 1 */
-
-    dev->link_up   = 1;
-    dev->mem_base  = 0x000C8000;
-    dev->mem_size  = 0x4000;
-    dev->irq_cb    = lan_a_irq;
-    dev->irq_priv  = dev;
-
-    timer_add(&dev->wt_timer, dp8393x_wt_tick, dev, 0);
-
-    dp8393x_core_reset(dev);
-
-    if (dev->variant == IBM_LAN_A_SHORT)
-        dev->bootrom_loaded = (rom_load_linear(ROM_PATH_SHORT, 0, SONIC_BOOTROM_SIZE, 0, dev->bootrom) != 0);
-    else
-        dev->bootrom_loaded = (rom_load_linear(ROM_PATH_LONG, 0, SONIC_BOOTROM_SIZE, 0, dev->bootrom) != 0);
-
-    if (!dev->bootrom_loaded)
-        dp8393x_log("%s: Boot ROM 缺失，内存窗口低 16 KB 将返回 0xFF\n", dev->name);
-
-    lan_a_build_id_rom(dev);
-
-    mem_mapping_add(&dev->window, dev->mem_base, dev->mem_size,
-                    lan_a_window_read_b, lan_a_window_read_w, lan_a_window_read_l,
-                    lan_a_window_write_b, lan_a_window_write_w, lan_a_window_write_l,
-                    NULL, MEM_MAPPING_EXTERNAL, dev);
-    mem_mapping_disable(&dev->window);
-
-    mca_add(lan_a_mca_read, lan_a_mca_write, lan_a_mca_feedb, NULL, dev);
-
-    dev->card = network_attach(dev, dev->mac, lan_a_rx, lan_a_set_link_state);
-    if ((dev->card != NULL) && (dev->card->link_state & NET_LINK_DOWN))
-        dev->link_up = 0;
-
-    lan_a_apply_pos(dev);
-
-    dp8393x_log("%s: MAC %02X:%02X:%02X:%02X:%02X:%02X, POS ID %04X\n",
-                dev->name, dev->mac[0], dev->mac[1], dev->mac[2],
-                dev->mac[3], dev->mac[4], dev->mac[5], pos_id);
+    (void) info;
+    dp8393x_init(dev);
 
     return dev;
 }
 
 static void
-lan_a_close(void *priv)
+dp8393x_device_close(void *priv)
 {
     dp8393x_t *dev = (dp8393x_t *) priv;
 
     if (dev == NULL)
         return;
 
-    lan_a_ioremove(dev);
-    mem_mapping_disable(&dev->window);
     timer_disable(&dev->wt_timer);
-
-    if (dev->card != NULL)
-        netcard_close(dev->card);
-
     free(dev);
 }
 
 static void
-lan_a_reset(void *priv)
+dp8393x_device_reset(void *priv)
 {
-    lan_a_board_reset((dp8393x_t *) priv);
+    dp8393x_reset((dp8393x_t *) priv);
 }
 
-static const device_config_t ibm_lan_a_config[] = {
-    // clang-format off
-    {
-        .name           = "mac",
-        .description    = "MAC Address",
-        .type           = CONFIG_MAC,
-        .default_string = NULL,
-        .default_int    = -1,
-        .file_filter    = NULL,
-        .spinner        = { 0 },
-        .selection      = { { 0 } },
-        .bios           = { { 0 } }
-    },
-    { .name = "", .description = "", .type = CONFIG_END }
-    // clang-format on
-};
+int dp8393x_inst = 0;
 
-const device_t ibm_lan_a_device = {
-    .name          = "IBM LAN Adapter/A for Ethernet",
-    .internal_name = "ibm_lan_a",
-    .flags         = DEVICE_MCA,
-    .local         = IBM_LAN_A_LONG,
-    .init          = lan_a_init,
-    .close         = lan_a_close,
-    .reset         = lan_a_reset,
+const device_t dp8393x_device = {
+    .name          = "DP8393X SONIC Ethernet Controller",
+    .internal_name = "dp8393x",
+    .flags         = 0,
+    .local         = 0,
+    .init          = dp8393x_device_init,
+    .close         = dp8393x_device_close,
+    .reset         = dp8393x_device_reset,
     .available     = NULL,
     .speed_changed = NULL,
     .force_redraw  = NULL,
-    .config        = ibm_lan_a_config
-};
-
-const device_t ibm_lan_a_short_device = {
-    .name          = "IBM LAN Adapter/A for Ethernet (Short)",
-    .internal_name = "ibm_lan_a_short",
-    .flags         = DEVICE_MCA,
-    .local         = IBM_LAN_A_SHORT,
-    .init          = lan_a_init,
-    .close         = lan_a_close,
-    .reset         = lan_a_reset,
-    .available     = NULL,
-    .speed_changed = NULL,
-    .force_redraw  = NULL,
-    .config        = ibm_lan_a_config
+    .config        = NULL
 };

@@ -23,6 +23,7 @@ list(APPEND net_sources
     net_switch.c
     net_dp8390.c
     net_dp8393x.c
+    net_ibmlana.c
     net_lance.c
     net_3c501.c
     net_3c503.c
