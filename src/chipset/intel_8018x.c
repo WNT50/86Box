@@ -729,6 +729,11 @@ i8018x_pcb_write_word(struct i8018x_pcb_t *dev, uint16_t off, uint16_t val)
         if (!(val & I8018X_TMR_CON_INH))
             val = (uint16_t) ((val & ~I8018X_TMR_CON_EN) | (dev->regs[off / 2] & I8018X_TMR_CON_EN));
 
+        /* MC belongs to the counter: hardware sets it, and a control write
+           must carry the old bit through (270788-001 section 6.1). */
+        val = (uint16_t) ((val & ~I8018X_TMR_CON_MC) |
+                          (dev->regs[off / 2] & I8018X_TMR_CON_MC));
+
         val &= (uint16_t) ~(I8018X_TMR_CON_INH | I8018X_TMR_CON_RIU);
         break;
     }
@@ -737,22 +742,24 @@ i8018x_pcb_write_word(struct i8018x_pcb_t *dev, uint16_t off, uint16_t val)
 
     dev->regs[off / 2] = val;
 
-    /* Only the write that starts a timer restarts its cycle, and a new maximum
-       count takes effect on the fly; neither of them clears the count
-       (270788-001 section 6.1). The request latch itself is only
-       touched through the interrupt controller registers. */
+    /* A count or maximum-count write restarts the cycle from the new value.
+       A control write restarts it only when it is the one that enables the
+       timer: a write that leaves a running timer running must not reload it,
+       or a caller that re-arms every pass while polling MC never sees a period
+       complete. The request latch itself is only touched through the interrupt
+       controller registers. */
     for (int i = 0; i < 3; i++) {
-        if (off == I8018X_TMR_COUNT(i)) {
+        int restart = 0;
+
+        if ((off == I8018X_TMR_COUNT(i)) || (off == I8018X_TMR_MAXA(i)) ||
+            (off == I8018X_TMR_MAXB(i)))
+            restart = 1;
+        else if ((off == I8018X_TMR_CON(i)) &&
+                 !(old_val & I8018X_TMR_CON_EN) && (val & I8018X_TMR_CON_EN))
+            restart = 1;
+
+        if (restart)
             i8018x_pcb_tmr_restart(dev, i);
-        } else if ((off == I8018X_TMR_CON(i)) &&
-                   !(old_val & I8018X_TMR_CON_EN) && (val & I8018X_TMR_CON_EN)) {
-            i8018x_pcb_tmr_restart(dev, i);
-        } else if ((off == I8018X_TMR_MAXA(i)) || (off == I8018X_TMR_MAXB(i))) {
-            /* Rebase the completed cycles so the new maximum does not latch a
-               terminal count by itself. */
-            if (dev->regs[I8018X_TMR_CON(i) / 2] & I8018X_TMR_CON_EN)
-                dev->tmr_done[i] = i8018x_pcb_tmr_events(dev, i) / i8018x_pcb_tmr_max(dev, i);
-        }
     }
 
     /* A control word that arms an unsynchronized channel starts it at once
