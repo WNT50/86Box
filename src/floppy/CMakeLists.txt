@@ -19,6 +19,7 @@
 #
 
 add_library(fdd OBJECT
+    fdc_common_wd279x.c
     fdc_common_upd765.c
     fdc_common_ctrl.c
     fdc_compaticard.c
