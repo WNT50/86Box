@@ -1052,12 +1052,25 @@ static int
 i8018x_pcb_dma_write(int channel, uint16_t val, void *priv)
 {
     struct i8018x_pcb_t *dev  = (struct i8018x_pcb_t *) priv;
-    int           slot = i8018x_pcb_dma_slot(dev, channel);
+    int                  slot = i8018x_pcb_dma_slot(dev, channel);
+    uint16_t             ctrl;
+    uint32_t             src;
 
     if ((slot < 0) || !i8018x_pcb_dma_armed(dev, slot))
         return DMA_NODATA;
 
-    if (dev->regs[I8018X_DMA_CTRL(slot)] & I8018X_DMA_BW)
+    ctrl = dev->regs[I8018X_DMA_CTRL(slot)];
+
+    /* The fetch cycle reads whatever the source pointer addresses (270788-001
+       section 8.4). With the source on the I/O bus the peripheral has already
+       read its register and handed the byte over, so reading the port again
+       here would drain a second byte out of it. */
+    if (ctrl & I8018X_DMA_SRC_MIO) {
+        src = i8018x_pcb_dma_ptr(dev, slot, 0);
+        val = (ctrl & I8018X_DMA_BW) ? mem_readw_phys(src) : mem_readb_phys(src);
+    }
+
+    if (ctrl & I8018X_DMA_BW)
         mem_writew_phys(i8018x_pcb_dma_ptr(dev, slot, 1), val);
     else
         mem_writeb_phys(i8018x_pcb_dma_ptr(dev, slot, 1), (uint8_t) val);
