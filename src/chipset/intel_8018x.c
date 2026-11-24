@@ -57,8 +57,9 @@
 #define I8018X_DMA1_BASE        0xD0u /* channel 1 descriptor, 0xD0-0xDE */
 #define I8018X_DMA1_END         0xDEu
 
-/* Descriptor word indices from a channel base (270788-001 Figure 66): source
-   pointer, destination pointer, transfer count, control word. */
+/* Descriptor word indices from a channel base (270788-001 Figure 66):
+   source pointer, destination pointer, transfer count, control word. Unlike the
+   register offsets above these index regs[], so compare them against off / 2. */
 #define I8018X_DMA_SRC_LO(i)    ((I8018X_DMA0_BASE + ((i) * 0x10u)) / 2)
 #define I8018X_DMA_SRC_HI(i)    ((I8018X_DMA0_BASE + ((i) * 0x10u) + 2u) / 2)
 #define I8018X_DMA_DST_LO(i)    ((I8018X_DMA0_BASE + ((i) * 0x10u) + 4u) / 2)
@@ -680,7 +681,7 @@ i8018x_pcb_read_word(struct i8018x_pcb_t *dev, uint16_t off)
     }
 
     /* CHG/NOCHG is write only (270788-001 section 8.2). */
-    if ((off == I8018X_DMA_CTRL(0)) || (off == I8018X_DMA_CTRL(1)))
+    if (((off / 2) == I8018X_DMA_CTRL(0)) || ((off / 2) == I8018X_DMA_CTRL(1)))
         return (uint16_t) (dev->regs[off / 2] & ~I8018X_DMA_CHG);
 
     return i8018x_pcb_decoded(off) ? dev->regs[off / 2] : 0xFFFF;
@@ -711,7 +712,7 @@ i8018x_pcb_write_word(struct i8018x_pcb_t *dev, uint16_t off, uint16_t val)
     /* CHG/NOCHG gates the ST/STOP bit: a control word write that leaves
        it clear keeps the channel running as it was, and the bit itself is
        write only, always reading back as zero (270788-001 section 8.2). */
-    if ((off == I8018X_DMA_CTRL(0)) || (off == I8018X_DMA_CTRL(1))) {
+    if (((off / 2) == I8018X_DMA_CTRL(0)) || ((off / 2) == I8018X_DMA_CTRL(1))) {
         if (!(val & I8018X_DMA_CHG))
             val = (uint16_t) ((val & ~I8018X_DMA_ST) | (dev->regs[off / 2] & I8018X_DMA_ST));
 
@@ -756,9 +757,9 @@ i8018x_pcb_write_word(struct i8018x_pcb_t *dev, uint16_t off, uint16_t val)
 
     /* A control word that arms an unsynchronized channel starts it at once
        (270788-001 sections 8.2 and 8.7). */
-    if (((off == I8018X_DMA_CTRL(0)) || (off == I8018X_DMA_CTRL(1))) &&
+    if ((((off / 2) == I8018X_DMA_CTRL(0)) || ((off / 2) == I8018X_DMA_CTRL(1))) &&
         (dev->regs[off / 2] & I8018X_DMA_ST))
-        i8018x_pcb_dma_freerun(dev, (off == I8018X_DMA_CTRL(0)) ? 0 : 1);
+        i8018x_pcb_dma_freerun(dev, ((off / 2) == I8018X_DMA_CTRL(0)) ? 0 : 1);
 
     /* Writing the status register sets or clears the individual timer request
        bits (270788-001 Figure 26) -- the ROM forces a request with 0x8001 and
