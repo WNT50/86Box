@@ -3970,6 +3970,20 @@ ql_pci_decode_address(ql_t *dev, uint32_t addr)
 static void
 ql_pci_write(UNUSED(int func), int addr, UNUSED(int len), uint8_t val, void *priv)
 {
+#ifdef ENABLE_QL_LOG
+    /* FindAdapter touches exactly these two: it sets the command register's
+       memory and bus-master bits, and clears the ROM enable bit.  Logging
+       them with the guest pc separates the driver from the PCI enumerator. */
+    if ((addr == 0x04) || (addr == 0x30)) {
+        static int cfg_n;
+        uint32_t   pc = cpu_state.seg_cs.base + cpu_state.pc;
+
+        if ((pc >= 0x80000000u) && (cfg_n < 200)) {
+            cfg_n++;
+            ql_log("QL: OS cfg %02X <- %02X pc=%08lX\n", addr, val, pc);
+        }
+    }
+#endif
     ql_t *dev = priv;
     uint8_t write_bits_mask;
 
