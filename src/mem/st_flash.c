@@ -391,6 +391,19 @@ st_flash_write_word(st_flash_t *dev, uint32_t addr, uint16_t val)
     st_flash_log("FLASH: write %06X (off %06X) <- %04X (state %i)\n",
                  addr, off, val, dev->state);
 
+#ifdef ENABLE_ST_FLASH_LOG
+    /* Which routine issued the command, so a block that fails can be told
+       from one that works. */
+    if ((val == 0x0030) || (val == 0x00A0) || (val == 0x0080) || (val == 0x0010)) {
+        static int cmd_log_n;
+        if (cmd_log_n < 40) {
+            cmd_log_n++;
+            st_flash_log("FLASH: cmd %04X at %06X from %08X\n",
+                         val, off, cpu_state.seg_cs.base + cpu_state.pc);
+        }
+    }
+#endif
+
 handle:
     switch (dev->state) {
         case ST_STATE_IDLE:
