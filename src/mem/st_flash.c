@@ -110,8 +110,9 @@ enum {
    after a handful of reads, so the P/E.C. has to report completion inside
    that budget.  A wall-clock erase (about a second on the real part) would
    never be seen; the operation therefore advances on polled reads. */
-#define ST_OP_BUSY_POLLS 2
-#define ST_OP_ERR_POLLS  2
+#define ST_OP_BUSY_POLLS  8
+#define ST_OP_TIMER_POLLS 2
+#define ST_OP_ERR_POLLS   2
 
 typedef struct st_flash_t {
     uint8_t array[ST_FLASH_SIZE];
@@ -119,6 +120,7 @@ typedef struct st_flash_t {
     uint8_t  state;      /* command state machine */
     uint8_t  op;         /* operation state machine */
     uint8_t  op_polls;
+    uint8_t  op_reads;
     uint8_t  op_toggle;
     uint8_t  err_polls;
     uint8_t  mode;
@@ -168,8 +170,15 @@ st_flash_read_byte(st_flash_t *dev, uint32_t off)
            is being erased, and during programming DQ7 carries the complement
            of the bit being programmed.  Reporting zero here reads as "the
            command never took effect". */
-        uint16_t val  = 0x0008;
+        uint16_t val  = 0x0000;
         uint8_t  byte;
+
+        /* DQ3 is the erase timer: it stays low for a short while after the
+           command and only then reports that the timer has started.  The
+           firmware reads it once right after the command and treats a high
+           value there as "the command never took". */
+        if (dev->op_reads > ST_OP_TIMER_POLLS)
+            val |= 0x0008;
 
         if (dev->op_toggle & 1) {
             val |= 0x0040;
@@ -184,6 +193,8 @@ st_flash_read_byte(st_flash_t *dev, uint32_t off)
 
         if (!(off & 1)) {
             dev->op_toggle ^= 1;
+            if (dev->op_reads < 0xFF)
+                dev->op_reads++;
             if (!--dev->op_polls)
                 st_flash_op_finish(dev);
         }
@@ -342,6 +353,7 @@ st_flash_start_op(st_flash_t *dev, uint8_t op, uint32_t off, uint16_t val)
     dev->op_off    = off;
     dev->op_val    = val;
     dev->op_polls  = ST_OP_BUSY_POLLS;
+    dev->op_reads  = 0;
     dev->op_toggle = 1;
     dev->err       = 0;
     dev->err_polls = 0;
