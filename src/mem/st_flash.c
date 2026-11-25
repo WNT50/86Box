@@ -38,6 +38,24 @@
 #include <86box/flash.h>
 #include <86box/plat_unused.h>
 
+#ifdef ENABLE_ST_FLASH_LOG
+int st_flash_do_log = ENABLE_ST_FLASH_LOG;
+
+static void
+st_flash_log(const char *fmt, ...)
+{
+    va_list ap;
+
+    if (st_flash_do_log) {
+        va_start(ap, fmt);
+        pclog_ex(fmt, ap);
+        va_end(ap);
+    }
+}
+#else
+#    define st_flash_log(fmt, ...)
+#endif
+
 #define ST_FLASH_SIZE       0x00080000 /* 512 KiB */
 #define ST_FLASH_BASE_LOW   0x00080000
 #define ST_FLASH_BASE_HIGH  0xFFF80000
@@ -68,7 +86,8 @@ enum {
     ST_STATE_PROGRAM,
     ST_STATE_ERASE1,
     ST_STATE_ERASE2,
-    ST_STATE_ERASE3
+    ST_STATE_ERASE3,
+    ST_STATE_ERASE_MORE
 };
 
 enum {
@@ -76,12 +95,36 @@ enum {
     ST_MODE_AUTOSELECT
 };
 
+/* Operation state machine: what the P/E.C. is doing right now, as opposed to
+   the command state machine above, which tracks how far into a command cycle
+   the writes are. */
+enum {
+    ST_OP_NONE = 0,
+    ST_OP_PROGRAM,
+    ST_OP_ERASE,
+    ST_OP_ERASE_CHIP
+};
+
+/* The updater polls the block in a tight loop with no delay and gives up
+   after a handful of reads, so the P/E.C. has to report completion inside
+   that budget.  A wall-clock erase (about a second on the real part) would
+   never be seen; the operation therefore advances on polled reads. */
+#define ST_OP_BUSY_POLLS 2
+#define ST_OP_ERR_POLLS  2
+
 typedef struct st_flash_t {
     uint8_t array[ST_FLASH_SIZE];
 
-    uint8_t state;
-    uint8_t mode;
-    uint8_t dirty;
+    uint8_t  state;      /* command state machine */
+    uint8_t  op;         /* operation state machine */
+    uint8_t  op_polls;
+    uint8_t  op_toggle;
+    uint8_t  err_polls;
+    uint8_t  mode;
+    uint8_t  dirty;
+    uint8_t  err;
+    uint16_t op_val;
+    uint32_t op_off;
 
     mem_mapping_t mapping_low;
     mem_mapping_t mapping_high;
@@ -91,20 +134,92 @@ typedef struct st_flash_t {
     char path[1024];
 } st_flash_t;
 
+static void st_flash_op_finish(st_flash_t *dev);
+
 static uint8_t
-st_flash_read_byte(const st_flash_t *dev, uint32_t off)
+st_flash_read_byte(st_flash_t *dev, uint32_t off)
 {
     if (dev->mode == ST_MODE_AUTOSELECT) {
-        uint16_t id = ((off & ~1) == 0x0000) ? ST_MANUFACTURER_ID : ST_DEVICE_ID;
-        return (off & 1) ? (uint8_t) (id >> 8) : (uint8_t) id;
+        /* Autoselect answers three different reads, keyed by A0/A1 of the
+           word address (M29F400T, note 6): 00 manufacturer, 10 device,
+           01 the protection status of the block that holds the address. */
+        uint32_t wa = off >> 1;
+        uint32_t a0 = wa & 1;
+        uint32_t a1 = (wa >> 1) & 1;
+        uint16_t val;
+
+        if (!a0 && !a1)
+            val = ST_MANUFACTURER_ID;
+        else if (a0 && !a1)
+            val = ST_DEVICE_ID;
+        else if (!a0 && a1)
+            val = (off >= ST_BOOT_BLOCK_START) ? 0x0001 : 0x0000;
+        else
+            val = 0x0000;
+
+        st_flash_log("FLASH: autoselect %06X -> %04X\n", off, val);
+        return (off & 1) ? (uint8_t) (val >> 8) : (uint8_t) val;
     }
+    /* While the P/E.C. runs, data polling is what the host sees: DQ7 = 0 and
+       DQ6 toggling.  Once it ends the array answers again. */
+    if (dev->op != ST_OP_NONE) {
+        /* DQ3 says the erase timer has started, DQ2 toggles while the block
+           is being erased, and during programming DQ7 carries the complement
+           of the bit being programmed.  Reporting zero here reads as "the
+           command never took effect". */
+        uint16_t val  = 0x0008;
+        uint8_t  byte;
+
+        if (dev->op_toggle & 1) {
+            val |= 0x0040;
+            if ((dev->op == ST_OP_ERASE) || (dev->op == ST_OP_ERASE_CHIP))
+                val |= 0x0004;
+        }
+
+        if ((dev->op == ST_OP_PROGRAM) && !(dev->op_val & 0x0080))
+            val |= 0x0080;
+
+        byte = (off & 1) ? (uint8_t) (val >> 8) : (uint8_t) val;
+
+        if (!(off & 1)) {
+            dev->op_toggle ^= 1;
+            if (!--dev->op_polls)
+                st_flash_op_finish(dev);
+        }
+
+        if ((off < 0x20) || ((off >= 0x70000) && (off < 0x80000)))
+            st_flash_log("FLASH: read %06X -> %02X (busy)\n", off, byte);
+        return byte;
+    }
+
+    /* A failed operation leaves DQ5 set long enough to be read back. */
+    if (dev->err_polls) {
+        uint16_t val  = 0x00A0 | 0x0040 | 0x0008 | 0x0004;
+        uint8_t  byte = (off & 1) ? (uint8_t) (val >> 8) : (uint8_t) val;
+
+        if (!(off & 1))
+            dev->err_polls--;
+
+        if ((off < 0x20) || ((off >= 0x70000) && (off < 0x80000)))
+            st_flash_log("FLASH: read %06X -> %02X (error)\n", off, byte);
+        return byte;
+    }
+
+    if ((off < 0x20) || ((off >= 0x70000) && (off < 0x80000))) {
+        static int read_log_n;
+        if (read_log_n < 400) {
+            read_log_n++;
+            st_flash_log("FLASH: read %06X -> %02X\n", off, dev->array[off]);
+        }
+    }
+
     return dev->array[off];
 }
 
 static uint8_t
 st_flash_read8(uint32_t addr, void *priv)
 {
-    const st_flash_t *dev = (const st_flash_t *) priv;
+    st_flash_t *dev = (st_flash_t *) priv;
     uint32_t          off = addr & ST_FLASH_MASK;
 
     return st_flash_read_byte(dev, off);
@@ -113,7 +228,7 @@ st_flash_read8(uint32_t addr, void *priv)
 static uint16_t
 st_flash_read16(uint32_t addr, void *priv)
 {
-    const st_flash_t *dev = (const st_flash_t *) priv;
+    st_flash_t *dev = (st_flash_t *) priv;
     uint32_t          off = addr & ST_FLASH_MASK;
 
     return (uint16_t) st_flash_read_byte(dev, off) |
@@ -123,7 +238,7 @@ st_flash_read16(uint32_t addr, void *priv)
 static uint32_t
 st_flash_read32(uint32_t addr, void *priv)
 {
-    const st_flash_t *dev = (const st_flash_t *) priv;
+    st_flash_t *dev = (st_flash_t *) priv;
     uint32_t          off = addr & ST_FLASH_MASK;
 
     return (uint32_t) st_flash_read_byte(dev, off) |
@@ -146,6 +261,8 @@ st_flash_sector_erase(st_flash_t *dev, uint32_t off)
     };
     uint32_t i;
 
+    st_flash_log("FLASH: erase block at %06X\n", off);
+
     for (i = 0; i < (sizeof(blocks) / sizeof(blocks[0])); i++) {
         if ((off >= blocks[i].start) && (off < (blocks[i].start + blocks[i].size))) {
             /* The boot block is protected on the Visual Workstation. */
@@ -161,8 +278,72 @@ st_flash_sector_erase(st_flash_t *dev, uint32_t off)
 static void
 st_flash_chip_erase(st_flash_t *dev)
 {
+    st_flash_log("FLASH: chip erase\n");
     memset(&dev->array[0], 0xFF, ST_BOOT_BLOCK_START);
     dev->dirty = 1;
+}
+
+static void
+st_flash_op_finish(st_flash_t *dev)
+{
+    switch (dev->op) {
+        case ST_OP_PROGRAM: {
+            /* Programming can only clear bits.  A 0 -> 1 request, or a
+               program aimed at the protected block, fails and sets DQ5. */
+            if (dev->op_off < ST_BOOT_BLOCK_START) {
+                uint16_t old = (uint16_t) dev->array[dev->op_off] |
+                               ((uint16_t) dev->array[dev->op_off + 1] << 8);
+
+                if (dev->op_val & ~old) {
+                    st_flash_log("FLASH: program %06X %04X over %04X fails\n",
+                                 dev->op_off, dev->op_val, old);
+                    dev->err = 1;
+                } else {
+                    st_flash_log("FLASH: program %06X <- %04X\n",
+                                 dev->op_off, dev->op_val);
+                    dev->array[dev->op_off]     = (uint8_t) (old & dev->op_val);
+                    dev->array[dev->op_off + 1] = (uint8_t) ((old & dev->op_val) >> 8);
+                    dev->dirty                  = 1;
+                }
+            } else
+                dev->err = 1;
+            break;
+        }
+
+        case ST_OP_ERASE:
+            if (dev->op_off >= ST_BOOT_BLOCK_START)
+                dev->err = 1;
+            else {
+                st_flash_sector_erase(dev, dev->op_off);
+                dev->err = 0;
+            }
+            break;
+
+        case ST_OP_ERASE_CHIP:
+            st_flash_chip_erase(dev);
+            dev->err = 0;
+            break;
+
+        default:
+            break;
+    }
+
+    dev->op = ST_OP_NONE;
+
+    if (dev->err)
+        dev->err_polls = ST_OP_ERR_POLLS;
+}
+
+static void
+st_flash_start_op(st_flash_t *dev, uint8_t op, uint32_t off, uint16_t val)
+{
+    dev->op        = op;
+    dev->op_off    = off;
+    dev->op_val    = val;
+    dev->op_polls  = ST_OP_BUSY_POLLS;
+    dev->op_toggle = 1;
+    dev->err       = 0;
+    dev->err_polls = 0;
 }
 
 static void
@@ -170,12 +351,23 @@ st_flash_write_word(st_flash_t *dev, uint32_t addr, uint16_t val)
 {
     uint32_t off = addr & ST_FLASH_MASK;
 
+    /* The part ignores writes while the P/E.C. runs. */
+    if (dev->op != ST_OP_NONE)
+        return;
+
+    st_flash_log("FLASH: write %06X (off %06X) <- %04X (state %i)\n",
+                 addr, off, val, dev->state);
+
+handle:
     switch (dev->state) {
         case ST_STATE_IDLE:
             if ((val == ST_CMD_UNLOCK1) && (off == ST_CMD_ADDR1))
                 dev->state = ST_STATE_UNLOCK1;
-            else if (val == ST_CMD_RESET)
-                dev->mode = ST_MODE_ARRAY;
+            else if (val == ST_CMD_RESET) {
+                dev->mode      = ST_MODE_ARRAY;
+                dev->err       = 0;
+                dev->err_polls = 0;
+            }
             break;
 
         case ST_STATE_UNLOCK1:
@@ -203,8 +395,10 @@ st_flash_write_word(st_flash_t *dev, uint32_t addr, uint16_t val)
                     dev->state = ST_STATE_ERASE1;
                     break;
                 case ST_CMD_RESET:
-                    dev->mode  = ST_MODE_ARRAY;
-                    dev->state = ST_STATE_IDLE;
+                    dev->mode      = ST_MODE_ARRAY;
+                    dev->err       = 0;
+                    dev->err_polls = 0;
+                    dev->state     = ST_STATE_IDLE;
                     break;
                 default:
                     dev->state = ST_STATE_IDLE;
@@ -213,12 +407,7 @@ st_flash_write_word(st_flash_t *dev, uint32_t addr, uint16_t val)
             break;
 
         case ST_STATE_PROGRAM:
-            /* Program one word; the boot block stays write protected. */
-            if (off < ST_BOOT_BLOCK_START) {
-                dev->array[off]     = (uint8_t) val;
-                dev->array[off + 1] = (uint8_t) (val >> 8);
-                dev->dirty          = 1;
-            }
+            st_flash_start_op(dev, ST_OP_PROGRAM, off, val);
             dev->state = ST_STATE_IDLE;
             break;
 
@@ -238,11 +427,26 @@ st_flash_write_word(st_flash_t *dev, uint32_t addr, uint16_t val)
 
         case ST_STATE_ERASE3:
             if (val == ST_CMD_CHIP_ERASE)
-                st_flash_chip_erase(dev);
+                st_flash_start_op(dev, ST_OP_ERASE_CHIP, off, 0);
             else if (val == ST_CMD_SECTOR_ERASE)
-                st_flash_sector_erase(dev, off);
-            dev->state = ST_STATE_IDLE;
+                st_flash_start_op(dev, ST_OP_ERASE, off, 0);
+            else {
+                dev->err       = 1;
+                dev->err_polls = ST_OP_ERR_POLLS;
+            }
+            /* Further 30h writes within the erase timeout erase more
+               blocks without repeating the command prefix (table 8). */
+            dev->state = ST_STATE_ERASE_MORE;
             break;
+
+        case ST_STATE_ERASE_MORE:
+            if (val == ST_CMD_SECTOR_ERASE) {
+                st_flash_start_op(dev, ST_OP_ERASE, off, 0);
+                break;
+            }
+            /* Not another block: this write starts a new command cycle. */
+            dev->state = ST_STATE_IDLE;
+            goto handle;
 
         default:
             dev->state = ST_STATE_IDLE;
