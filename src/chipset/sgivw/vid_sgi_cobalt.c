@@ -114,6 +114,28 @@ cobalt_gfx_int_status_mmio_write32(uint32_t addr, uint32_t val, void* priv)
     dev->gfx.interrupt_status &= ~val;
 }
 
+/* The display's vertical retrace reaches the driver as an interrupt on the
+   APIC's AS input.  The driver connects it in SGCOMP's start routine and uses
+   it to pace its event loop, so without it the engine appears dead even when
+   nothing is wrong with the command path. */
+static void
+co_vblank_drop(void *priv)
+{
+    ioapic_intin_irq(VW_CO_APIC_AS, 0, 0);
+}
+
+static void
+co_vblank(void *priv)
+{
+    co_t *dev = priv;
+
+    dev->gfx.interrupt_status |= 0x02;
+    ioapic_intin_irq(VW_CO_APIC_AS, 0, 1);
+
+    timer_set_delay_u64(&dev->gfx.vblank_low_timer, TIMER_USEC * 30);
+    timer_set_delay_u64(&dev->gfx.vblank_timer, TIMER_USEC * 16666);
+}
+
 static uint32_t
 cobalt_gfx_int_status_mmio_read32(uint32_t addr, void* priv)
 {
@@ -156,4 +178,8 @@ cobalt_gfx_init(co_t *dev)
                     NULL,
                     MEM_MAPPING_EXTERNAL,
                     dev);
+
+    timer_add(&dev->gfx.vblank_timer, co_vblank, dev, 1);
+    timer_add(&dev->gfx.vblank_low_timer, co_vblank_drop, dev, 1);
+    timer_set_delay_u64(&dev->gfx.vblank_timer, TIMER_USEC * 16666);
 }

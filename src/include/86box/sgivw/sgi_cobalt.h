@@ -59,6 +59,11 @@
 /* The Cobalt timer and cache interrupt (CO_APIC_CPU). */
 #define VW_CO_APIC_CPU_INPUT                 28
 
+/* The display and the rendering engine each have an input of their own; the
+   miniport connects both (level and vector 0x18/0x19 in its start routine). */
+#define VW_CO_APIC_AS                        24
+#define VW_CO_APIC_RE                        25
+
 /* ****************************************************************************/
 
 #define VW_CO_MEM_IO_BASE                   0xC6000000
@@ -118,7 +123,9 @@ typedef struct co_t
         pc_timer_t countdown_timer;
     } mem;
     struct {
-        uint32_t interrupt_status;
+        uint32_t   interrupt_status;
+        pc_timer_t vblank_timer;
+        pc_timer_t vblank_low_timer;
     } gfx;
 } co_t;
 
