@@ -824,6 +824,25 @@ ql_log(const char *fmt, ...)
     }
 }
 
+/* Which code touches the adapter once an OS driver owns it: the firmware
+   runs down at 0x00Fxxxxx/0xFFFFxxxx, so anything at 0x80000000 and above is
+   the protected-mode driver. */
+static void
+ql_log_os_access(const char *what, uint32_t addr, uint16_t val, int is_write)
+{
+    static int n;
+    uint32_t pc = cpu_state.seg_cs.base + cpu_state.pc;
+
+    if ((pc < 0x80000000u) || (n >= 400))
+        return;
+
+    n++;
+    if (is_write)
+        ql_log("QL: OS %s w %03lX <- %04X pc=%08lX\n", what, addr & QL_IO_DECODE_MASK, val, pc);
+    else
+        ql_log("QL: OS %s r %03lX -> %04X pc=%08lX\n", what, addr & QL_IO_DECODE_MASK, val, pc);
+}
+
 static void
 ql_debug_check_for_nvram_access(uint32_t addr)
 {
@@ -922,6 +941,7 @@ debug_sxp_state_to_name(SxpState state)
 }
 #undef MAKE_CASE
 #else
+#    define ql_log_os_access(what, addr, val, is_write)
 #    define ql_log(fmt, ...)
 #endif
 
@@ -3809,6 +3829,14 @@ ql_ioport_write32(uint16_t addr, uint32_t val, void *priv)
 static void
 ql_ioport_write16(uint16_t addr, uint16_t val, void *priv)
 {
+#ifdef ENABLE_QL_LOG
+    ql_t *dev = priv;
+
+    if (!(dev->pci_cfg[PCI_REG_COMMAND_L] & PCI_COMMAND_IO)) {
+        ql_log_os_access("io(off)", addr, val, 1);
+        return;
+    }
+#endif
     ql_mmio_write16(addr, val, priv);
 }
 
@@ -3821,6 +3849,16 @@ ql_ioport_write8(uint16_t addr, uint8_t val, void *priv)
 static uint16_t
 ql_ioport_read16(uint16_t addr, void* priv)
 {
+#ifdef ENABLE_QL_LOG
+    ql_t *dev = priv;
+
+    /* Kept registered so an access made while the I/O space is switched off
+       in the command register still shows up instead of vanishing. */
+    if (!(dev->pci_cfg[PCI_REG_COMMAND_L] & PCI_COMMAND_IO)) {
+        ql_log_os_access("io(off)", addr, 0xFFFF, 0);
+        return 0xFFFF;
+    }
+#endif
     return ql_mmio_read16(addr, priv);
 }
 
@@ -3897,6 +3935,9 @@ ql_pci_remap_ioport_mapping(ql_t *dev, bool do_enable)
                       ql_ioport_write32,
                       dev);
     } else {
+#ifndef ENABLE_QL_LOG
+        /* Log builds keep the handler so accesses made with the I/O space
+           switched off are still recorded. */
         io_removehandler(ioport_base,
                          QL_PCI_IO_BAR_SIZE,
                          ql_ioport_read8,
@@ -3906,6 +3947,7 @@ ql_pci_remap_ioport_mapping(ql_t *dev, bool do_enable)
                          ql_ioport_write16,
                          ql_ioport_write32,
                          dev);
+#endif
     }
 }
 
@@ -4022,6 +4064,8 @@ ql_pci_write(UNUSED(int func), int addr, UNUSED(int len), uint8_t val, void *pri
     /* Disable old BAR mapping and handle command change */
     switch (addr) {
         case PCI_REG_COMMAND_L:
+            ql_log("QL: OS command %04X -> ", val);
+            ql_log("pc=%08lX\n", cpu_state.seg_cs.base + cpu_state.pc);
             if ((val ^ dev->pci_cfg[addr]) & PCI_COMMAND_IO) {
                 ql_pci_remap_ioport_mapping(dev, !!(val & PCI_COMMAND_IO));
             }
