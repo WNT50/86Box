@@ -435,6 +435,10 @@ st_flash_write_word(st_flash_t *dev, uint32_t addr, uint16_t val)
         if (i >= 0) {
             st_flash_log("FLASH: erase also %06X\n", off);
             dev->op_blocks |= (uint16_t) (1u << i);
+            /* The window restarts with every block address, so DQ3 has to go
+               back to low or the updater stops offering blocks after two. */
+            dev->op_reads = 0;
+            dev->op_toggle = 1;
             timer_on_auto(&dev->op_timer, ST_OP_ERASE_USEC);
             return;
         }
