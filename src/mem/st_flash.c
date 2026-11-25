@@ -110,7 +110,7 @@ enum {
    after a handful of reads, so the P/E.C. has to report completion inside
    that budget.  A wall-clock erase (about a second on the real part) would
    never be seen; the operation therefore advances on polled reads. */
-#define ST_OP_BUSY_POLLS  8
+#define ST_OP_BUSY_POLLS  32
 #define ST_OP_TIMER_POLLS 2
 #define ST_OP_ERR_POLLS   2
 
