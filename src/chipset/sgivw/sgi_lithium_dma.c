@@ -48,6 +48,13 @@ lithium_dma_log(const char *fmt, ...)
 #    define lithium_dma_log(fmt, ...)
 #endif
 
+/* The firmware reads the Lithium chip id from this offset to decide which
+   silicon revision it runs on; the value is the one its own table gives for
+   revision 5, the newest it knows.  The register is not covered by any
+   public document and Linux never reads it. */
+#define VW_LI_CHIP_ID_ADDR   (VW_LI_DMA_3_IO_BASE + 0x00C004)
+#define VW_LI_CHIP_ID_REV5   0x366C3DFBu
+
 static void
 lithium_dma_mmio_write8(uint32_t addr, uint8_t val, void* priv)
 {
@@ -94,6 +101,9 @@ lithium_dma_mmio_read32(uint32_t addr, void* priv)
     uint32_t ret;
 
     ret = 0;
+    if (addr == VW_LI_CHIP_ID_ADDR)
+        ret = VW_LI_CHIP_ID_REV5;
+
     lithium_dma_log("LI: DMA [R32] [%X] --> %X\n", addr, ret);
 
     return ret;
