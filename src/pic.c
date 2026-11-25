@@ -1242,6 +1242,11 @@ picint_lines(uint16_t num, int level, int set, uint8_t *irq_state, int to_ioapic
    if ((num & 0x0100) && set)
        acpi_rtc_status = 1;
 
+   /* IRQPROBE */
+   if (set && (num & 0xC000))
+       pclog("IRQPROBE P: latch %04X irr=%02X/%02X imr=%02X/%02X\n",
+             num, pic.irr, pic2.irr, pic.imr, pic2.imr);
+
    if (num) {
        if (irq_callback != NULL)
            irq_callback(num, set, irq_callback_priv);

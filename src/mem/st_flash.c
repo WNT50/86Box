@@ -35,6 +35,7 @@
 #include <86box/mem.h>
 #include <86box/nvr.h>
 #include <86box/machine.h>
+#include "cpu.h"
 #include <86box/flash.h>
 #include <86box/plat_unused.h>
 
@@ -350,6 +351,26 @@ static void
 st_flash_write_word(st_flash_t *dev, uint32_t addr, uint16_t val)
 {
     uint32_t off = addr & ST_FLASH_MASK;
+
+#ifdef ENABLE_ST_FLASH_LOG
+    /* Report the first command write together with the code around it: the
+       flash driver is not in the image that can be read from the ROM file. */
+    {
+        static int first = 1;
+        if (first) {
+            uint32_t lin = cpu_state.seg_cs.base + cpu_state.pc;
+            int      i;
+
+            first = 0;
+            st_flash_log("FLASH: first write from CS base %08X, pc %08X, linear %08X\n",
+                         cpu_state.seg_cs.base, cpu_state.pc, lin);
+            for (i = 0; i < 64; i++) {
+                st_flash_log("FLASH: code %08X: %02X\n", lin - 32 + i,
+                             mem_readb_phys(lin - 32 + i));
+            }
+        }
+    }
+#endif
 
     /* The part ignores writes while the P/E.C. runs. */
     if (dev->op != ST_OP_NONE)

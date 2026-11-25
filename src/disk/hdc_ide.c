@@ -486,6 +486,8 @@ static void ide_callback(void *priv);
 static void ide_board_callback(void *priv);
 static void ide_drive_setup(ide_t *dev);
 
+#define IRQPROBE_IDE_LOG 1
+#define ENABLE_IDE_LOG 1
 #ifdef ENABLE_IDE_LOG
 int ide_do_log = ENABLE_IDE_LOG;
 
@@ -1561,7 +1563,13 @@ ide_atapi_callback(ide_t *ide)
             ret              = 1;
             ide->tf->atastat = BUSY_STAT | (ide->tf->atastat & ERR_STAT);
             if (ide->packet_command) {
+                ide_log("ATAPI CDB: %02X %02X %02X %02X %02X %02X | %02X %02X %02X %02X %02X %02X \n",
+                        ide->sc->atapi_cdb[0],  ide->sc->atapi_cdb[1],  ide->sc->atapi_cdb[2],
+                        ide->sc->atapi_cdb[3],  ide->sc->atapi_cdb[4],  ide->sc->atapi_cdb[5],
+                        ide->sc->atapi_cdb[6],  ide->sc->atapi_cdb[7],  ide->sc->atapi_cdb[8],
+                        ide->sc->atapi_cdb[9],  ide->sc->atapi_cdb[10], ide->sc->atapi_cdb[11]);
                 ide->packet_command(ide->sc, ide->sc->atapi_cdb);
+                ide_log("ATAPI after cmd: pkt_status=%02X\n", ide->sc->packet_status);
                 if ((ide->sc->packet_status == PHASE_COMPLETE) && (ide->sc->callback == 0.0))
                     ide_atapi_callback(ide);
             }
@@ -2487,6 +2495,8 @@ ide_writeb(uint16_t addr, uint8_t val, void *priv)
                             ide_async_read_start_current(ide);
                             break;
                         } else if ((val == WIN_READ_MULTIPLE) && (ide->blocksize > 0)) {
+                            ide_log("READ MULTIPLE: lba=%" PRIu64 " secount=%u blocksize=%u\n",
+                                    ide_get_sector(ide), ide->tf->secount, ide->blocksize);
                             sec_count = ide->tf->secount ? ide->tf->secount : 256;
                             if (sec_count > ide->blocksize)
                                 sec_count = ide->blocksize;

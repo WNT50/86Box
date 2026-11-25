@@ -735,6 +735,9 @@ ioapic_deliver_pin(ioapic_t *dev, uint8_t pin, int asserted)
 
     ioapic_clear_pin_delivery_pending(dev, pin);
     ioapic_apic_bus_message_complete(dev);
+    if ((pin == 2) || (pin == 4) || (pin == 12))
+        pclog("IRQPROBE D: pin=%u vector=%02X level=%d\n", pin, vector, level);
+
     if (level) {
         /* RemoteIRR is owned here after accepted level delivery; EOI path clears/retries. */
         *lowp |= IOAPIC_REDIR_REMOTEIRR;
@@ -874,6 +877,10 @@ ioapic_legacy_irq(uint16_t mask, int level, int set)
             continue;
 
         uint32_t low = dev->ioapic_redir[pin * 2];
+
+        if (set && ((irq == 14) || (irq == 15)))
+            pclog("IRQPROBE A: irq=%u pin=%u masked=%u vector=%02X\n",
+                  irq, pin, ioapic_redir_masked(low), low & 0xFF);
 
         if (ioapic_redir_masked(low) && set)
             ioapic_log_masked_irq(dev, irq, pin, level, set, low);
