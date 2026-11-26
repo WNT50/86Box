@@ -329,6 +329,21 @@ arsenic_blit_frame(ars_t *dev)
 
     /* A line is a whole number of 512-byte tiles. */
     dev->fb_stride = tiles * 512;
+
+    /* In linear mode the DBE walks the frame buffer by the active line
+       width taken from the video timing: FRM_WIDTH_TILE only says how far
+       the line is rounded up (the 640x480 mode asks for two 512-byte tiles,
+       but the driver's line_length stays 640), so the tile count on its own
+       shears every line by the padding. */
+    {
+        uint32_t hblank = dev->regs[VW_ARS_REG_RETRACE_HBLANK];
+        int      hdisp  = (int) ((hblank >> 12) & 0x0fff);
+
+        if (((fb & 0x00000002) != 0) && (hdisp > 0) &&
+            ((hdisp * dev->fb_bpp) <= dev->fb_stride)) {
+            dev->fb_stride = hdisp * dev->fb_bpp;
+        }
+    }
     if (dev->fb_stride <= 0)
         dev->fb_stride = ARS_FB_WIDTH * dev->fb_bpp;
 
