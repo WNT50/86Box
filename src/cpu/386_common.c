@@ -1925,6 +1925,20 @@ int codegen_record_faulted;
    a fault whatever its number */
 int x86_int_external = 0;
 
+#ifdef ENABLE_CPU_EXC_LOG
+static void
+x86_exc_log(int num, uint32_t eip)
+{
+    static int n;
+
+    if (n < 500) {
+        n++;
+        pclog("EXC %02X eip=%08X cs=%04X\n", num, eip,
+              cpu_state.seg_cs.seg);
+    }
+}
+#endif
+
 void
 x86_int(int num)
 {
@@ -1932,6 +1946,11 @@ x86_int(int num)
     /* #DE, #BR, #UD, #NM and #MF are faults: as for those x86_doabrt()
        delivers, the EFLAGS image the handler gets has RF set */
     const int fault = !x86_int_external && ((num == 0) || (num == 5) || (num == 6) || (num == 7) || (num == 16));
+
+#ifdef ENABLE_CPU_EXC_LOG
+    if ((num < 32) && (num != 0x08))
+        x86_exc_log(num, cpu_state.oldpc);
+#endif
 
     /* A fault did not retire the instruction being stepped. Drop its
        pending debug trap before entering the handler; a task switch may
@@ -1961,6 +1980,10 @@ x86_int(int num)
         if ((num << 2UL) + 3UL > idt.limit) {
             if (idt.limit < 35) {
                 cpu_state.abrt = 0;
+#ifdef ENABLE_CPU_EXC_LOG
+                pclog("TRIPLE FAULT (real mode) eip=%08X cs=%04X\n",
+                      cpu_state.oldpc, cpu_state.seg_cs.seg);
+#endif
                 softresetx86_from(SOFT_RESET_SHUTDOWN);
                 cpu_set_edx();
 #ifdef ENABLE_386_COMMON_LOG

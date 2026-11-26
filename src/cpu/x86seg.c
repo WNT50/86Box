@@ -2414,6 +2414,10 @@ pmodeint(int num, int soft)
     if ((addr + 7) > idt.limit) {
         if (num == 0x08) {
             /* Triple fault - reset! */
+#ifdef ENABLE_CPU_EXC_LOG
+            pclog("TRIPLE FAULT (pmode) eip=%08X cs=%04X\n",
+                  cpu_state.oldpc, cpu_state.seg_cs.seg);
+#endif
             softresetx86_from(SOFT_RESET_SHUTDOWN);
             cpu_set_edx();
         } else if (num == 0x0d) {
