@@ -338,10 +338,16 @@ arsenic_blit_frame(ars_t *dev)
     {
         uint32_t hblank = dev->regs[VW_ARS_REG_RETRACE_HBLANK];
         int      hdisp  = (int) ((hblank >> 12) & 0x0fff);
+        int      hbytes = hdisp * dev->fb_bpp;
 
-        if (((fb & 0x00000002) != 0) && (hdisp > 0) &&
-            ((hdisp * dev->fb_bpp) <= dev->fb_stride)) {
-            dev->fb_stride = hdisp * dev->fb_bpp;
+        /* Only a believable active width may override the tile count: the
+           firmware's 1024x768 mode leaves 1019 in VT_HBLANK, which shears the
+           whole screen, so require a multiple of 8 that also agrees with the
+           tile rounding (a line may be padded by less than one tile). */
+        if (((fb & 0x00000002) != 0) && (hbytes > 0) &&
+            ((hbytes & 7) == 0) && (hbytes <= dev->fb_stride) &&
+            ((dev->fb_stride - hbytes) < 512)) {
+            dev->fb_stride = hbytes;
         }
     }
     if (dev->fb_stride <= 0)
