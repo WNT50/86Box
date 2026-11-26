@@ -73,7 +73,11 @@ machine_at_sgivw_common_init(const machine_t *model, int is_320)
 
     machine_sgivw_gpio_init(is_320);
 
-    machine_at_common_init_ex(model, 2);
+    /* The Visual Workstation's PIIX4E carries the standard 8254, so the
+       machine takes the common AT timer path: ports 0x40-0x43, IRQ 0 and the
+       refresh hook.  MACHINE_NONSTANDARD_PIT would leave pit_devs[0] empty,
+       and the PROM does drive port 0x61 (Timer 2 gate) at boot. */
+    machine_at_common_init(model);
 
     pci_init(PCI_CONFIG_TYPE_1);
 
