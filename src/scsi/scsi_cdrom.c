@@ -141,12 +141,15 @@ uint8_t scsi_cdrom_command_flags[0x100] = {
 
 static uint64_t scsi_cdrom_ms_page_flags           = (GPMODEP_R_W_ERROR_PAGE | GPMODEP_CDROM_PAGE |
                                                       GPMODEP_CDROM_AUDIO_PAGE | (1ULL << 0x0fULL) |
+                                                      /* The updater's ATAPI driver asks for this one
+                                                         before it will use the drive (INF-8070i 9.7.5.3). */
+                                                      (1ULL << 0x1bULL) |
                                                       GPMODEP_CAPABILITIES_PAGE | GPMODEP_ALL_PAGES);
 static uint64_t scsi_cdrom_ms_page_flags_scsi      = (GPMODEP_UNIT_ATN_PAGE | GPMODEP_R_W_ERROR_PAGE |
                                                       GPMODEP_DISCONNECT_PAGE | GPMODEP_FORMAT_DEVICE_PAGE |
                                                       GPMODEP_CDROM_PAGE | GPMODEP_CDROM_AUDIO_PAGE |
-                                                      (1ULL << 0x0fULL) | GPMODEP_CAPABILITIES_PAGE |
-                                                      GPMODEP_ALL_PAGES);
+                                                      (1ULL << 0x0fULL) | (1ULL << 0x1bULL) |
+                                                      GPMODEP_CAPABILITIES_PAGE | GPMODEP_ALL_PAGES);
 static uint64_t scsi_cdrom_ms_page_flags_sony_scsi = (GPMODEP_R_W_ERROR_PAGE | GPMODEP_DISCONNECT_PAGE |
                                                       GPMODEP_CDROM_PAGE_SONY | GPMODEP_CDROM_AUDIO_PAGE_SONY |
                                                       (1ULL << 0x0fULL) | GPMODEP_CAPABILITIES_PAGE |
@@ -172,6 +175,8 @@ static const mode_sense_pages_t scsi_cdrom_ms_pages_default = {
       [0x0f] = { 0x0f,                                0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                  0x00,                                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                  0x00,                                0x00, 0x00, 0x00, 0x00, 0x00             },
+      [0x1b] = { 0x1b,                                0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                 0x00,                                0x00, 0x00, 0x00                         },
       [0x2a] = { GPMODE_CAPABILITIES_PAGE,            0x12, 0x07, 0x00, 0x7f, 0x01, 0x0d, 0x03,
                  0x02,                                0xc2, 0x01, 0x00, 0x00, 0x00, 0x02, 0xc2,
                  0x00,                                0x00, 0x00, 0x00                         } }
@@ -191,6 +196,8 @@ static const mode_sense_pages_t scsi_cdrom_ms_pages_default_scsi = {
       [0x0f] = { 0x0f,                                0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                  0x00,                                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                  0x00,                                0x00, 0x00, 0x00, 0x00, 0x00             },
+      [0x1b] = { 0x1b,                                0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                 0x00,                                0x00, 0x00, 0x00                         },
       [0x2a] = { GPMODE_CAPABILITIES_PAGE,            0x12, 0x07, 0x00, 0x7f, 0x01, 0x0d, 0x03,
                  0x02,                                0xc2, 0x01, 0x00, 0x00, 0x00, 0x02, 0xc2,
                  0x00,                                0x00, 0x00, 0x00                         } }
