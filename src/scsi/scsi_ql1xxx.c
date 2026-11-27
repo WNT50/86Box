@@ -1350,6 +1350,30 @@ ql_rom_bar_mmio_read8(uint32_t addr, void* priv)
     return am29_mmio_read8(addr, &dev->flash_device);
 }
 
+static uint16_t
+ql_rom_bar_mmio_read16(uint32_t addr, void *priv)
+{
+    ql_t *dev = priv;
+
+    addr &= (dev->pci_rom_area_size - 1);
+    return (uint16_t) (am29_mmio_read8(addr, &dev->flash_device) |
+                       (am29_mmio_read8(addr + 1, &dev->flash_device) << 8));
+}
+
+static uint32_t
+ql_rom_bar_mmio_read32(uint32_t addr, void *priv)
+{
+    ql_t  *dev = priv;
+    uint32_t ret;
+
+    addr &= (dev->pci_rom_area_size - 1);
+    ret = (uint32_t) am29_mmio_read8(addr, &dev->flash_device);
+    ret |= (uint32_t) am29_mmio_read8(addr + 1, &dev->flash_device) << 8;
+    ret |= (uint32_t) am29_mmio_read8(addr + 2, &dev->flash_device) << 16;
+    ret |= (uint32_t) am29_mmio_read8(addr + 3, &dev->flash_device) << 24;
+    return ret;
+}
+
 static void
 ql_update_irq(ql_t *dev)
 {
@@ -4812,8 +4836,8 @@ ql_init(const device_t *info)
                     0,
                     0,
                     ql_rom_bar_mmio_read8,
-                    NULL,
-                    NULL,
+                    ql_rom_bar_mmio_read16,
+                    ql_rom_bar_mmio_read32,
                     NULL,
                     NULL,
                     NULL,
