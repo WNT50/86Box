@@ -4770,3 +4770,12 @@ msgstr "板卡"
 
 msgid "now in port %1"
 msgstr "現位於埠 %1"
+
+msgid "PCI devices"
+msgstr "PCI 裝置"
+
+msgid "List of PCI devices:"
+msgstr "PCI 裝置清單:"
+
+msgid "&PCI devices…"
+msgstr "PCI 裝置(&P)…"

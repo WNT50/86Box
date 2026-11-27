@@ -4744,3 +4744,12 @@ msgstr "placa"
 
 msgid "now in port %1"
 msgstr "agora na porta %1"
+
+msgid "PCI devices"
+msgstr "Dispositivos PCI"
+
+msgid "List of PCI devices:"
+msgstr "Lista de dispositivos PCI:"
+
+msgid "&PCI devices…"
+msgstr "Dispositivos &PCI…"

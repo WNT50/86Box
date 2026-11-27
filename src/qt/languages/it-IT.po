@@ -4880,3 +4880,12 @@ msgstr "scheda"
 
 msgid "now in port %1"
 msgstr "adesso nella porta %1"
+
+msgid "PCI devices"
+msgstr "Dispositivi PCI"
+
+msgid "List of PCI devices:"
+msgstr "Elenco dei dispositivi PCI:"
+
+msgid "&PCI devices…"
+msgstr "Dispositivi PCI…"

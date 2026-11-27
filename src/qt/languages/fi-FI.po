@@ -4705,3 +4705,12 @@ msgstr ""
 
 msgid "now in port %1"
 msgstr ""
+
+msgid "PCI devices"
+msgstr "PCI-laitteet"
+
+msgid "List of PCI devices:"
+msgstr "Luettelo PCI-laitteista:"
+
+msgid "&PCI devices…"
+msgstr "PCI-laitteet…"

@@ -4715,3 +4715,12 @@ msgstr ""
 
 msgid "now in port %1"
 msgstr ""
+
+msgid "PCI devices"
+msgstr "Thiết bị PCI"
+
+msgid "List of PCI devices:"
+msgstr "Danh sách các thiết bị PCI:"
+
+msgid "&PCI devices…"
+msgstr "Thiết bị PCI…"

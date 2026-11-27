@@ -4679,3 +4679,84 @@ msgstr ""
 
 msgid "now in port %1"
 msgstr ""
+
+msgid "PCI devices"
+msgstr ""
+
+msgid "List of PCI devices:"
+msgstr ""
+
+msgid "&PCI devices…"
+msgstr ""
+
+msgid "Host bridge"
+msgstr ""
+
+msgid "Second host bridge"
+msgstr ""
+
+msgid "AGP bridge"
+msgstr ""
+
+msgid "ISA/LPC bridge"
+msgstr ""
+
+msgid "IDE controller"
+msgstr ""
+
+msgid "Power management"
+msgstr ""
+
+msgid "USB controller"
+msgstr ""
+
+msgid "AGP card"
+msgstr ""
+
+msgid "Add-in card"
+msgstr ""
+
+msgid "Video card"
+msgstr ""
+
+msgid "Hangul card"
+msgstr ""
+
+msgid "IDE card"
+msgstr ""
+
+msgid "SCSI card"
+msgstr ""
+
+msgid "Sound card"
+msgstr ""
+
+msgid "Modem"
+msgstr ""
+
+msgid "Network card"
+msgstr ""
+
+msgid "Serial card"
+msgstr ""
+
+msgid "USB card"
+msgstr ""
+
+msgid "PCI bridge"
+msgstr ""
+
+msgid "Unknown"
+msgstr ""
+
+msgid "No PCI devices."
+msgstr ""
+
+msgid "1 card could not be placed in any slot."
+msgstr ""
+
+msgid "%1 cards could not be placed in any slot."
+msgstr ""
+
+msgid "Cards are bound to the first free slot of a matching type; bus and device numbers are those the guest sees."
+msgstr ""

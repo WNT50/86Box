@@ -4919,3 +4919,12 @@ msgstr "πλακέτα"
 
 msgid "now in port %1"
 msgstr "τώρα στη θύρα %1"
+
+msgid "PCI devices"
+msgstr "Συσκευές PCI"
+
+msgid "List of PCI devices:"
+msgstr "Λίστα συσκευών PCI:"
+
+msgid "&PCI devices…"
+msgstr "Συσκευές &PCI…"

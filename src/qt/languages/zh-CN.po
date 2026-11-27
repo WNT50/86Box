@@ -4733,3 +4733,12 @@ msgstr "板卡"
 
 msgid "now in port %1"
 msgstr "现在位于端口%1"
+
+msgid "PCI devices"
+msgstr "PCI 设备"
+
+msgid "List of PCI devices:"
+msgstr "PCI 设备清单："
+
+msgid "&PCI devices…"
+msgstr "&PCI 设备…"

@@ -4870,3 +4870,12 @@ msgstr "kaart"
 
 msgid "now in port %1"
 msgstr "nu in poort %1"
+
+msgid "PCI devices"
+msgstr "PCI-apparaten"
+
+msgid "List of PCI devices:"
+msgstr "Lijst van PCI-apparaten:"
+
+msgid "&PCI devices…"
+msgstr "PCI-apparaten…"

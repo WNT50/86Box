@@ -4789,3 +4789,12 @@ msgstr ""
 
 msgid "now in port %1"
 msgstr ""
+
+msgid "PCI devices"
+msgstr "PCI aygıtları"
+
+msgid "List of PCI devices:"
+msgstr "PCI aygıtlarının listesi:"
+
+msgid "&PCI devices…"
+msgstr "&PCI aygıtları…"

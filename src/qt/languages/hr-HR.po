@@ -4721,3 +4721,12 @@ msgstr ""
 
 msgid "now in port %1"
 msgstr ""
+
+msgid "PCI devices"
+msgstr "Uređaji PCI"
+
+msgid "List of PCI devices:"
+msgstr "Spisak uređaja PCI:"
+
+msgid "&PCI devices…"
+msgstr "Uređaji PCI…"
