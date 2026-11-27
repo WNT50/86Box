@@ -76,9 +76,38 @@ PCIDeviceList::PCIDeviceList(QWidget *parent)
 
         /* The device number is what the guest sees at 0xCF8; bus + dev identify
            the card unambiguously even when two slots share a device number. */
-        ui->listWidget->addItem(QString::asprintf("Bus %u, device %u: %04X:%04X  (%s)",
+        ui->listWidget->addItem(QString::asprintf("Bus %u, device %u — %04X:%04X  (%s)",
                                                  bus, dev, vendor, device,
                                                  pci_type_name(type).toUtf8().constData()));
+
+        /* Early chipsets leave the PIRQ lines unrouted until the BIOS or the OS
+           programs them, so show where each of the card's INTx lines goes. */
+        for (int pin = 0; pin < PCI_INT_PINS_NUM; pin++) {
+            const uint8_t routing = irq_routing[pin];
+            QString       target;
+
+            if (routing == 0x00)
+                continue;
+
+            if (routing >= PCI_DIRQ_BASE) {
+                target = QString::asprintf("IRQ %u (direct)", routing & 0x0f);
+            } else if (routing >= PCI_IIRQ_BASE) {
+                target = QStringLiteral("chipset internal PIRQ");
+            } else if (routing <= PCI_IRQS_NUM) {
+                const QChar   pirq('A' + (routing - 1));
+                const uint8_t irq = pci_get_irq_line(i, PCI_INTA + pin);
+                if (irq == 0xff)
+                    target = QStringLiteral("PIRQ %1 (not routed)").arg(pirq);
+                else
+                    target = QStringLiteral("PIRQ %1 → IRQ %2").arg(pirq).arg(irq);
+            } else {
+                continue;
+            }
+
+            ui->listWidget->addItem(QStringLiteral("        INT%1 → %2")
+                                        .arg(QChar('A' + pin))
+                                        .arg(target));
+        }
         shown++;
     }
 
