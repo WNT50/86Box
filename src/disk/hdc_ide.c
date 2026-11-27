@@ -168,6 +168,12 @@ typedef struct ide_board_t {
 
     pc_timer_t timer;
 
+    /* INTRQ is asserted after the command has taken some time to complete;
+       raising it at once lets the guest's status poll clear it before the
+       interrupt is ever delivered. */
+    pc_timer_t irq_timer;
+    ide_t     *irq_pending;
+
     ide_t     *ide[2];
     ide_bm_t  *bm;
 
@@ -485,6 +491,7 @@ ide_wait_for_async_reads(void)
 
 static void ide_atapi_callback(ide_t *ide);
 static void ide_callback(void *priv);
+static void ide_irq_timer(void *priv);
 static void ide_board_callback(void *priv);
 static void ide_drive_setup(ide_t *dev);
 
@@ -699,8 +706,15 @@ ide_irq_update(ide_board_t *dev, UNUSED(int log))
         picint_common(1 << dev->irq, PIC_IRQ_EDGE, set, NULL);
 }
 
-void
-ide_irq(ide_t *ide, int set, int log)
+/* A command completes in no time at all here, so the guest's immediate status
+   poll would clear INTRQ before the CPU can take the interrupt. Real drives
+   assert it only after the command has run, so hold the request back for a
+   moment; a lower that arrives during that window belongs to that same poll
+   and must not cancel it. */
+#define IDE_IRQ_DELAY_US 20
+
+static void
+ide_irq_do(ide_t *ide, int set, int log)
 {
     ide_board_t *board = ide_drive_board(ide);
 
@@ -718,6 +732,38 @@ ide_irq(ide_t *ide, int set, int log)
 
     if (ide->selected)
         ide_irq_update(board, log);
+}
+
+static void
+ide_irq_timer(void *priv)
+{
+    ide_board_t *board = (ide_board_t *) priv;
+    ide_t       *ide   = board->irq_pending;
+
+    board->irq_pending = NULL;
+
+    if (ide != NULL)
+        ide_irq_do(ide, 1, 1);
+}
+
+void
+ide_irq(ide_t *ide, int set, int log)
+{
+    ide_board_t *board = ide_drive_board(ide);
+
+    if (board == NULL)
+        return;
+
+    if (set) {
+        board->irq_pending = ide;
+        timer_set_delay_u64(&board->irq_timer, IDE_IRQ_DELAY_US * TIMER_USEC);
+        return;
+    }
+
+    if (board->irq_pending != NULL)
+        return;
+
+    ide_irq_do(ide, set, log);
 }
 
 /**
@@ -2162,6 +2208,13 @@ static void
 ide_reset_registers(ide_t *ide)
 {
     uint16_t ide_signatures[4] = { 0x7f7f, 0x0000, 0xeb14, 0x7f7f };
+    ide_board_t *board = ide_drive_board(ide);
+
+    /* A reset drops whatever request the drive had not signalled yet. */
+    if (board != NULL) {
+        timer_stop(&board->irq_timer);
+        board->irq_pending = NULL;
+    }
 
     ide->tf->atastat  = DRDY_STAT | DSC_STAT;
     ide->tf->error    = 1;
@@ -4041,6 +4094,7 @@ ide_board_init(int board, int irq, int base_main, int side_main, int type, int b
         ide_set_handlers(board);
 
     timer_add(&ide_boards[board]->timer, ide_board_callback, ide_boards[board], 0);
+    timer_add(&ide_boards[board]->irq_timer, ide_irq_timer, ide_boards[board], 0);
 
     ide_board_setup(board);
 
