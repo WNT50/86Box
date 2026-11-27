@@ -4752,11 +4752,4 @@ msgstr ""
 msgid "No PCI devices."
 msgstr ""
 
-msgid "1 card could not be placed in any slot."
-msgstr ""
 
-msgid "%1 cards could not be placed in any slot."
-msgstr ""
-
-msgid "Cards are bound to the first free slot of a matching type; bus and device numbers are those the guest sees."
-msgstr ""

@@ -59,8 +59,6 @@ typedef struct pci_card_desc_t {
     uint8_t     *slot;
 } pci_card_desc_t;
 
-/* Cards the user asked for that found no free slot. */
-static int pci_dropped_cards;
 
 /* Numbering of the add-in slots, in the order the machine registers them. */
 static uint8_t last_slot_number;
@@ -1392,7 +1390,6 @@ pci_register_card(int pci_card)
                 /* A card the user selected has nowhere to go: say so instead of
                    silently dropping it. */
                 pci_log("pci_register_card(): no free slot for a PCI card, dropping it\n");
-                pci_dropped_cards++;
             }
         }
 
@@ -1400,12 +1397,6 @@ pci_register_card(int pci_card)
     }
 
     return ret;
-}
-
-int
-pci_get_dropped_cards(void)
-{
-    return pci_dropped_cards;
 }
 
 uint8_t
@@ -1503,7 +1494,6 @@ pci_register_cards(void)
 #endif
 
     next_normal_pci_card = 0;
-    pci_dropped_cards    = 0;
 
     if (next_pci_card > 0) {
         for (uint8_t i = 0; i < next_pci_card; i++) {

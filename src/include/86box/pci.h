@@ -334,7 +334,6 @@ extern void        pci_register_cards(void);
 extern int         pci_get_nr_slots(void);
 extern const char *pci_get_slot_device_name(int index);
 extern uint8_t     pci_get_slot_number(int index);
-extern int         pci_get_dropped_cards(void);
 extern int         pci_get_slot_info(int index, uint8_t *bus, uint8_t *dev, uint8_t *type,
                                      uint8_t *irq_routing, uint16_t *vendor, uint16_t *device);
 

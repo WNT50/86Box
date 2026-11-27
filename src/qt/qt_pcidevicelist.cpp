@@ -144,17 +144,6 @@ PCIDeviceList::PCIDeviceList(QWidget *parent)
         ui->listWidget->setDisabled(true);
     }
 
-    const int dropped = pci_get_dropped_cards();
-    if (dropped == 1) {
-        ui->statusLabel->setText(QObject::tr("1 card could not be placed in any slot."));
-    } else if (dropped > 1) {
-        ui->statusLabel->setText(QObject::tr("%1 cards could not be placed in any slot.")
-                                     .arg(dropped));
-    } else {
-        ui->statusLabel->setText(QObject::tr("Cards are bound to the first free slot of a "
-                                             "matching type; bus and device numbers are those "
-                                             "the guest sees."));
-    }
     endblit();
 }
 
