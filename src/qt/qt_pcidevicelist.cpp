@@ -84,8 +84,9 @@ PCIDeviceList::PCIDeviceList(QWidget *parent)
 
         /* One line per wired interrupt pin, each repeating the card it belongs
            to; a pin the slot does not wire up is left out entirely. A card with
-           no wired pin at all keeps a single line of its own. */
-        bool any = false;
+           no wired pin at all keeps a single line of its own. Cards are
+           separated by a divider so the groups stay readable. */
+        QStringList lines;
 
         for (int pin = 0; pin < PCI_INT_PINS_NUM; pin++) {
             const uint8_t routing = irq_routing[pin];
@@ -109,13 +110,21 @@ PCIDeviceList::PCIDeviceList(QWidget *parent)
                 continue;
             }
 
-            ui->listWidget->addItem(
+            lines.append(
                 QStringLiteral("%1    INT%2 → %3").arg(card).arg(QChar('A' + pin)).arg(target));
-            any = true;
         }
 
-        if (!any)
-            ui->listWidget->addItem(card);
+        if (lines.isEmpty())
+            lines.append(card);
+
+        if (shown > 0) {
+            auto *separator = new QListWidgetItem(QStringLiteral("────────────────────────"));
+            separator->setFlags(Qt::NoItemFlags);
+            ui->listWidget->addItem(separator);
+        }
+
+        for (const QString &line : lines)
+            ui->listWidget->addItem(line);
 
         shown++;
     }
