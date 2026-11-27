@@ -2168,8 +2168,14 @@ msgstr "WinBox už nie je podporovaný"
 msgid "Development of the WinBox manager stopped in 2022 due to a lack of maintainers. As we direct our efforts towards making 86Box even better, we have made the decision to no longer support WinBox as a manager.\n\nNo further updates will be provided through WinBox, and you may encounter incorrect behavior should you continue using it with newer versions of 86Box. Any bug reports related to WinBox behavior will be closed as invalid.\n\nGo to 86box.net for a list of other managers you can use."
 msgstr "Vývoj správcu WinBox sa zastavil v roku 2022 z dôvodu nedostatku správcov. Keďže naše úsilie smerujeme k ešte lepšiemu systému 86Box, rozhodli sme sa, že správca WinBox už nebude podporovaný.\n\nProstredníctvom WinBoxu nebudú poskytované žiadne ďalšie aktualizácie a v prípade, že ho budete naďalej používať s novšími verziami programu 86Box, môžete sa stretnúť s nesprávnym správaním. Všetky hlásenia o chybách týkajúce sa správania WinBoxu budú uzavreté ako neplatné.\n\nNa stránke 86box.net nájdete zoznam iných správcov, ktoré môžete používať."
 
+msgid "About &Qt"
+msgstr "O &Qt"
+
 msgid "Generate"
 msgstr "Generovať"
+
+msgid "&Tablet tool"
+msgstr "Nástroj pre tablety"
 
 msgid "Joystick configuration"
 msgstr "Konfigurácia joysticku"
@@ -2186,17 +2192,26 @@ msgstr "%1 (os Y)"
 msgid "MCA devices"
 msgstr "Zariadenia MCA"
 
+msgid "&MCA devices…"
+msgstr "Zariadenia MCA…"
+
+msgid "No MCA devices."
+msgstr "Žiadne zariadenia MCA."
+
 msgid "List of MCA devices:"
 msgstr "Zoznam zariadení MCA:"
 
-msgid "&Tablet tool"
-msgstr "Nástroj pre tablety"
+msgid "PCI devices"
+msgstr "Zariadenia PCI"
 
-msgid "About &Qt"
-msgstr "O &Qt"
+msgid "&PCI devices…"
+msgstr "Zariadenia PCI…"
 
-msgid "&MCA devices…"
-msgstr "Zariadenia MCA…"
+msgid "No PCI devices."
+msgstr "Žiadne zariadenia PCI."
+
+msgid "List of PCI devices:"
+msgstr "Zoznam zariadení PCI:"
 
 msgid "Show non-&primary monitors"
 msgstr "Zobrazenie iných ako primárnych monitorov"
@@ -2299,9 +2314,6 @@ msgstr "Skopíroval som ho"
 
 msgid "86Box Monitor #%1"
 msgstr "86Box Monitor %1"
-
-msgid "No MCA devices."
-msgstr "Žiadne zariadenia MCA."
 
 msgid "MiB"
 msgstr "MiB"

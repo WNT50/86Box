@@ -2180,8 +2180,14 @@ msgstr "不再支援 WinBox"
 msgid "Development of the WinBox manager stopped in 2022 due to a lack of maintainers. As we direct our efforts towards making 86Box even better, we have made the decision to no longer support WinBox as a manager.\n\nNo further updates will be provided through WinBox, and you may encounter incorrect behavior should you continue using it with newer versions of 86Box. Any bug reports related to WinBox behavior will be closed as invalid.\n\nGo to 86box.net for a list of other managers you can use."
 msgstr "WinBox 於 2022 年因缺乏維護者而停止發展。由於我們傾注全力於將 86Box 做的更好，我們決定不再支援將 WinBox 做為前端管理程式。\n\n在 WinBox 未提供更新前，搭配新版本的 86Box 使用將導致不正確的行為。任何由 WinBox 引起的錯誤回報將標記為無效而結案。\n\n請造訪 86box.net 網站以取得其他可用的前端管理程式列表。"
 
+msgid "About &Qt"
+msgstr "關於 Qt(&Q)"
+
 msgid "Generate"
 msgstr "產生"
+
+msgid "&Tablet tool"
+msgstr "數位板工具(&T)"
 
 msgid "Joystick configuration"
 msgstr "搖桿組態"
@@ -2198,17 +2204,26 @@ msgstr "%1 (Y 軸)"
 msgid "MCA devices"
 msgstr "MCA 裝置"
 
+msgid "&MCA devices…"
+msgstr "MCA 裝置(&M)…"
+
+msgid "No MCA devices."
+msgstr "沒有 MCA 裝置。"
+
 msgid "List of MCA devices:"
 msgstr "MCA 裝置清單:"
 
-msgid "&Tablet tool"
-msgstr "數位板工具(&T)"
+msgid "PCI devices"
+msgstr "PCI 裝置"
 
-msgid "About &Qt"
-msgstr "關於 Qt(&Q)"
+msgid "&PCI devices…"
+msgstr "PCI 裝置(&P)…"
 
-msgid "&MCA devices…"
-msgstr "MCA 裝置(&M)…"
+msgid "No PCI devices."
+msgstr "沒有 PCI 裝置。"
+
+msgid "List of PCI devices:"
+msgstr "PCI 裝置清單:"
 
 msgid "Show non-&primary monitors"
 msgstr "顯示非主要監視器(&P)"
@@ -2317,9 +2332,6 @@ msgstr "我已複製這部機器"
 
 msgid "86Box Monitor #%1"
 msgstr "86Box 監視器 #%1"
-
-msgid "No MCA devices."
-msgstr "沒有 MCA 裝置。"
 
 msgid "MiB"
 msgstr "MiB"

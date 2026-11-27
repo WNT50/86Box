@@ -2162,8 +2162,14 @@ msgstr "El WinBox ja no és suportat"
 msgid "Development of the WinBox manager stopped in 2022 due to a lack of maintainers. As we direct our efforts towards making 86Box even better, we have made the decision to no longer support WinBox as a manager.\n\nNo further updates will be provided through WinBox, and you may encounter incorrect behavior should you continue using it with newer versions of 86Box. Any bug reports related to WinBox behavior will be closed as invalid.\n\nGo to 86box.net for a list of other managers you can use."
 msgstr "El desenvolupament de l'administrador WinBox es va aturar el 2022 per la manca de mantenidors. Com que ara dirigim els nostres esforços a fer 86Box encara millor, hem pres la decisió de no suportar més el WinBox com a administrador.\n\nNo es proporcionaran més actualitzacions a través del WinBox, i podríeu trobar un comportament incorrecte si continua utilitzant amb versions más noves del 86Box. Qualsevol report de error relacionat amb el comportament del WinBox serà tancat com a invàlid.\n\nAneu a 86box.net per a una llista d'altres administradors que podeu utilitzar."
 
+msgid "About &Qt"
+msgstr "Quant al &Qt"
+
 msgid "Generate"
 msgstr "Genera"
+
+msgid "&Tablet tool"
+msgstr "Eina de &tauleta"
 
 msgid "Joystick configuration"
 msgstr "Configuració del joystick"
@@ -2180,17 +2186,26 @@ msgstr "%1 (eix Y)"
 msgid "MCA devices"
 msgstr "Dispositius MCA"
 
+msgid "&MCA devices…"
+msgstr "Dispositius MCA…"
+
+msgid "No MCA devices."
+msgstr "Cap dispositiu MCA."
+
 msgid "List of MCA devices:"
 msgstr "Llista de dispositius MCA:"
 
-msgid "&Tablet tool"
-msgstr "Eina de &tauleta"
+msgid "PCI devices"
+msgstr "Dispositius PCI"
 
-msgid "About &Qt"
-msgstr "Quant al &Qt"
+msgid "&PCI devices…"
+msgstr "Dispositius PCI…"
 
-msgid "&MCA devices…"
-msgstr "Dispositius MCA…"
+msgid "No PCI devices."
+msgstr "Cap dispositiu PCI."
+
+msgid "List of PCI devices:"
+msgstr "Llista de dispositius PCI:"
 
 msgid "Show non-&primary monitors"
 msgstr "Mostrar monitors no prim&aris"
@@ -2293,9 +2308,6 @@ msgstr "L'he copiada"
 
 msgid "86Box Monitor #%1"
 msgstr "Monitor del 86Box %1"
-
-msgid "No MCA devices."
-msgstr "Cap dispositiu MCA."
 
 msgid "MiB"
 msgstr "MiB"

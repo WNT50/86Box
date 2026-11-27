@@ -2216,8 +2216,14 @@ msgstr ""
 "\n"
 "사용 가능한 다른 관리자 목록은 86box.net에서 확인하세요."
 
+msgid "About &Qt"
+msgstr "&Qt 소개"
+
 msgid "Generate"
 msgstr "생성"
+
+msgid "&Tablet tool"
+msgstr "태블릿 도구(&T)"
 
 msgid "Joystick configuration"
 msgstr "조이스틱 구성"
@@ -2234,17 +2240,26 @@ msgstr "1(Y 축)"
 msgid "MCA devices"
 msgstr "MCA 장치"
 
+msgid "&MCA devices…"
+msgstr "&MCA 장치…"
+
+msgid "No MCA devices."
+msgstr "MCA 장치가 없습니다."
+
 msgid "List of MCA devices:"
 msgstr "MCA 장치 목록:"
 
-msgid "&Tablet tool"
-msgstr "태블릿 도구(&T)"
+msgid "PCI devices"
+msgstr "PCI 장치"
 
-msgid "About &Qt"
-msgstr "&Qt 소개"
+msgid "&PCI devices…"
+msgstr "&PCI 장치…"
 
-msgid "&MCA devices…"
-msgstr "&MCA 장치…"
+msgid "No PCI devices."
+msgstr "PCI 장치가 없습니다."
+
+msgid "List of PCI devices:"
+msgstr "PCI 장치 목록:"
 
 msgid "Show non-&primary monitors"
 msgstr "기본 모니터가 아닌 모니터 표시(&P)"
@@ -2354,9 +2369,6 @@ msgstr "복사했습니다"
 
 msgid "86Box Monitor #%1"
 msgstr "86Box 모니터 %1"
-
-msgid "No MCA devices."
-msgstr "MCA 장치가 없습니다."
 
 msgid "MiB"
 msgstr "MiB"

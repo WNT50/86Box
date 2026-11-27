@@ -2195,8 +2195,14 @@ msgstr "WinBox stöds inte längre"
 msgid "Development of the WinBox manager stopped in 2022 due to a lack of maintainers. As we direct our efforts towards making 86Box even better, we have made the decision to no longer support WinBox as a manager.\n\nNo further updates will be provided through WinBox, and you may encounter incorrect behavior should you continue using it with newer versions of 86Box. Any bug reports related to WinBox behavior will be closed as invalid.\n\nGo to 86box.net for a list of other managers you can use."
 msgstr "Utvecklingen av hanteraren WinBox stoppades under 2022 på grund av avsaknad av underhållare. När vi nu riktar våra ansträngningar till att göra 86Box ännu bättre så har vi fattat beslutet att inte längre stödja WinBox som en hanterare.\n\nInga framtida uppdateringar kommer att tillhandahållas genom WinBox, och du kan stöta på felaktiga beteenden om du skulle fortsätta att använda det med nyare versioner av 86Box. Alla felrapporter som har att göra med WinBox kommer att stängas som ogiltiga.\n\nGå till 86Box.net för en lista med andra hanterare som du kan använda."
 
+msgid "About &Qt"
+msgstr "Om &Qt"
+
 msgid "Generate"
 msgstr "Generera"
+
+msgid "&Tablet tool"
+msgstr "Plattverktyg"
 
 msgid "Joystick configuration"
 msgstr "Konfiguration av styrspak"
@@ -2213,17 +2219,26 @@ msgstr "%1 (Y-axeln)"
 msgid "MCA devices"
 msgstr "MCA-enheter"
 
+msgid "&MCA devices…"
+msgstr "MCA-enheter…"
+
+msgid "No MCA devices."
+msgstr "Inga MCA-enheter."
+
 msgid "List of MCA devices:"
 msgstr "Lista på MCA-enheter:"
 
-msgid "&Tablet tool"
-msgstr "Plattverktyg"
+msgid "PCI devices"
+msgstr "PCI-enheter"
 
-msgid "About &Qt"
-msgstr "Om &Qt"
+msgid "&PCI devices…"
+msgstr "PCI-enheter…"
 
-msgid "&MCA devices…"
-msgstr "MCA-enheter…"
+msgid "No PCI devices."
+msgstr "Inga PCI-enheter."
+
+msgid "List of PCI devices:"
+msgstr "Lista på PCI-enheter:"
 
 msgid "Show non-&primary monitors"
 msgstr "Visa icke-primära skärmar"
@@ -2326,9 +2341,6 @@ msgstr "Jag kopierade den"
 
 msgid "86Box Monitor #%1"
 msgstr "86Box skärm #%1"
-
-msgid "No MCA devices."
-msgstr "Inga MCA-enheter."
 
 msgid "MiB"
 msgstr "MiB"

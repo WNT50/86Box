@@ -2263,8 +2263,14 @@ msgstr ""
 "\n"
 "Accesați 86box.net pentru o listă cu alte managere pe care le puteți folosi."
 
+msgid "About &Qt"
+msgstr "Despre &Qt"
+
 msgid "Generate"
 msgstr "Generează"
+
+msgid "&Tablet tool"
+msgstr "&Unealta de tabletă"
 
 msgid "Joystick configuration"
 msgstr "Configurare joystick"
@@ -2281,17 +2287,26 @@ msgstr "%1 (Y axe)"
 msgid "MCA devices"
 msgstr "Dispozitive MCA"
 
+msgid "&MCA devices…"
+msgstr "Dispozitive &MCA…"
+
+msgid "No MCA devices."
+msgstr "Fără niciun dispozitiv MCA."
+
 msgid "List of MCA devices:"
 msgstr "Lista de dispozitive MCA:"
 
-msgid "&Tablet tool"
-msgstr "&Unealta de tabletă"
+msgid "PCI devices"
+msgstr "Dispozitive PCI"
 
-msgid "About &Qt"
-msgstr "Despre &Qt"
+msgid "&PCI devices…"
+msgstr "Dispozitive &PCI…"
 
-msgid "&MCA devices…"
-msgstr "Dispozitive &MCA…"
+msgid "No PCI devices."
+msgstr "Fără niciun dispozitiv PCI."
+
+msgid "List of PCI devices:"
+msgstr "Lista de dispozitive PCI:"
 
 msgid "Show non-&primary monitors"
 msgstr "Afișați monitoarele ne&primare"
@@ -2404,9 +2419,6 @@ msgstr "Am copiat-o"
 
 msgid "86Box Monitor #%1"
 msgstr "Monitor 86Box #%1"
-
-msgid "No MCA devices."
-msgstr "Fără niciun dispozitiv MCA."
 
 msgid "MiB"
 msgstr "MiB"

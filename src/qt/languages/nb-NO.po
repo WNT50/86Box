@@ -2163,8 +2163,14 @@ msgstr "WinBox støttes ikke lenger"
 msgid "Development of the WinBox manager stopped in 2022 due to a lack of maintainers. As we direct our efforts towards making 86Box even better, we have made the decision to no longer support WinBox as a manager.\n\nNo further updates will be provided through WinBox, and you may encounter incorrect behavior should you continue using it with newer versions of 86Box. Any bug reports related to WinBox behavior will be closed as invalid.\n\nGo to 86box.net for a list of other managers you can use."
 msgstr "Utviklingen av WinBox-behandleren ble stoppet i 2022 på grunn av mangel på vedlikeholdere. Siden vi fokuserer på å gjøre 86Box enda bedre, har vi besluttet å ikke lenger støtte WinBox som behandler.\n\nIngen flere oppdateringer vil bli gitt gjennom WinBox, og du kan oppleve feil oppførsel hvis du fortsetter å bruke den med nyere versjoner av 86Box. Feilrapporter relatert til WinBox vil bli lukket som ugyldige.\n\nGå til 86box.net for en liste over andre behandlere du kan bruke."
 
+msgid "About &Qt"
+msgstr "Om &Qt"
+
 msgid "Generate"
 msgstr "Generer"
+
+msgid "&Tablet tool"
+msgstr "&Tegnebrettverktøy"
 
 msgid "Joystick configuration"
 msgstr "Styrespak-konfigurasjon"
@@ -2181,17 +2187,26 @@ msgstr "%1 (Y-akse)"
 msgid "MCA devices"
 msgstr "MCA-enheter"
 
+msgid "&MCA devices…"
+msgstr "&MCA-enheter…"
+
+msgid "No MCA devices."
+msgstr "Ingen MCA-enheter."
+
 msgid "List of MCA devices:"
 msgstr "Liste over MCA-enheter:"
 
-msgid "&Tablet tool"
-msgstr "&Tegnebrettverktøy"
+msgid "PCI devices"
+msgstr "PCI-enheter"
 
-msgid "About &Qt"
-msgstr "Om &Qt"
+msgid "&PCI devices…"
+msgstr "&PCI-enheter…"
 
-msgid "&MCA devices…"
-msgstr "&MCA-enheter…"
+msgid "No PCI devices."
+msgstr "Ingen PCI-enheter."
+
+msgid "List of PCI devices:"
+msgstr "Liste over PCI-enheter:"
 
 msgid "Show non-&primary monitors"
 msgstr "Vis ikke-&primære skjermer"
@@ -2294,9 +2309,6 @@ msgstr "Jeg kopierte den"
 
 msgid "86Box Monitor #%1"
 msgstr "86Box-skjerm #%1"
-
-msgid "No MCA devices."
-msgstr "Ingen MCA-enheter."
 
 msgid "MiB"
 msgstr "MiB"

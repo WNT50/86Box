@@ -2219,8 +2219,14 @@ msgstr ""
 "Μεταβείτε στο 86box.net για την λίστα με τους διαχειριστές μηχανών που "
 "μπορείτε να χρησιμοποιήσετε."
 
+msgid "About &Qt"
+msgstr "Σχετικά με το &Qt"
+
 msgid "Generate"
 msgstr "Δημιουργία"
+
+msgid "&Tablet tool"
+msgstr "Εργαλείο &Tablet"
 
 msgid "Joystick configuration"
 msgstr "Ρύθμιση Joystick"
@@ -2237,17 +2243,26 @@ msgstr "%1 (άξονας Y)"
 msgid "MCA devices"
 msgstr "Συσκευές MCA"
 
+msgid "&MCA devices…"
+msgstr "Συσκευές &MCA…"
+
+msgid "No MCA devices."
+msgstr "Καμία συσκευή MCA."
+
 msgid "List of MCA devices:"
 msgstr "Λίστα συσκευών MCA:"
 
-msgid "&Tablet tool"
-msgstr "Εργαλείο &Tablet"
+msgid "PCI devices"
+msgstr "Συσκευές PCI"
 
-msgid "About &Qt"
-msgstr "Σχετικά με το &Qt"
+msgid "&PCI devices…"
+msgstr "Συσκευές &PCI…"
 
-msgid "&MCA devices…"
-msgstr "Συσκευές &MCA…"
+msgid "No PCI devices."
+msgstr "Καμία συσκευή PCI."
+
+msgid "List of PCI devices:"
+msgstr "Λίστα συσκευών PCI:"
 
 msgid "Show non-&primary monitors"
 msgstr "Εμφάνιση μη-&κύριων οθονών"
@@ -2358,9 +2373,6 @@ msgstr "Αντιγράφηκε"
 
 msgid "86Box Monitor #%1"
 msgstr "Οθόνη 86Box #%1"
-
-msgid "No MCA devices."
-msgstr "Καμία συσκευή MCA."
 
 msgid "MiB"
 msgstr "MiB"

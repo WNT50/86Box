@@ -2249,8 +2249,14 @@ msgstr ""
 "\n"
 "Per un elenco di altri gestori utilizzabili, visitare 86box.net."
 
+msgid "About &Qt"
+msgstr "Informazioni su &Qt"
+
 msgid "Generate"
 msgstr "Genera"
+
+msgid "&Tablet tool"
+msgstr "Strumento tablet"
 
 msgid "Joystick configuration"
 msgstr "Configurazione del joystick"
@@ -2267,17 +2273,26 @@ msgstr "%1 (asse Y)"
 msgid "MCA devices"
 msgstr "Dispositivi MCA"
 
+msgid "&MCA devices…"
+msgstr "Dispositivi MCA…"
+
+msgid "No MCA devices."
+msgstr "Nessun dispositivo MCA."
+
 msgid "List of MCA devices:"
 msgstr "Elenco dei dispositivi MCA:"
 
-msgid "&Tablet tool"
-msgstr "Strumento tablet"
+msgid "PCI devices"
+msgstr "Dispositivi PCI"
 
-msgid "About &Qt"
-msgstr "Informazioni su &Qt"
+msgid "&PCI devices…"
+msgstr "Dispositivi PCI…"
 
-msgid "&MCA devices…"
-msgstr "Dispositivi MCA…"
+msgid "No PCI devices."
+msgstr "Nessun dispositivo PCI."
+
+msgid "List of PCI devices:"
+msgstr "Elenco dei dispositivi PCI:"
 
 msgid "Show non-&primary monitors"
 msgstr "Mostra i monitor non &primari"
@@ -2386,9 +2401,6 @@ msgstr "L'ho copiata"
 
 msgid "86Box Monitor #%1"
 msgstr "Monitor 86Box #%1"
-
-msgid "No MCA devices."
-msgstr "Nessun dispositivo MCA."
 
 msgid "MiB"
 msgstr "MiB"

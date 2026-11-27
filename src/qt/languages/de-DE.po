@@ -2166,8 +2166,14 @@ msgstr "Der WinBox Manager wird nicht mehr unterstützt"
 msgid "Development of the WinBox manager stopped in 2022 due to a lack of maintainers. As we direct our efforts towards making 86Box even better, we have made the decision to no longer support WinBox as a manager.\n\nNo further updates will be provided through WinBox, and you may encounter incorrect behavior should you continue using it with newer versions of 86Box. Any bug reports related to WinBox behavior will be closed as invalid.\n\nGo to 86box.net for a list of other managers you can use."
 msgstr "Die Entwicklung des WinBox-Managers wurde im Jahr 2022 eingestellt, da es an Betreuern mangelte. Da wir unsere Bemühungen darauf richten, 86Box noch besser zu machen, haben wir uns entschlossen, WinBox nicht mehr als Manager zu unterstützen.\n\nEs werden keine weiteren Updates für WinBox zur Verfügung gestellt, und es kann zu fehlerhaftem Verhalten kommen, wenn WinBox weiterhin mit neueren Versionen von 86Box verwendet wird. Alle Fehlerberichte, die sich auf das Verhalten von WinBox beziehen, werden als ungültig geschlossen.\n\nAuf 86box.net ist eine Liste anderer Manager zu finden, die verwendet werden können."
 
+msgid "About &Qt"
+msgstr "Über &Qt"
+
 msgid "Generate"
 msgstr "Erzeugen"
+
+msgid "&Tablet tool"
+msgstr "Tablet-Werkzeug"
 
 msgid "Joystick configuration"
 msgstr "Joystick-Konfiguration"
@@ -2184,17 +2190,26 @@ msgstr "%1 (Y-Achse)"
 msgid "MCA devices"
 msgstr "MCA-Geräte"
 
+msgid "&MCA devices…"
+msgstr "MCA-Geräte…"
+
+msgid "No MCA devices."
+msgstr "Keine MCA-Geräte."
+
 msgid "List of MCA devices:"
 msgstr "Liste die MCA-Geräte:"
 
-msgid "&Tablet tool"
-msgstr "Tablet-Werkzeug"
+msgid "PCI devices"
+msgstr "PCI-Geräte"
 
-msgid "About &Qt"
-msgstr "Über &Qt"
+msgid "&PCI devices…"
+msgstr "PCI-Geräte…"
 
-msgid "&MCA devices…"
-msgstr "MCA-Geräte…"
+msgid "No PCI devices."
+msgstr "Keine PCI-Geräte."
+
+msgid "List of PCI devices:"
+msgstr "Liste die PCI-Geräte:"
 
 msgid "Show non-&primary monitors"
 msgstr "Nicht-primäre Monitore anzeigen"
@@ -2297,9 +2312,6 @@ msgstr "Ich habe es kopiert"
 
 msgid "86Box Monitor #%1"
 msgstr "86Box-Monitor #%1"
-
-msgid "No MCA devices."
-msgstr "Keine MCA-Geräte."
 
 msgid "MiB"
 msgstr "MiB"

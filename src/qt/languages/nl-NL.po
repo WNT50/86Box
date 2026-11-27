@@ -2206,8 +2206,14 @@ msgstr "WinBox wordt niet langer ondersteund"
 msgid "Development of the WinBox manager stopped in 2022 due to a lack of maintainers. As we direct our efforts towards making 86Box even better, we have made the decision to no longer support WinBox as a manager.\n\nNo further updates will be provided through WinBox, and you may encounter incorrect behavior should you continue using it with newer versions of 86Box. Any bug reports related to WinBox behavior will be closed as invalid.\n\nGo to 86box.net for a list of other managers you can use."
 msgstr "De ontwikkeling van de WinBox manager is gestopt in 2022 door een gebrek aan beheerders. Omdat we onze inspanningen richten op het nog beter maken van 86Box, hebben we de beslissing genomen om WinBox niet langer te ondersteunen als een manager.\n\nEr zullen geen verdere updates worden geleverd door WinBox. Je kunt onjuist gedrag tegenkomen als je het blijft gebruiken met nieuwere versies van 86Box. Alle bugrapporten gerelateerd aan het gedrag van WinBox zullen worden gesloten als ongeldig.\n\nGa naar 86box.net voor een lijst van andere managers die je kunt gebruiken."
 
+msgid "About &Qt"
+msgstr "Over &Qt"
+
 msgid "Generate"
 msgstr "Genereren"
+
+msgid "&Tablet tool"
+msgstr "&Tablet-hulpmiddel"
 
 msgid "Joystick configuration"
 msgstr "Joystick configuratie"
@@ -2224,17 +2230,26 @@ msgstr "%1 (Y-as)"
 msgid "MCA devices"
 msgstr "MCA-apparaten"
 
+msgid "&MCA devices…"
+msgstr "MCA-apparaten…"
+
+msgid "No MCA devices."
+msgstr "Geen MCA-apparaten."
+
 msgid "List of MCA devices:"
 msgstr "Lijst van MCA-apparaten:"
 
-msgid "&Tablet tool"
-msgstr "&Tablet-hulpmiddel"
+msgid "PCI devices"
+msgstr "PCI-apparaten"
 
-msgid "About &Qt"
-msgstr "Over &Qt"
+msgid "&PCI devices…"
+msgstr "PCI-apparaten…"
 
-msgid "&MCA devices…"
-msgstr "MCA-apparaten…"
+msgid "No PCI devices."
+msgstr "Geen PCI-apparaten."
+
+msgid "List of PCI devices:"
+msgstr "Lijst van PCI-apparaten:"
 
 msgid "Show non-&primary monitors"
 msgstr "Toon niet-primaire beeldschermen"
@@ -2341,9 +2356,6 @@ msgstr "Ik heb het gekopieerd"
 
 msgid "86Box Monitor #%1"
 msgstr "86Box Monitor #%1"
-
-msgid "No MCA devices."
-msgstr "Geen MCA-apparaten."
 
 msgid "MiB"
 msgstr "MiB"

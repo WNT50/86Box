@@ -2200,8 +2200,14 @@ msgstr "WinBox більше не підтримується"
 msgid "Development of the WinBox manager stopped in 2022 due to a lack of maintainers. As we direct our efforts towards making 86Box even better, we have made the decision to no longer support WinBox as a manager.\n\nNo further updates will be provided through WinBox, and you may encounter incorrect behavior should you continue using it with newer versions of 86Box. Any bug reports related to WinBox behavior will be closed as invalid.\n\nGo to 86box.net for a list of other managers you can use."
 msgstr "Розробку менеджера WinBox було припинено у 2022 році через брак супровідників. Оскільки ми спрямовуємо наші зусилля на те, щоб зробити 86Box ще кращим, ми прийняли рішення більше не підтримувати WinBox як менеджер.\n\nБільше ніяких оновлень не буде надаватися через WinBox, і ви можете зіткнутися з некоректною поведінкою, якщо продовжите використовувати його з новими версіями 86Box. Будь-які повідомлення про помилки, пов'язані з поведінкою WinBox, будуть закриті як недійсні.\n\nПерейдіть на 86box.net для отримання списку інших менеджерів, які ви можете використовувати."
 
+msgid "About &Qt"
+msgstr "Про &Qt"
+
 msgid "Generate"
 msgstr "Згенерувати"
+
+msgid "&Tablet tool"
+msgstr "Інструмент для планшета"
 
 msgid "Joystick configuration"
 msgstr "Конфігурація джойстика"
@@ -2218,17 +2224,26 @@ msgstr "%1 (вісь Y)"
 msgid "MCA devices"
 msgstr "Пристрої MCA"
 
+msgid "&MCA devices…"
+msgstr "Пристрої &MCA…"
+
+msgid "No MCA devices."
+msgstr "Ніяких пристроїв MCA."
+
 msgid "List of MCA devices:"
 msgstr "Список пристроїв MCA:"
 
-msgid "&Tablet tool"
-msgstr "Інструмент для планшета"
+msgid "PCI devices"
+msgstr "Пристрої PCI"
 
-msgid "About &Qt"
-msgstr "Про &Qt"
+msgid "&PCI devices…"
+msgstr "Пристрої &PCI…"
 
-msgid "&MCA devices…"
-msgstr "Пристрої &MCA…"
+msgid "No PCI devices."
+msgstr "Ніяких пристроїв PCI."
+
+msgid "List of PCI devices:"
+msgstr "Список пристроїв PCI:"
 
 msgid "Show non-&primary monitors"
 msgstr "Показати неосновні монітори"
@@ -2331,9 +2346,6 @@ msgstr "Скопійована"
 
 msgid "86Box Monitor #%1"
 msgstr "Монітор 86Box %1"
-
-msgid "No MCA devices."
-msgstr "Ніяких пристроїв MCA."
 
 msgid "MiB"
 msgstr "МіБ"

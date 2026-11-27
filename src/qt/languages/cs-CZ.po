@@ -2260,8 +2260,14 @@ msgstr ""
 "\n"
 "Seznam dalších správců, které můžete používat, naleznete na webu 86box.net."
 
+msgid "About &Qt"
+msgstr "O platformě &Qt"
+
 msgid "Generate"
 msgstr "Generovat"
+
+msgid "&Tablet tool"
+msgstr "Nástroj &tabletu"
 
 msgid "Joystick configuration"
 msgstr "Nastavení joysticku"
@@ -2278,17 +2284,26 @@ msgstr "%1 (osa Y)"
 msgid "MCA devices"
 msgstr "Zařízení MCA"
 
+msgid "&MCA devices…"
+msgstr "Zařízení &MCA…"
+
+msgid "No MCA devices."
+msgstr "Žádná zařízení MCA."
+
 msgid "List of MCA devices:"
 msgstr "Seznam zařízení MCA:"
 
-msgid "&Tablet tool"
-msgstr "Nástroj &tabletu"
+msgid "PCI devices"
+msgstr "Zařízení PCI"
 
-msgid "About &Qt"
-msgstr "O platformě &Qt"
+msgid "&PCI devices…"
+msgstr "Zařízení &PCI…"
 
-msgid "&MCA devices…"
-msgstr "Zařízení &MCA…"
+msgid "No PCI devices."
+msgstr "Žádná zařízení PCI."
+
+msgid "List of PCI devices:"
+msgstr "Seznam zařízení PCI:"
 
 msgid "Show non-&primary monitors"
 msgstr "Zobrazit neprimární moni&tory"
@@ -2400,9 +2415,6 @@ msgstr "Byl zkopírován"
 
 msgid "86Box Monitor #%1"
 msgstr "Monitor 86Box č. %1"
-
-msgid "No MCA devices."
-msgstr "Žádná zařízení MCA."
 
 msgid "MiB"
 msgstr "MiB"

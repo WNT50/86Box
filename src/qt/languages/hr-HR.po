@@ -2171,8 +2171,14 @@ msgstr "WinBox više nije podržan"
 msgid "Development of the WinBox manager stopped in 2022 due to a lack of maintainers. As we direct our efforts towards making 86Box even better, we have made the decision to no longer support WinBox as a manager.\n\nNo further updates will be provided through WinBox, and you may encounter incorrect behavior should you continue using it with newer versions of 86Box. Any bug reports related to WinBox behavior will be closed as invalid.\n\nGo to 86box.net for a list of other managers you can use."
 msgstr "Razvoj menadžera WinBox zaustavio se 2022. zbog nedostatka održavača. Dok usmjeravamo svoje napore, da 86Box bude još bolji, odlučili smo se, da više ne podržavmo Winbox kao menadžer.\n\nDaljnja ažuriranja neće bit više osigurana putem WinBox-a i možete naići na pogrešno ponašanje ako ga nastavite koristiti s novijim verzijama 86Box-a. Sva izvješća o pogreškama u vezi s ponašanjem WinBox-a bit će zatvorena kao nevaljana.\n\nZa popis drugih menadžera koje možete koristiti, idite na 86box.net."
 
+msgid "About &Qt"
+msgstr "O programu &Qt"
+
 msgid "Generate"
 msgstr "Generiraj"
+
+msgid "&Tablet tool"
+msgstr "Alat za tablet"
 
 msgid "Joystick configuration"
 msgstr "Konfiguracija palice za igru"
@@ -2189,17 +2195,26 @@ msgstr "%1 (os Y)"
 msgid "MCA devices"
 msgstr "Uređaji MCA"
 
+msgid "&MCA devices…"
+msgstr "Uređaji MCA…"
+
+msgid "No MCA devices."
+msgstr "Nema uređaja MCA."
+
 msgid "List of MCA devices:"
 msgstr "Spisak uređaja MCA:"
 
-msgid "&Tablet tool"
-msgstr "Alat za tablet"
+msgid "PCI devices"
+msgstr "Uređaji PCI"
 
-msgid "About &Qt"
-msgstr "O programu &Qt"
+msgid "&PCI devices…"
+msgstr "Uređaji PCI…"
 
-msgid "&MCA devices…"
-msgstr "Uređaji MCA…"
+msgid "No PCI devices."
+msgstr "Nema uređaja PCI."
+
+msgid "List of PCI devices:"
+msgstr "Spisak uređaja PCI:"
 
 msgid "Show non-&primary monitors"
 msgstr "Prikaži neprimarne monitore"
@@ -2302,9 +2317,6 @@ msgstr "Kopirao sam ga"
 
 msgid "86Box Monitor #%1"
 msgstr "Monitor 86Box-a %1"
-
-msgid "No MCA devices."
-msgstr "Nema uređaja MCA."
 
 msgid "MiB"
 msgstr "MiB"

@@ -2227,8 +2227,14 @@ msgstr ""
 "Kullanabileceğiniz diğer yöneticilerin bir listesi için 86box.net adresini "
 "ziyaret edin."
 
+msgid "About &Qt"
+msgstr "&Qt hakkında"
+
 msgid "Generate"
 msgstr "Oluştur"
+
+msgid "&Tablet tool"
+msgstr "Tablet aracı"
 
 msgid "Joystick configuration"
 msgstr "Oyun kolu seçenekleri"
@@ -2245,17 +2251,26 @@ msgstr "1 (Y ekseni)"
 msgid "MCA devices"
 msgstr "MCA aygıtları"
 
+msgid "&MCA devices…"
+msgstr "&MCA aygıtları…"
+
+msgid "No MCA devices."
+msgstr "Herhangi bir MCA aygıtı yok."
+
 msgid "List of MCA devices:"
 msgstr "MCA aygıtlarının listesi:"
 
-msgid "&Tablet tool"
-msgstr "Tablet aracı"
+msgid "PCI devices"
+msgstr "PCI aygıtları"
 
-msgid "About &Qt"
-msgstr "&Qt hakkında"
+msgid "&PCI devices…"
+msgstr "&PCI aygıtları…"
 
-msgid "&MCA devices…"
-msgstr "&MCA aygıtları…"
+msgid "No PCI devices."
+msgstr "Herhangi bir PCI aygıtı yok."
+
+msgid "List of PCI devices:"
+msgstr "PCI aygıtlarının listesi:"
 
 msgid "Show non-&primary monitors"
 msgstr "Birincil olmayan monitörleri göster"
@@ -2367,9 +2382,6 @@ msgstr "Kopyalandı"
 
 msgid "86Box Monitor #%1"
 msgstr "86Box Monitör #%1"
-
-msgid "No MCA devices."
-msgstr "Herhangi bir MCA aygıtı yok."
 
 msgid "MiB"
 msgstr "MiB"

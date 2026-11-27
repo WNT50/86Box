@@ -2173,8 +2173,14 @@ msgstr ""
 "\n"
 "请访问 86box.net，查看你可以使用的其他管理器列表。"
 
+msgid "About &Qt"
+msgstr "关于 &Qt"
+
 msgid "Generate"
 msgstr "生成"
+
+msgid "&Tablet tool"
+msgstr "数位板工具(&T)"
 
 msgid "Joystick configuration"
 msgstr "操纵杆配置"
@@ -2191,17 +2197,26 @@ msgstr "%1（Y 轴）"
 msgid "MCA devices"
 msgstr "MCA 设备"
 
+msgid "&MCA devices…"
+msgstr "&MCA 设备…"
+
+msgid "No MCA devices."
+msgstr "无 MCA 设备。"
+
 msgid "List of MCA devices:"
 msgstr "MCA 设备清单："
 
-msgid "&Tablet tool"
-msgstr "数位板工具(&T)"
+msgid "PCI devices"
+msgstr "PCI 设备"
 
-msgid "About &Qt"
-msgstr "关于 &Qt"
+msgid "&PCI devices…"
+msgstr "&PCI 设备…"
 
-msgid "&MCA devices…"
-msgstr "&MCA 设备…"
+msgid "No PCI devices."
+msgstr "无 PCI 设备。"
+
+msgid "List of PCI devices:"
+msgstr "PCI 设备清单："
 
 msgid "Show non-&primary monitors"
 msgstr "显示非主显示器(&P)"
@@ -2307,9 +2322,6 @@ msgstr "我已复制这台机器"
 
 msgid "86Box Monitor #%1"
 msgstr "86Box 显示器 #%1"
-
-msgid "No MCA devices."
-msgstr "无 MCA 设备。"
 
 msgid "MiB"
 msgstr "MiB"

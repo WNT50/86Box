@@ -2162,8 +2162,14 @@ msgstr "WinBox không còn được hỗ trợ"
 msgid "Development of the WinBox manager stopped in 2022 due to a lack of maintainers. As we direct our efforts towards making 86Box even better, we have made the decision to no longer support WinBox as a manager.\n\nNo further updates will be provided through WinBox, and you may encounter incorrect behavior should you continue using it with newer versions of 86Box. Any bug reports related to WinBox behavior will be closed as invalid.\n\nGo to 86box.net for a list of other managers you can use."
 msgstr "Trình quản lý phiên WinBox đã bị dừng phát triển năm 2022 do thiếu nhân sự duy trì. Vì những quyết định để cho 86Box trở nên tốt hơn, chúng tôi đã không còn hỗ trợ trình quản lý WinBox.\n\n Sẽ không có bản cập nhật mới cho WinBox nữa, và nếu bạn tiếp tục sử dụng với các bản 86Box mới hơn có thể gặp lỗi. Bất kì các bản bug report liên quan đến lỗi của WinBox sẽ bị coi là không hợp lệ và bị đóng.\n\nTruy cập 86Box.net để tìm qua các trình quản lý phiên/manager khác cho phù hợp."
 
+msgid "About &Qt"
+msgstr "Về &qt"
+
 msgid "Generate"
 msgstr "Tạo"
+
+msgid "&Tablet tool"
+msgstr "Công cụ bảng nhập liệu"
 
 msgid "Joystick configuration"
 msgstr "Cấu hình cần điều khiển"
@@ -2180,17 +2186,26 @@ msgstr "%1 (trục y)"
 msgid "MCA devices"
 msgstr "Thiết bị MCA"
 
+msgid "&MCA devices…"
+msgstr "Thiết bị MCA…"
+
+msgid "No MCA devices."
+msgstr "Không có thiết bị MCA."
+
 msgid "List of MCA devices:"
 msgstr "Danh sách các thiết bị MCA:"
 
-msgid "&Tablet tool"
-msgstr "Công cụ bảng nhập liệu"
+msgid "PCI devices"
+msgstr "Thiết bị PCI"
 
-msgid "About &Qt"
-msgstr "Về &qt"
+msgid "&PCI devices…"
+msgstr "Thiết bị PCI…"
 
-msgid "&MCA devices…"
-msgstr "Thiết bị MCA…"
+msgid "No PCI devices."
+msgstr "Không có thiết bị PCI."
+
+msgid "List of PCI devices:"
+msgstr "Danh sách các thiết bị PCI:"
 
 msgid "Show non-&primary monitors"
 msgstr "Hiển thị các màn hình phụ"
@@ -2293,9 +2308,6 @@ msgstr "Tôi đã sao chép nó"
 
 msgid "86Box Monitor #%1"
 msgstr "Màn hình 86Box #%1"
-
-msgid "No MCA devices."
-msgstr "Không có thiết bị MCA."
 
 msgid "MiB"
 msgstr "MiB"
