@@ -149,6 +149,7 @@ private slots:
     void showMessage_(int flags, const QString &header, const QString &message, bool richText, std::atomic_bool *done = nullptr);
 
     void on_actionMCA_devices_triggered();
+    void on_actionPCI_devices_triggered();
     void on_actionMemory_viewer_triggered();
 
 protected:

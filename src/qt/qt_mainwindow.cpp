@@ -31,6 +31,7 @@
 #include "qt_models_common.hpp"
 #include "qt_preferences.hpp"
 #include "qt_mcadevicelist.hpp"
+#include "qt_pcidevicelist.hpp"
 #include "qt_memoryviewer.hpp"
 
 #include <QPointer>
@@ -389,6 +390,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(this, &MainWindow::hardResetCompleted, this, [this]() {
         refreshDisplayRatioActions();
         ui->actionMCA_devices->setVisible(machine_has_bus(machine, MACHINE_BUS_MCA));
+        ui->actionPCI_devices->setVisible(machine_has_bus(machine, MACHINE_BUS_PCI) != 0);
         ui_update_force_interpreter();
         updateMouseStrings();
         num_label->setVisible(machine_has_bus(machine, MACHINE_BUS_PS2_PORTS | MACHINE_BUS_AT_KBD));
@@ -1934,6 +1936,7 @@ MainWindow::refreshMediaMenu()
     status->setPcCardMenu(pcCardMenu);
     status->refresh(ui->statusbar);
     ui->actionMCA_devices->setVisible(machine_has_bus(machine, MACHINE_BUS_MCA));
+    ui->actionPCI_devices->setVisible(machine_has_bus(machine, MACHINE_BUS_PCI) != 0);
     updatePowerOffAction();
     ui_update_force_interpreter();
 
@@ -2998,6 +3001,13 @@ void
 MainWindow::on_actionMCA_devices_triggered()
 {
     if (const auto dlg = new MCADeviceList(this))
+        dlg->exec();
+}
+
+void
+MainWindow::on_actionPCI_devices_triggered()
+{
+    if (const auto dlg = new PCIDeviceList(this))
         dlg->exec();
 }
 

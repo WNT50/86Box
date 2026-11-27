@@ -41,6 +41,9 @@ typedef struct pci_card_t {
     uint8_t     bus;
     uint8_t     id;
     uint8_t     type;
+    /* 1-based physical slot number of an add-in slot, in the order the machine
+       registers them; 0 for an on-board device, which is not a slot. */
+    uint8_t     slot_number;
     uint8_t     irq_routing[PCI_INT_PINS_NUM];
 
     void *      priv;
@@ -55,6 +58,10 @@ typedef struct pci_card_desc_t {
     uint8_t     (*read)(int func, int addr, int len, void *priv);
     uint8_t     *slot;
 } pci_card_desc_t;
+
+
+/* Numbering of the add-in slots, in the order the machine registers them. */
+static uint8_t last_slot_number;
 
 typedef struct pci_mirq_t {
     uint8_t     enabled;
@@ -1236,6 +1243,7 @@ pci_register_bus_slot(int bus, int card, int type, int inta, int intb, int intc,
     dev->read                           = NULL;
     dev->write                          = NULL;
     dev->priv                           = NULL;
+    dev->slot_number = (type == PCI_CARD_NORMAL) ? ++last_slot_number : 0;
     pci_card_to_slot_mapping[bus][card] = last_pci_card;
 
     pci_log("pci_register_slot(): pci_cards[%i].bus = %02X; .id = %02X\n", last_pci_card, bus, card);
@@ -1378,6 +1386,10 @@ pci_register_card(int pci_card)
                 *(dev->slot) = i;
 
                 ret = i;
+            } else if ((dev->type & PCI_ADD_MASK) == PCI_CARD_NORMAL) {
+                /* A card the user selected has nowhere to go: say so instead of
+                   silently dropping it. */
+                pci_log("pci_register_card(): no free slot for a PCI card, dropping it\n");
             }
         }
 
@@ -1385,6 +1397,71 @@ pci_register_card(int pci_card)
     }
 
     return ret;
+}
+
+uint8_t
+pci_get_slot_number(int index)
+{
+    if ((index < 0) || (index >= last_pci_card))
+        return 0;
+
+    return pci_cards[index].slot_number;
+}
+
+const char *
+pci_get_slot_device_name(int index)
+{
+    if ((index < 0) || (index >= last_pci_card))
+        return NULL;
+
+    if ((pci_cards[index].read == NULL) && (pci_cards[index].write == NULL))
+        return NULL;
+
+    return device_get_name_from_priv(pci_cards[index].priv);
+}
+
+int
+pci_get_nr_slots(void)
+{
+    return last_pci_card;
+}
+
+/* Returns 0 for an empty slot, 1 for an occupied one. */
+int
+pci_get_slot_info(int index, uint8_t *bus, uint8_t *dev, uint8_t *type, uint8_t *irq_routing,
+                  uint16_t *vendor, uint16_t *device)
+{
+    const pci_card_t *card;
+
+    if ((index < 0) || (index >= last_pci_card))
+        return 0;
+
+    card = &pci_cards[index];
+
+    if ((card->read == NULL) && (card->write == NULL))
+        return 0;
+
+    if (bus != NULL)
+        *bus = card->bus;
+    if (dev != NULL)
+        *dev = card->id;
+    if (type != NULL)
+        *type = card->type;
+    if (irq_routing != NULL) {
+        for (uint8_t i = 0; i < PCI_INT_PINS_NUM; i++)
+            irq_routing[i] = card->irq_routing[i];
+    }
+
+    *vendor = 0xffff;
+    *device = 0xffff;
+    if (card->read != NULL) {
+        *vendor = card->read(0, 0x00, 1, card->priv) |
+                  (card->read(0, 0x01, 1, card->priv) << 8);
+        *device = card->read(0, 0x02, 1, card->priv) |
+                  (card->read(0, 0x03, 1, card->priv) << 8);
+    }
+
+    return 1;
 }
 
 /* Add an instance of the PCI bridge. */
@@ -1461,6 +1538,7 @@ pci_slots_clear(void)
     normal_pci_cards                     = 0;
 
     next_normal_pci_card                 = 0;
+    last_slot_number                     = 0;
 
     for (i = 0; i < PCI_CARDS_NUM; i++)
         pci_clear_slot(i);

@@ -671,6 +671,19 @@ device_find_first_priv(uint32_t match_flags)
     return ret;
 }
 
+/* The name of the device instance that owns this private data, if any: the
+   callers that bind a device to a bus only carry its private pointer. */
+const char *
+device_get_name_from_priv(void *priv)
+{
+    for (uint16_t c = 0; c < DEVICE_MAX; c++) {
+        if ((device_priv[c] == priv) && (devices[c] != NULL) && (devices[c]->name != NULL))
+            return devices[c]->name;
+    }
+
+    return NULL;
+}
+
 void *
 device_get_priv(const device_t *dev)
 {
