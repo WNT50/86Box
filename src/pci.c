@@ -56,6 +56,9 @@ typedef struct pci_card_desc_t {
     uint8_t     *slot;
 } pci_card_desc_t;
 
+/* Cards the user asked for that found no free slot. */
+static int pci_dropped_cards;
+
 typedef struct pci_mirq_t {
     uint8_t     enabled;
     uint8_t     irq_line;
@@ -1378,6 +1381,11 @@ pci_register_card(int pci_card)
                 *(dev->slot) = i;
 
                 ret = i;
+            } else if ((dev->type & PCI_ADD_MASK) == PCI_CARD_NORMAL) {
+                /* A card the user selected has nowhere to go: say so instead of
+                   silently dropping it. */
+                pci_log("pci_register_card(): no free slot for a PCI card, dropping it\n");
+                pci_dropped_cards++;
             }
         }
 
@@ -1385,6 +1393,56 @@ pci_register_card(int pci_card)
     }
 
     return ret;
+}
+
+int
+pci_get_dropped_cards(void)
+{
+    return pci_dropped_cards;
+}
+
+int
+pci_get_nr_slots(void)
+{
+    return last_pci_card;
+}
+
+/* Returns 0 for an empty slot, 1 for an occupied one. */
+int
+pci_get_slot_info(int index, uint8_t *bus, uint8_t *dev, uint8_t *type, uint8_t *irq_routing,
+                  uint16_t *vendor, uint16_t *device)
+{
+    const pci_card_t *card;
+
+    if ((index < 0) || (index >= last_pci_card))
+        return 0;
+
+    card = &pci_cards[index];
+
+    if ((card->read == NULL) && (card->write == NULL))
+        return 0;
+
+    if (bus != NULL)
+        *bus = card->bus;
+    if (dev != NULL)
+        *dev = card->id;
+    if (type != NULL)
+        *type = card->type;
+    if (irq_routing != NULL) {
+        for (uint8_t i = 0; i < PCI_INT_PINS_NUM; i++)
+            irq_routing[i] = card->irq_routing[i];
+    }
+
+    *vendor = 0xffff;
+    *device = 0xffff;
+    if (card->read != NULL) {
+        *vendor = card->read(0, 0x00, 1, card->priv) |
+                  (card->read(0, 0x01, 1, card->priv) << 8);
+        *device = card->read(0, 0x02, 1, card->priv) |
+                  (card->read(0, 0x03, 1, card->priv) << 8);
+    }
+
+    return 1;
 }
 
 /* Add an instance of the PCI bridge. */
@@ -1417,6 +1475,7 @@ pci_register_cards(void)
 #endif
 
     next_normal_pci_card = 0;
+    pci_dropped_cards    = 0;
 
     if (next_pci_card > 0) {
         for (uint8_t i = 0; i < next_pci_card; i++) {

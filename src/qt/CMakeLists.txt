@@ -277,6 +277,9 @@ add_library(ui STATIC
     qt_mcadevicelist.hpp
     qt_mcadevicelist.cpp
     qt_mcadevicelist.ui
+    qt_pcidevicelist.hpp
+    qt_pcidevicelist.cpp
+    qt_pcidevicelist.ui
 
     qt_memoryviewer.hpp
     qt_memoryviewer.cpp

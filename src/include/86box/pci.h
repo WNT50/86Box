@@ -329,6 +329,13 @@ extern void        pci_add_bridge(uint8_t agp, uint8_t (*read)(int func, int add
 /* Register the cards that have been added into slots. */
 extern void        pci_register_cards(void);
 
+/* Enumerate the registered slots for the UI: a slot is reported when a card
+   has been bound to it, together with its vendor and device IDs. */
+extern int         pci_get_nr_slots(void);
+extern int         pci_get_dropped_cards(void);
+extern int         pci_get_slot_info(int index, uint8_t *bus, uint8_t *dev, uint8_t *type,
+                                     uint8_t *irq_routing, uint16_t *vendor, uint16_t *device);
+
 extern void        pci_init(int flags);
 
 /* PCI bridge stuff. */

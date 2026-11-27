@@ -152,6 +152,7 @@
     <addaction name="actionEnd_trace"/>
     <addaction name="separator"/>
     <addaction name="actionMCA_devices"/>
+    <addaction name="actionPCI_devices"/>
     <addaction name="actionMemory_viewer"/>
     <addaction name="separator"/>
     <addaction name="actionOpen_printer_tray"/>
@@ -904,6 +905,11 @@
   <action name="actionMCA_devices">
    <property name="text">
     <string>&amp;MCA devices…</string>
+   </property>
+  </action>
+  <action name="actionPCI_devices">
+   <property name="text">
+    <string>&amp;PCI devices…</string>
    </property>
   </action>
   <action name="actionMemory_viewer">
