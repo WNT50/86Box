@@ -123,10 +123,12 @@
 #define WIN_SYQUEST_WRITE_PROTECT      0xc0 /* SyQuest; CFA ERASE elsewhere */
 #define WIN_INVALID                    0xff
 
+#define FEATURE_ENABLE_WRITE_CACHE     0x02
 #define FEATURE_SET_TRANSFER_MODE      0x03
 #define FEATURE_ENABLE_IRQ_OVERLAPPED  0x5d
 #define FEATURE_ENABLE_IRQ_SERVICE     0x5e
 #define FEATURE_DISABLE_REVERT         0x66
+#define FEATURE_DISABLE_WRITE_CACHE    0x82
 #define FEATURE_ENABLE_REVERT          0xcc
 #define FEATURE_DISABLE_IRQ_OVERLAPPED 0xdd
 #define FEATURE_DISABLE_IRQ_SERVICE    0xde
@@ -1354,6 +1356,13 @@ ide_set_features(ide_t *ide)
                     return 0;
             }
             break;
+
+        case FEATURE_ENABLE_WRITE_CACHE:
+        case FEATURE_DISABLE_WRITE_CACHE:
+            /* The disk images are written through, so there is no cache to toggle. */
+            ide_log("IDE %02X: Write cache %s\n", ide->channel,
+                    (features == FEATURE_ENABLE_WRITE_CACHE) ? "enabled" : "disabled");
+            return 1;
 
         case FEATURE_ENABLE_IRQ_OVERLAPPED:
         case FEATURE_ENABLE_IRQ_SERVICE:
