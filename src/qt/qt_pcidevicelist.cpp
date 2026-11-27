@@ -1,6 +1,8 @@
 #include "qt_pcidevicelist.hpp"
 #include "ui_qt_pcidevicelist.h"
 
+#include <QFrame>
+
 extern "C" {
 #include <86box/86box.h>
 #include <86box/video.h>
@@ -95,7 +97,7 @@ PCIDeviceList::PCIDeviceList(QWidget *parent)
         /* One line per wired interrupt pin, each repeating the card it belongs
            to; a pin the slot does not wire up is left out entirely. A card with
            no wired pin at all keeps a single line of its own. Cards are
-           separated by a divider so the groups stay readable. */
+           separated by a horizontal rule so the groups stay readable. */
         QStringList lines;
 
         for (int pin = 0; pin < PCI_INT_PINS_NUM; pin++) {
@@ -128,9 +130,15 @@ PCIDeviceList::PCIDeviceList(QWidget *parent)
             lines.append(card);
 
         if (shown > 0) {
-            auto *separator = new QListWidgetItem(QStringLiteral("────────────────────────"));
+            auto *line = new QFrame;
+            line->setFrameShape(QFrame::HLine);
+            line->setFrameShadow(QFrame::Sunken);
+
+            auto *separator = new QListWidgetItem;
+            separator->setSizeHint(QSize(0, line->sizeHint().height()));
             separator->setFlags(Qt::NoItemFlags);
             ui->listWidget->addItem(separator);
+            ui->listWidget->setItemWidget(separator, line);
         }
 
         for (const QString &line : lines)
