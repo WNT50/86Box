@@ -63,6 +63,7 @@ typedef struct pci_card_desc_t {
 /* Numbering of the add-in slots, in the order the machine registers them. */
 static uint8_t last_slot_number;
 
+
 typedef struct pci_mirq_t {
     uint8_t     enabled;
     uint8_t     irq_line;
@@ -1387,9 +1388,12 @@ pci_register_card(int pci_card)
 
                 ret = i;
             } else if ((dev->type & PCI_ADD_MASK) == PCI_CARD_NORMAL) {
-                /* A card the user selected has nowhere to go: say so instead of
-                   silently dropping it. */
-                pci_log("pci_register_card(): no free slot for a PCI card, dropping it\n");
+                /* A card the user selected has nowhere to go. Name it, so the
+                   user knows which card to remove from the settings. */
+                const char *name = device_get_name_from_priv(dev->priv);
+
+                warning("PCI: no free add-in slot for %s; the card was not added.\n",
+                        name ? name : "a selected card");
             }
         }
 
