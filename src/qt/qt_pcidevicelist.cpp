@@ -83,13 +83,14 @@ PCIDeviceList::PCIDeviceList(QWidget *parent)
 
         /* Add-in slots are numbered in the order the machine registers them,
            which is the order they are printed on the board; on-board devices
-           carry no number. */
+           carry no number and are marked as such. */
         const QString card = slot_number ?
                                  QString::asprintf("Slot %u: Bus %u, device %u, %04X:%04X  (%s)",
                                                    slot_number, bus, dev, vendor, device,
                                                    kind.toUtf8().constData()) :
-                                 QString::asprintf("Bus %u, device %u, %04X:%04X  (%s)", bus, dev,
-                                                   vendor, device, kind.toUtf8().constData());
+                                 QString::asprintf("Onboard: Bus %u, device %u, %04X:%04X  (%s)",
+                                                   bus, dev, vendor, device,
+                                                   kind.toUtf8().constData());
 
         /* One line per wired interrupt pin, each repeating the card it belongs
            to; a pin the slot does not wire up is left out entirely. A card with
