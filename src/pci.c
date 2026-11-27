@@ -1401,6 +1401,18 @@ pci_get_dropped_cards(void)
     return pci_dropped_cards;
 }
 
+const char *
+pci_get_slot_device_name(int index)
+{
+    if ((index < 0) || (index >= last_pci_card))
+        return NULL;
+
+    if ((pci_cards[index].read == NULL) && (pci_cards[index].write == NULL))
+        return NULL;
+
+    return device_get_name_from_priv(pci_cards[index].priv);
+}
+
 int
 pci_get_nr_slots(void)
 {

@@ -76,12 +76,17 @@ PCIDeviceList::PCIDeviceList(QWidget *parent)
 
         /* The device number is what the guest sees at 0xCF8; bus + dev identify
            the card unambiguously even when two slots share a device number. */
-        ui->listWidget->addItem(QString::asprintf("Bus %u, device %u — %04X:%04X  (%s)",
-                                                 bus, dev, vendor, device,
-                                                 pci_type_name(type).toUtf8().constData()));
+        /* The device may know its own name; fall back to the slot type. */
+        const char   *device_name = pci_get_slot_device_name(i);
+        const QString kind = device_name ? QString::fromUtf8(device_name) : pci_type_name(type);
+        const QString card = QString::asprintf("Bus %u, device %u, %04X:%04X  (%s)", bus, dev,
+                                               vendor, device, kind.toUtf8().constData());
 
-        /* Early chipsets leave the PIRQ lines unrouted until the BIOS or the OS
-           programs them, so show where each of the card's INTx lines goes. */
+        /* One line per wired interrupt pin, each repeating the card it belongs
+           to; a pin the slot does not wire up is left out entirely. A card with
+           no wired pin at all keeps a single line of its own. */
+        bool any = false;
+
         for (int pin = 0; pin < PCI_INT_PINS_NUM; pin++) {
             const uint8_t routing = irq_routing[pin];
             QString       target;
@@ -104,10 +109,14 @@ PCIDeviceList::PCIDeviceList(QWidget *parent)
                 continue;
             }
 
-            ui->listWidget->addItem(QStringLiteral("        INT%1 → %2")
-                                        .arg(QChar('A' + pin))
-                                        .arg(target));
+            ui->listWidget->addItem(
+                QStringLiteral("%1    INT%2 → %3").arg(card).arg(QChar('A' + pin)).arg(target));
+            any = true;
         }
+
+        if (!any)
+            ui->listWidget->addItem(card);
+
         shown++;
     }
 
