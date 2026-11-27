@@ -41,6 +41,9 @@ typedef struct pci_card_t {
     uint8_t     bus;
     uint8_t     id;
     uint8_t     type;
+    /* 1-based physical slot number of an add-in slot, in the order the machine
+       registers them; 0 for an on-board device, which is not a slot. */
+    uint8_t     slot_number;
     uint8_t     irq_routing[PCI_INT_PINS_NUM];
 
     void *      priv;
@@ -58,6 +61,9 @@ typedef struct pci_card_desc_t {
 
 /* Cards the user asked for that found no free slot. */
 static int pci_dropped_cards;
+
+/* Numbering of the add-in slots, in the order the machine registers them. */
+static uint8_t last_slot_number;
 
 typedef struct pci_mirq_t {
     uint8_t     enabled;
@@ -1239,6 +1245,7 @@ pci_register_bus_slot(int bus, int card, int type, int inta, int intb, int intc,
     dev->read                           = NULL;
     dev->write                          = NULL;
     dev->priv                           = NULL;
+    dev->slot_number = (type == PCI_CARD_NORMAL) ? ++last_slot_number : 0;
     pci_card_to_slot_mapping[bus][card] = last_pci_card;
 
     pci_log("pci_register_slot(): pci_cards[%i].bus = %02X; .id = %02X\n", last_pci_card, bus, card);
@@ -1401,6 +1408,15 @@ pci_get_dropped_cards(void)
     return pci_dropped_cards;
 }
 
+uint8_t
+pci_get_slot_number(int index)
+{
+    if ((index < 0) || (index >= last_pci_card))
+        return 0;
+
+    return pci_cards[index].slot_number;
+}
+
 const char *
 pci_get_slot_device_name(int index)
 {
@@ -1532,6 +1548,7 @@ pci_slots_clear(void)
     normal_pci_cards                     = 0;
 
     next_normal_pci_card                 = 0;
+    last_slot_number                     = 0;
 
     for (i = 0; i < PCI_CARDS_NUM; i++)
         pci_clear_slot(i);
